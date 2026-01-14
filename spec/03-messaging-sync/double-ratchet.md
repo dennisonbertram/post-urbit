@@ -294,8 +294,11 @@ Total: 40 bytes
 
 **Wire format in PUSE envelope:**
 ```
-header_extension = type (1 byte: 0x01) || length (2 bytes: 40) || ratchet_header (40 bytes)
+header_extension = type (1 byte: 0x01) || ratchet_header (40 bytes)
+Total: 41 bytes
 ```
+
+**Note:** The PUSE envelope already includes a global `Header Extension Length` field (2 bytes) that specifies the total extension size. Individual extensions do NOT include their own length field. See `secure-envelope.md` for the complete envelope format.
 
 **IMPORTANT:** The ratchet header is included in the PUSE AAD (authenticated data) but is NOT encrypted. This allows the receiver to:
 1. Parse the ratchet header from PUSE header extension
