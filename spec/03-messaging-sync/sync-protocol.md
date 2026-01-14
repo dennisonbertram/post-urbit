@@ -285,20 +285,88 @@ interface AccessControl {
 | Change permissions | admin |
 | Delete document | owner |
 
-### Encrypted Sync
+## Security Model
 
-For private documents:
+### Sync vs Messaging Security
 
-1. Owner generates document key
-2. Document key encrypted for each authorized reader
-3. Operations encrypted with document key
-4. Key rotation on permission changes
+The Sync Protocol uses a **different security model** than the Messaging Protocol:
+
+| Layer | Security Mechanism |
+|-------|-------------------|
+| Messaging (stream 0x03) | PUSE envelope (E2E encrypted, per-message keys) |
+| Sync (stream 0x04) | Transport auth + operation signatures + optional document encryption |
+
+**Rationale**: Sync operations are small, frequent, and need to be mergeable. Wrapping each in PUSE adds overhead without benefit since sync peers are already authenticated via transport-layer handshake.
+
+### Security Properties
+
+| Property | Provided By |
+|----------|------------|
+| Transport confidentiality | QUIC TLS 1.3 |
+| Transport integrity | QUIC TLS 1.3 |
+| Peer authentication | Transport handshake (see `peer-handshake.md`) |
+| Operation authenticity | Ed25519 signature in `SyncOperation.signature` |
+| Operation integrity | Ed25519 signature |
+| Document confidentiality (private) | Document key encryption (see below) |
+
+### Operation Signature
+
+Every `SyncOperation` MUST be signed by the origin identity:
+
+```
+signature = Ed25519Sign(
+  key = origin_signing_key,
+  message = operation_id || document_id || timestamp_bytes || operation_bytes
+)
+```
+
+Receivers MUST verify:
+1. Signature is valid for claimed origin
+2. Origin has write permission for the document
+3. Operation is causally consistent (dependencies satisfied)
+
+### Encrypted Sync (Private Documents)
+
+For documents requiring E2E confidentiality:
+
+1. Owner generates 32-byte document key
+2. Document key encrypted for each authorized reader via their X25519 key
+3. Operations (the `operation` field) encrypted with document key using ChaCha20-Poly1305
+4. Key shares distributed via 1:1 messaging (PUSE envelope)
+5. Key rotation required on permission changes
 
 ```typescript
 interface EncryptedDocument {
   id: DocumentId;
-  encrypted_metadata: Uint8Array;  // Encrypted with doc key
-  key_shares: Map<IdentityIdentifier, Uint8Array>;  // Doc key encrypted for each reader
+  encrypted_metadata: Uint8Array;  // ChaCha20-Poly1305(doc_key, nonce, metadata_json)
+  key_shares: Map<IdentityIdentifier, Uint8Array>;  // X25519 encrypted doc_key per reader
+}
+
+interface EncryptedOperation {
+  // Wrapper for SyncOperation when document is encrypted
+  id: OperationId;                 // Same calculation, over encrypted_operation
+  document_id: DocumentId;
+  origin: IdentityIdentifier;
+  timestamp: HybridLogicalClock;
+  encrypted_operation: Uint8Array; // ChaCha20-Poly1305(doc_key, nonce, operation_bytes)
+  nonce: Uint8Array;               // 12 bytes
+  signature: Signature;            // Over id || document_id || timestamp || encrypted_operation
+}
+```
+
+### Key Share Distribution
+
+Document keys are shared via the 1:1 messaging layer (PUSE):
+
+```json
+{
+  "type": "sync_key_share",
+  "content": {
+    "document_id": "<doc-id>",
+    "encrypted_key": "<base64-x25519-encrypted-doc-key>",
+    "key_version": 1,
+    "permissions": "reader|writer|admin"
+  }
 }
 ```
 

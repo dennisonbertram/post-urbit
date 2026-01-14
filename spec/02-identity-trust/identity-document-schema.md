@@ -77,13 +77,25 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
   "endpoints": [
     {
       "type": "direct",
-      "address": "<host:port>",
-      "priority": <uint8>
+      "host": "<hostname-ipv4-or-ipv6>",
+      "port": 4433,
+      "priority": 10,
+      "transport": "quic"
     },
     {
       "type": "relay",
-      "address": "<relay-url>",
-      "priority": <uint8>
+      "host": "relay.example.com",
+      "port": 4433,
+      "priority": 20,
+      "transport": "quic",
+      "relay_id": "<relay-identity-id>"
+    },
+    {
+      "type": "mailbox",
+      "host": "mailbox.example.com",
+      "port": 443,
+      "priority": 30,
+      "transport": "https"
     }
   ],
   "recovery": {
@@ -258,6 +270,90 @@ When an identity is recovered without access to the previous signing key, the do
 
 **Document with recovery proof**: `signatures.previous` is null; `recovery_proof` substitutes for key-continuity proof.
 
+## Device Identifiers (DID)
+
+An identity may be active on multiple devices simultaneously. Each device is identified by a **Device Identifier (DID)**.
+
+### DID Derivation
+
+```
+DID = Base32Lower(SHA256(device_signing_public_key_raw)[0:20])
+```
+
+Same encoding rules as IID: 32-character Base32 lowercase string.
+
+### Device Document
+
+Each device publishes a Device Document, signed by the identity:
+
+```json
+{
+  "version": 1,
+  "did": "<base32-device-identifier>",
+  "iid": "<base32-identity-identifier>",
+  "device_name": "<optional-friendly-name>",
+  "device_signing_key": "<base64-raw-ed25519-public-key-32-bytes>",
+  "device_transport_key": "<base64-raw-x25519-public-key-32-bytes>",
+  "created_at": "<RFC3339-timestamp>",
+  "expires_at": "<RFC3339-timestamp-optional>",
+  "capabilities": ["messaging", "sync", "relay"],
+  "signature_by_identity": "<base64-signature>"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `did` | string | Device identifier (derived from device_signing_key) |
+| `iid` | string | Parent identity identifier |
+| `device_name` | string? | Optional friendly name ("iPhone", "Laptop") |
+| `device_signing_key` | string | Ed25519 public key for this device |
+| `device_transport_key` | string | X25519 public key for transport-level encryption |
+| `created_at` | timestamp | When this device was authorized |
+| `expires_at` | timestamp? | Optional expiration (for temporary devices) |
+| `capabilities` | string[] | What this device can do |
+| `signature_by_identity` | string | Ed25519 signature by identity's current signing key |
+
+### Device Document Verification
+
+1. Verify `did == Base32Lower(SHA256(device_signing_key)[0:20])`
+2. Look up identity document for `iid`
+3. Verify `signature_by_identity` using identity's current signing key
+4. Check `expires_at` if present
+
+### Multi-Device Implications
+
+| Component | Without DID | With DID |
+|-----------|-------------|----------|
+| Transport connection | Per (peer_iid) | Per (peer_iid, peer_did) |
+| Ratchet session | Per peer IID | Per (peer_iid, peer_did) |
+| Group sender keys | Distributed to IIDs | Distributed to (iid, did) pairs |
+| Connection dedup | Lower IID initiates | Lower (iid, did) initiates |
+
+### Device Registration
+
+Devices are NOT listed in the main Identity Document (to keep it compact). Instead:
+
+1. Device Document is stored in DHT: key = `"device:" + did`
+2. Identity's device list is discovered via DHT query: prefix = `"devices-for:" + iid`
+3. Or devices announce themselves to peers directly via 1:1 messaging
+
+### Device Revocation
+
+To revoke a device, publish a signed revocation notice:
+
+```json
+{
+  "type": "device_revocation",
+  "did": "<device-to-revoke>",
+  "iid": "<identity-identifier>",
+  "revoked_at": "<RFC3339-timestamp>",
+  "reason": "lost|stolen|compromised|decommissioned",
+  "signature_by_identity": "<base64-signature>"
+}
+```
+
+Peers MUST check for revocation before accepting connections from a device.
+
 ## Canonical Serialization
 
 For signing, the document MUST be serialized canonically:
@@ -428,7 +524,7 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
     },
     "encryption": {
       "current": "R4tK2mN8pQ6sL1wF3vX5yZ7aB9cD0eG2hJ4kM6nP8r",
-      "previous": null
+      "previous": []
     }
   },
   "endpoints": [
@@ -436,7 +532,8 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
       "type": "direct",
       "host": "192.168.1.100",
       "port": 4433,
-      "priority": 0
+      "priority": 10,
+      "transport": "quic"
     }
   ],
   "recovery": {
@@ -476,7 +573,14 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
     },
     "encryption": {
       "current": "aB3cD5eF7gH9iJ1kL3mN5oP7qR9sT1uV3wX5yZ7aB9c",
-      "previous": "R4tK2mN8pQ6sL1wF3vX5yZ7aB9cD0eG2hJ4kM6nP8r"
+      "previous": [
+        {
+          "key": "R4tK2mN8pQ6sL1wF3vX5yZ7aB9cD0eG2hJ4kM6nP8r",
+          "valid_from": "0",
+          "valid_until": "1",
+          "expires_at": "2025-03-15T08:30:00Z"
+        }
+      ]
     }
   },
   "endpoints": [
@@ -484,7 +588,8 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
       "type": "direct",
       "host": "192.168.1.100",
       "port": 4433,
-      "priority": 0
+      "priority": 10,
+      "transport": "quic"
     }
   ],
   "recovery": {

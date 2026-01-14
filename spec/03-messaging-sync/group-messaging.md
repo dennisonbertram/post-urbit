@@ -73,7 +73,8 @@ Each group member generates a "sender key" - a symmetric key used to encrypt all
 
 ```typescript
 interface SenderKey {
-  keyId: string;           // Unique identifier
+  keyId: string;           // Unique identifier (16 bytes, base64)
+  senderIid: string;       // IID of the sender (for KDF domain separation)
   chainKey: Uint8Array;    // 32-byte chain key
   signatureKey: KeyPair;   // Ed25519 for message signing
   createdAt: Timestamp;
@@ -83,22 +84,25 @@ interface SenderKey {
 
 ### Sender Key Chain
 
-Like the double ratchet sending chain, sender key chains forward for each message:
+Like the double ratchet sending chain, sender key chains forward for each message using `kdf_sender_key()` from `double-ratchet.md`:
 
 ```
-def sender_key_encrypt(sender_key: SenderKey, plaintext: bytes) -> bytes:
-    # Derive message key
-    message_key = HKDF(sender_key.chain_key, b"message", length=32)
-
-    # Advance chain
-    sender_key.chain_key = HKDF(sender_key.chain_key, b"chain", length=32)
+def sender_key_encrypt(sender_key: SenderKey, group_id: bytes, plaintext: bytes) -> bytes:
+    # Derive message key using kdf_sender_key from double-ratchet.md
+    # This uses HMAC-SHA256 with domain separation binding to group/sender/key
+    sender_key.chain_key, message_key = kdf_sender_key(
+        chain_key=sender_key.chain_key,
+        group_id=group_id,
+        sender_iid=sender_key.sender_iid,
+        key_id=sender_key.key_id
+    )
     sender_key.iteration += 1
 
     # Encrypt
     nonce = generate_nonce()
     ciphertext = ChaCha20Poly1305(message_key, nonce, plaintext)
 
-    # Sign
+    # Sign the ciphertext
     signature = Ed25519Sign(sender_key.signature_key.private, ciphertext)
 
     return encode(sender_key.key_id, sender_key.iteration, nonce, ciphertext, signature)
@@ -201,6 +205,49 @@ Same as 1:1 messages (see secure-envelope.md):
 ```
 
 ## Membership Operations
+
+### Group State Update Model
+
+All membership changes are represented as **Group State Updates** - signed operations that modify the group's membership state.
+
+```typescript
+interface GroupStateUpdate {
+  group_id: string;
+  version: string;                 // Monotonically increasing (decimal string)
+  actor_iid: IdentityIdentifier;   // Who performed this action
+  action: GroupAction;
+  timestamp: string;               // RFC3339
+  previous_version: string;        // Version this update builds on
+}
+
+type GroupAction =
+  | { type: 'member_added'; member_iid: string; role: string; invited_by: string }
+  | { type: 'member_removed'; member_iid: string; removed_by: string; reason?: string }
+  | { type: 'member_left'; member_iid: string }
+  | { type: 'role_changed'; member_iid: string; old_role: string; new_role: string }
+  | { type: 'settings_changed'; changes: Record<string, unknown> };
+```
+
+**Authentication**: Group state updates are sent as regular group messages. The PUSE envelope signature authenticates the actor.
+
+**Authorization**: Recipients verify:
+1. `actor_iid` matches envelope sender (PUSE signature)
+2. Actor has permission for the action (role check against local state)
+
+| Action | Required Role |
+|--------|---------------|
+| member_added | admin or moderator |
+| member_removed | admin (or moderator if target is member) |
+| member_left | self only |
+| role_changed | admin only |
+| settings_changed | admin only |
+
+**Conflict Resolution** (deterministic):
+1. Higher `version` wins
+2. If same `version`: lexicographically smaller `actor_iid` wins
+3. If same `actor_iid`: lexicographically smaller `action.type` wins
+
+**Convergence**: All members eventually reach the same membership state by applying valid updates in version order.
 
 ### Invite
 

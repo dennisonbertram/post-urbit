@@ -30,7 +30,7 @@ QUIC (RFC 9000) is the foundation transport protocol. It provides:
 | **Cipher suites** | TLS_CHACHA20_POLY1305_SHA256, TLS_AES_256_GCM_SHA384 |
 | **Key exchange** | X25519 |
 | **Signature** | Ed25519 (for identity binding) |
-| **Certificate type** | Self-signed, identity-bound (see peer-handshake.md) |
+| **Certificate type** | Self-signed, ephemeral (identity proven via handshake, NOT certificate) |
 
 ### ALPN Protocol String
 
@@ -47,7 +47,7 @@ Version negotiation via ALPN allows future protocol upgrades.
 ```
 1. Resolve peer IID to endpoints (from identity document or cache)
 2. Select endpoint (direct preferred, relay fallback)
-3. Create QUIC connection with identity-bound certificate
+3. Create QUIC connection (self-signed TLS certificate)
 4. Perform identity handshake (see peer-handshake.md)
 5. Connection ready for application streams
 ```

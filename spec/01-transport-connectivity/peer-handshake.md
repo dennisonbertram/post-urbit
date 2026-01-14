@@ -352,7 +352,7 @@ For performance, previously authenticated connections can resume:
   "timestamp": "<...>",
   "tls_binding": "<...>",
   "resume": {
-    "last_seen_sequence": 5,       // Last known sequence number
+    "last_seen_sequence": "5",     // String (uint64 safe) - last known sequence number
     "session_id": "<...>"          // From previous session
   }
 }

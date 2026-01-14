@@ -125,39 +125,50 @@ Flags (1 byte):
  └─────────────── Reserved
 ```
 
-## Key Exchange (1:1 Messages)
+## Key Derivation (Session Protocol)
 
-### Initial Key Exchange
+The AEAD message key used for PUSE encryption is provided by the session protocol, not by PUSE itself. PUSE is purely a container format.
 
-For the first message to a new recipient:
+### Key Source by Header Extension Type
+
+| Extension Type | Key Source | Reference |
+|----------------|------------|-----------|
+| 0x00 (initial) | X3DH key agreement | See `double-ratchet.md` § Session Initialization |
+| 0x01 (ratchet) | Double Ratchet chain | See `double-ratchet.md` § Ratchet Operation |
+| 0x02 (group)   | Sender Key chain | See `group-messaging.md` § Sender Key Chain |
+
+### Initial Messages (Type 0x00)
+
+For the **first message** to a new recipient (no established session):
+1. Use X3DH key agreement as specified in `double-ratchet.md` § Session Initialization
+2. Derive `(root_key, initial_chain_key)` via `kdf_initial()` from `double-ratchet.md`
+3. Derive message key via `kdf_chain_step(initial_chain_key)`
+4. Include ephemeral public key in Initial Header Extension (type 0x00)
+
+### Ongoing Messages (Type 0x01)
+
+For subsequent messages in an established session:
+1. Use Double Ratchet protocol as specified in `double-ratchet.md`
+2. Message key derived from sending chain via `kdf_chain_step()`
+3. Include ratchet parameters in Ratchet Header Extension (type 0x01)
+
+### Group Messages (Type 0x02)
+
+For group messages:
+1. Use sender key chain as specified in `group-messaging.md`
+2. Message key derived via `kdf_sender_key()` from `double-ratchet.md`
+3. Include sender key ID and iteration in Group Header Extension (type 0x02)
+
+### Decryption Flow
 
 ```
-1. Sender looks up recipient's current encryption key (X25519) from identity document
-2. Sender generates ephemeral X25519 key pair
-3. Perform ECDH:
-   shared_secret = X25519(ephemeral_private, recipient_public)
-4. Derive message key:
-   message_key = HKDF-SHA256(
-     ikm: shared_secret,
-     salt: sender_iid || recipient_iid,
-     info: "post-urbit envelope v1",
-     length: 32
-   )
-5. Encrypt:
-   ciphertext = ChaCha20-Poly1305(message_key, nonce, plaintext)
-6. Include ephemeral_public in envelope
-7. Sign entire envelope with sender's signing key
-```
-
-### Recipient Decryption
-
-```
-1. Verify signature using sender's signing key (from identity document)
-2. Perform ECDH:
-   shared_secret = X25519(recipient_private, ephemeral_public)
-3. Derive message key (same HKDF as sender)
-4. Decrypt:
-   plaintext = ChaCha20-Poly1305_Decrypt(message_key, nonce, ciphertext)
+1. Parse envelope header (see "Parse Order for Streaming" above)
+2. Verify signature using sender's signing key (from identity document)
+3. Based on header extension type:
+   - 0x00: Perform X3DH, derive message key
+   - 0x01: Look up ratchet state, derive message key from receiving chain
+   - 0x02: Look up sender key, derive message key from sender key chain
+4. Decrypt: plaintext = ChaCha20-Poly1305_Decrypt(message_key, nonce, aad=header_extension, ciphertext)
 ```
 
 ## Nonce Management
@@ -191,7 +202,6 @@ The encrypted payload is structured JSON:
 ```json
 {
   "type": "<message-type>",
-  "id": "<message-id-uuid>",
   "timestamp": "<RFC3339>",
   "sequence": "<uint64-string>",
   "thread_id": "<optional-thread-id>",
@@ -202,6 +212,8 @@ The encrypted payload is structured JSON:
   }
 }
 ```
+
+**Note**: The `message_id` is in the envelope header (16-byte UUID), not in the plaintext. Applications reference messages by this header ID. The plaintext does NOT include a duplicate `id` field.
 
 ### Message Types
 
@@ -265,12 +277,29 @@ The encrypted payload is structured JSON:
 
 ### What is Signed
 
-The signature covers all bytes of the envelope BEFORE the signature field:
+The signature covers all bytes of the envelope BEFORE the signature field (i.e., the entire envelope except the final 64-byte signature):
 
 ```
-signed_data = magic || version || flags || sender_iid || recipient_iid ||
-              ephemeral_public || nonce || ciphertext_length || ciphertext
+signed_data = envelope[0 : len(envelope) - 64]
+
+Specifically:
+  magic (4) || version (1) || flags (1) || sender_iid (20) || recipient_iid (20) ||
+  message_id (16) || header_extension_length (2) || header_extension (variable) ||
+  nonce (12) || ciphertext_length (4) || ciphertext (variable)
 ```
+
+**Note**: The `header_extension` (including any embedded ephemeral DH public key or ratchet parameters) is automatically covered by the signature because it precedes the signature field.
+
+### Parse Order for Streaming
+
+Receivers MUST parse in this order:
+1. Read fixed prefix: magic (4) + version (1) + flags (1) + sender_iid (20) + recipient_iid (20) + message_id (16) + header_extension_length (2) = 64 bytes
+2. Read `header_extension` (length from step 1)
+3. Read `nonce` (12 bytes)
+4. Read `ciphertext_length` (4 bytes)
+5. Read `ciphertext` (length from step 4)
+6. Read `signature` (64 bytes)
+7. Verify signature over bytes from steps 1-5
 
 ### Signature Verification
 

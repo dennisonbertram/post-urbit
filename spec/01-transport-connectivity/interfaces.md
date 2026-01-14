@@ -8,15 +8,25 @@ This document specifies the complete API surface for the Transport & Connectivit
 
 ```typescript
 // Identity types from 02-identity-trust
-type IdentityIdentifier = string;  // 32-char Base32
+type IdentityIdentifier = string;  // 32-char Base32 (IID)
+type DeviceIdentifier = string;    // 32-char Base32 (DID)
 type PublicKey = string;           // Base64
 type Signature = string;           // Base64
 type Timestamp = string;           // RFC3339
+type SequenceNumber = string;      // Decimal uint64 string
 
 // Transport-specific types
 type ConnectionId = string;        // Unique connection identifier
 type StreamId = number;            // QUIC stream ID
-type PeerId = string;              // Same as IdentityIdentifier for authenticated peers
+
+// Peer identification (identity + optional device)
+interface PeerId {
+  iid: IdentityIdentifier;         // Required: which identity
+  did?: DeviceIdentifier;          // Optional: which device (if multi-device)
+}
+
+// For anonymous connections (relays, discovery, DHT)
+type MaybePeerId = PeerId | null;
 ```
 
 ## Connection Types
@@ -52,13 +62,28 @@ type ConnectionState =
 
 interface Connection {
   id: ConnectionId;
-  peerId: IdentityIdentifier;
+  peerId: MaybePeerId;              // null for anonymous connections (relay/discovery)
   state: ConnectionState;
   path: ConnectionPath;
   establishedAt: Timestamp;
   authenticatedAt?: Timestamp;
   peerDocument?: IdentityDocument;  // Populated after handshake
+  peerDeviceDocument?: DeviceDocument;  // Populated if device is specified
   streams: StreamInfo[];
+}
+
+// Device document type (see 02-identity-trust/identity-document-schema.md § Device Identifiers)
+interface DeviceDocument {
+  version: number;
+  did: DeviceIdentifier;
+  iid: IdentityIdentifier;
+  deviceName?: string;
+  deviceSigningKey: PublicKey;
+  deviceTransportKey: PublicKey;
+  createdAt: Timestamp;
+  expiresAt?: Timestamp;
+  capabilities: string[];
+  signatureByIdentity: Signature;
 }
 
 interface StreamInfo {
@@ -77,9 +102,9 @@ type StreamType = 'control' | 'identity' | 'message' | 'sync' | 'bulk';
 interface Endpoint {
   type: 'direct' | 'relay' | 'mailbox';
   host: string;                       // Hostname, IPv4, or [IPv6]
-  port: number;                       // UDP port (1-65535)
+  port: number;                       // Service port (1-65535). UDP for quic, TCP for https.
   priority: number;                   // 0-255, lower = higher priority
-  transport?: 'quic' | 'https';       // Default: quic
+  transport?: 'quic' | 'https';       // Default: quic. Determines port protocol (UDP/TCP).
   relayId?: IdentityIdentifier;       // For relay endpoints (relay's IID)
   observedAt?: Timestamp;             // When this endpoint was last verified
   metadata?: Record<string, string>;
@@ -95,12 +120,12 @@ interface TransportService {
   /**
    * Connect to a peer by IID.
    * Resolves endpoints from identity document and attempts connection.
-   * @param peerId Peer's identity identifier
+   * @param peerId Peer's identity (and optionally device) identifier
    * @param options Connection options
    * @returns Authenticated connection
    */
   connect(
-    peerId: IdentityIdentifier,
+    peerId: PeerId | IdentityIdentifier,  // Can pass just IID for convenience
     options?: ConnectOptions
   ): Promise<Connection>;
 
@@ -113,8 +138,9 @@ interface TransportService {
 
   /**
    * Get active connection to a peer (if any).
+   * If did is not specified and peer has multiple devices, returns any active connection.
    */
-  getConnection(peerId: IdentityIdentifier): Connection | null;
+  getConnection(peerId: PeerId | IdentityIdentifier): Connection | null;
 
   /**
    * List all active connections.
@@ -241,11 +267,18 @@ interface TransportService {
 // Connection deduplication rules
 const CONNECTION_DEDUP = {
   /**
-   * When two peers connect to each other simultaneously (glare):
-   * - Keep the connection initiated by the peer with lexicographically smaller IID
+   * Connections are unique per (local_iid, local_did, peer_iid, peer_did) tuple.
+   *
+   * When two peers/devices connect to each other simultaneously (glare):
+   * - Compare (iid, did) tuples lexicographically
+   * - Keep the connection initiated by the smaller tuple
    * - Close the other connection with code DUPLICATE_CONNECTION (0x105)
+   *
+   * Comparison: (iid1, did1) < (iid2, did2) iff:
+   *   iid1 < iid2, or (iid1 == iid2 and did1 < did2)
+   * Note: did may be undefined; undefined sorts before any defined value.
    */
-  GLARE_RESOLUTION: 'smaller_iid_initiator_wins',
+  GLARE_RESOLUTION: 'smaller_iid_did_tuple_initiator_wins',
   DUPLICATE_CONNECTION_CODE: 0x105,
 } as const;
 ```
@@ -270,7 +303,7 @@ interface ConnectOptions {
   relayServers?: RelayServer[];
 
   // Expected identity document sequence (for resumption)
-  expectedSequence?: number;
+  expectedSequence?: SequenceNumber;
 
   // Session ticket for 0-RTT resumption
   sessionTicket?: Uint8Array;
@@ -453,7 +486,7 @@ interface PeerEndpoints {
   iid: IdentityIdentifier;
   endpoints: Endpoint[];
   lastUpdated: Timestamp;
-  sequence: number;
+  sequence: SequenceNumber;  // Decimal string, NOT number (uint64 safety)
 }
 
 type Unsubscribe = () => void;

@@ -73,16 +73,32 @@ async function publishIdentity(document: IdentityDocument): Promise<void> {
 // Identity calls this
 async function fetchIdentity(iid: IdentityIdentifier): Promise<IdentityDocument | null> {
   const key = sha256(concat("post-urbit:identity:", iid));
-  const result = await dht.get(key);
 
-  if (!result) return null;
+  // DHT may return multiple records from different nodes
+  const results = await dht.getAll(key);
 
-  const document = decodeIdoc(result.value);
+  if (results.length === 0) return null;
 
-  // Verify signature matches document
-  if (!verifyDocument(document)) return null;
+  // Decode and verify all candidates
+  const candidates: IdentityDocument[] = [];
+  for (const result of results) {
+    const document = decodeIdoc(result.value);
+    if (verifyDocument(document)) {
+      candidates.push(document);
+    }
+  }
 
-  return document;
+  if (candidates.length === 0) return null;
+
+  // Select highest valid sequence number
+  // (see caching-policy.md for TOFU and genesis key constraints)
+  candidates.sort((a, b) => {
+    const seqA = BigInt(a.sequence);
+    const seqB = BigInt(b.sequence);
+    return seqB > seqA ? 1 : seqB < seqA ? -1 : 0;
+  });
+
+  return candidates[0];
 }
 ```
 
@@ -214,9 +230,46 @@ Authorization: Bearer <recipient-signed-token>
 Response: 204 No Content
 ```
 
+### Auth Token Format
+
+The `Authorization: Bearer` token is a signed request object (Base64-encoded JSON):
+
+```json
+{
+  "v": 1,
+  "action": "store|retrieve|delete",
+  "sender_iid": "<sender-identity-id>",
+  "recipient_iid": "<recipient-identity-id>",
+  "issued_at": "<RFC3339-timestamp>",
+  "expires_at": "<RFC3339-timestamp>",
+  "nonce": "<16-byte-random-base64>",
+  "signature": "<ed25519-signature-base64>"
+}
+```
+
+**Token fields**:
+| Field | Description |
+|-------|-------------|
+| `v` | Version (must be 1) |
+| `action` | One of: `store`, `retrieve`, `delete` |
+| `sender_iid` | For `store`: sender's IID. For `retrieve`/`delete`: same as recipient_iid |
+| `recipient_iid` | Whose mailbox is being accessed |
+| `issued_at` | Token creation timestamp |
+| `expires_at` | Token expiration (max 5 minutes from issued_at) |
+| `nonce` | Random bytes for replay prevention |
+| `signature` | Ed25519 signature over canonical JSON (without signature field) |
+
+**Signature verification**: Sign over `{"v":1,"action":"...","sender_iid":"...","recipient_iid":"...","issued_at":"...","expires_at":"...","nonce":"..."}` (JCS-canonicalized, without signature field).
+
+**Mailbox MUST enforce**:
+- Token expiration (`expires_at` < now)
+- Nonce replay prevention (cache nonces for token lifetime + margin)
+- Signature verification using sender's signing key (from identity document)
+- Per-sender rate limits (e.g., 100 stores/minute)
+
 ### Trust Model
 
-- Mailbox sees: sender IID (in signed token), recipient IID, encrypted blob, timing
+- Mailbox sees: sender IID (from token), recipient IID, encrypted blob, timing
 - Mailbox does NOT see: message contents (E2E encrypted)
 - Mailbox MAY: rate limit, charge for storage, impose size/duration limits
 - Mailbox MUST NOT: decrypt, modify, or selectively block messages

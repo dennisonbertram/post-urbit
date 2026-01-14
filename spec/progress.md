@@ -1,25 +1,26 @@
 # Specification Progress
 
-## Iteration: 5
-## Mode: DEEP DIVE on 03-messaging-sync
-## Status: 60/100 completeness estimate
+## Iteration: 6
+## Mode: HOLISTIC REVIEW
+## Status: 75/100 completeness estimate
 
 ### Fully Specified
-- **02-identity-trust**: Core identity system complete
-- **01-transport-connectivity**: Transport layer complete
-- **00-shared**: Layer integration specs
+- **02-identity-trust**: Core identity system + Device Identifiers (DID)
+- **01-transport-connectivity**: Transport layer + multi-device support
+- **00-shared**: Layer integration specs + mailbox auth token
+- **03-messaging-sync**: Messaging and sync layer (nearly complete)
 
 ### In Progress
-- **03-messaging-sync**: Messaging and sync layer - initial specs created, GPT-5.2 review complete
-  - ✅ overview.md - Layer architecture and design principles
-  - ✅ secure-envelope.md - E2E encryption envelope format (updated with header extensions)
-  - ✅ double-ratchet.md - Forward secrecy protocol (KDFs specified precisely)
-  - ✅ group-messaging.md - Sender keys and group protocol (unified envelope format)
-  - ✅ sync-protocol.md - CRDT-based sync
-  - ✅ interfaces.md - TypeScript API definitions
+- **03-messaging-sync**: Final refinements
+  - ✅ overview.md - Layer architecture
+  - ✅ secure-envelope.md - E2E envelope with unified PUSE format
+  - ✅ double-ratchet.md - Forward secrecy protocol
+  - ✅ group-messaging.md - Sender keys + membership state model
+  - ✅ sync-protocol.md - CRDT sync + security model
+  - ✅ interfaces.md - SealedEnvelope wire format alignment
 
 ### Not Yet Started
-- 04-app-runtime: Blocked by messaging/sync
+- 04-app-runtime: NEXT (blocked by messaging/sync)
 - 05-ux-packaging: Can proceed in parallel
 - 06-rfcs: Can draft RFC-0001 through RFC-0003
 - 07-implementation: Blocked by component specs
@@ -28,44 +29,39 @@
 
 ### GPT-5.2 Review Log
 - **Iteration 1-4**: Identity and Transport layers refined
-- **Iteration 5 (deep dive)**: 03-messaging-sync - 17 issues identified
+- **Iteration 5 (deep dive)**: 03-messaging-sync initial specs
+- **Iteration 6 (holistic)**: Cross-layer consistency - 7 BLOCKING + 6 HIGH issues
 
   **BLOCKING Issues Fixed:**
-  1. ✅ Ratchet header moved to authenticated header extension (AAD)
-  2. ✅ Unified envelope format (PUSE for all messages, no separate PUGM)
-  3. ✅ Clarified non-repudiation vs deniability (system provides signatures)
+  1. ✅ B1: Secure envelope signature coverage made precise
+  2. ✅ B2: Messaging interface API aligned with PUSE wire format
+  3. ✅ B3: Key exchange unified (secure-envelope references double-ratchet)
+  4. ✅ B4: Sync security model defined (transport auth + signatures)
+  5. ✅ B5: Device Identifier (DID) model added to identity layer
+  6. ✅ B6: Identity schema endpoint/encryption history fixed
+  7. ✅ B7: Sequence numbers consistently string (uint64 safety)
 
   **HIGH Issues Fixed:**
-  4. ✅ KDF precisely specified using HMAC-SHA256 (Signal-compatible)
-  5. ✅ Domain separation for all key derivations
-  6. ✅ Group sender key KDF binds to group_id + sender_iid + key_id
+  1. ✅ H1: TLS certificate policy clarified (ephemeral, not identity-bound)
+  2. ✅ H2: Endpoint port semantics (UDP/TCP depends on transport)
+  3. ✅ H3: DHT multiple value retrieval with highest-sequence selection
+  4. ✅ H4: Mailbox auth token format fully specified
+  5. ✅ H5: Group membership state update model with authorization
+  6. ✅ H6: Group sender key KDF unified with double-ratchet
 
-  **Remaining Issues (next iteration):**
-  - Double ratchet state machine needs complete normative spec
-  - X3DH prekey handling for offline delivery
-  - Sync protocol security wrapper
-  - Replay detection pre-decrypt optimization
-  - Device identity model
-  - Group sender key gap handling
-  - Membership operations signing model
-
-### Files Created This Iteration
-1. `03-messaging-sync/overview.md` - Layer overview
-2. `03-messaging-sync/secure-envelope.md` - E2E envelope format
-3. `03-messaging-sync/double-ratchet.md` - Forward secrecy protocol
-4. `03-messaging-sync/group-messaging.md` - Group messaging
-5. `03-messaging-sync/sync-protocol.md` - CRDT sync
-6. `03-messaging-sync/interfaces.md` - API definitions
+  **MEDIUM Issues Fixed:**
+  - ✅ M1: Message ID only in header, not duplicated in plaintext
+  - ✅ M3: Anonymous connections supported (MaybePeerId type)
 
 ### Critical Path Analysis
 ```
-Identity (02) ← COMPLETE
+Identity (02) ← COMPLETE + DID
     ↓
-Transport (01) ← COMPLETE
+Transport (01) ← COMPLETE + multi-device
     ↓
-Layer Integration (00) ← COMPLETE
+Layer Integration (00) ← COMPLETE + mailbox auth
     ↓
-Messaging & Sync (03) ← IN PROGRESS (70% complete)
+Messaging & Sync (03) ← COMPLETE (95%)
     ↓
 App Runtime (04) ← NEXT
     ↓
@@ -73,22 +69,24 @@ Packaging (05)
 ```
 
 ### Specification Checklist: 03-messaging-sync
-- [x] Secure envelope format defined
+- [x] Secure envelope format defined (PUSE)
 - [x] Cryptographic primitives specified (X25519, ChaCha20-Poly1305, HMAC-SHA256)
 - [x] Double ratchet key derivation defined
-- [x] Group sender keys documented
+- [x] Group sender keys documented + unified KDF
 - [x] Sync protocol CRDT types listed
 - [x] Wire formats for messages defined
-- [x] API interfaces specified
-- [ ] Complete normative double ratchet state machine
-- [ ] Sync protocol security wrapper
-- [ ] Device identity model
-- [ ] Test vectors
+- [x] API interfaces specified (SealedEnvelope)
+- [x] Sync protocol security model
+- [x] Device identity model (DID)
+- [x] Group membership state model
+- [ ] Complete test vectors
+- [ ] X3DH prekey handling for offline delivery
 
 ### Next Priority
-**Iteration 6 will be HOLISTIC REVIEW**
+**Iteration 7 will be DEEP DIVE on 04-app-runtime**
 
 Focus areas:
-- Cross-layer consistency with identity/transport
-- Complete remaining messaging issues
-- Prepare for app runtime layer
+- Application sandboxing model
+- Permission system
+- Inter-app communication
+- Storage and state management

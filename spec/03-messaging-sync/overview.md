@@ -54,13 +54,15 @@ For sync operations, the system provides eventual consistency with conflict reso
 
 ## Component Overview
 
-### Secure Envelope
+### Secure Envelope (PUSE)
 
-The foundation for all messages. Provides:
+The container format for **messaging** (stream type 0x03) and **mailbox storage**. Provides:
 - Authenticated encryption (ChaCha20-Poly1305)
 - Sender authentication (Ed25519 signatures)
-- Key derivation (X25519 + HKDF)
+- Key derivation (X25519 + HKDF via session protocol)
 - Message framing and versioning
+
+**Note**: The Sync Protocol (stream type 0x04) uses a different security model based on transport authentication and operation signatures. See `sync-protocol.md` § Security Model for details.
 
 ### 1:1 Messaging
 

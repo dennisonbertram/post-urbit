@@ -559,22 +559,24 @@ interface MessageEncryptionService {
    */
   resetSession(peerId: IdentityIdentifier): Promise<void>;
 
-  // === Encryption ===
+  // === Encryption (1:1) ===
 
   /**
    * Encrypt a message for a peer (1:1).
+   * Returns a SealedEnvelope with full PUSE wire format bytes.
    */
   encryptMessage(
     peerId: IdentityIdentifier,
     plaintext: Uint8Array
-  ): Promise<EncryptedMessage>;
+  ): Promise<SealedEnvelope>;
 
   /**
    * Decrypt a message from a peer (1:1).
+   * Accepts raw PUSE envelope bytes or parsed SealedEnvelope.
    */
   decryptMessage(
     senderId: IdentityIdentifier,
-    envelope: EncryptedMessage
+    envelope: Uint8Array | SealedEnvelope
   ): Promise<Uint8Array>;
 
   // === Group Encryption ===
@@ -596,32 +598,77 @@ interface MessageEncryptionService {
 
   /**
    * Encrypt a message for a group.
+   * Returns a SealedEnvelope with group header extension (type 0x02).
    */
-  encryptGroupMessage(groupId: GroupId, plaintext: Uint8Array): Promise<GroupEncryptedMessage>;
+  encryptGroupMessage(groupId: GroupId, plaintext: Uint8Array): Promise<SealedEnvelope>;
 
   /**
    * Decrypt a message from a group.
+   * Accepts raw PUSE envelope bytes or parsed SealedEnvelope.
    */
-  decryptGroupMessage(groupId: GroupId, senderId: IdentityIdentifier, envelope: GroupEncryptedMessage): Promise<Uint8Array>;
+  decryptGroupMessage(
+    groupId: GroupId,
+    senderId: IdentityIdentifier,
+    envelope: Uint8Array | SealedEnvelope
+  ): Promise<Uint8Array>;
 }
 
-interface EncryptedMessage {
-  senderIid: Uint8Array;        // 20 bytes
-  recipientIid: Uint8Array;     // 20 bytes
+/**
+ * Sealed envelope - the unified encrypted message format (PUSE wire format).
+ * This matches the Secure Envelope wire format exactly.
+ * See secure-envelope.md for complete specification.
+ */
+interface SealedEnvelope {
+  /** Full PUSE envelope bytes (ready for transmission) */
+  bytes: Uint8Array;
+
+  /** Parsed header fields (for routing/filtering without decryption) */
+  header: EnvelopeHeader;
+}
+
+interface EnvelopeHeader {
+  magic: Uint8Array;            // 4 bytes: 0x50 0x55 0x53 0x45 ("PUSE")
+  version: number;              // 1 byte
+  flags: number;                // 1 byte
+  senderIid: Uint8Array;        // 20 bytes (raw)
+  recipientIid: Uint8Array;     // 20 bytes (raw) - IID or GroupId
+  messageId: Uint8Array;        // 16 bytes (UUID)
+  headerExtension: Uint8Array;  // Variable length (ratchet or group info)
+}
+
+/** Flags byte interpretation */
+interface EnvelopeFlags {
+  recipientType: 'direct' | 'group' | 'broadcast';  // bits 0-1
+  requiresAck: boolean;                              // bit 2
+  priority: 'normal' | 'high';                       // bit 3
+  forwardable: boolean;                              // bit 4
+}
+
+/** Header extension types */
+type HeaderExtensionType =
+  | 0x00  // initial (X3DH)
+  | 0x01  // ratchet (1:1 ongoing)
+  | 0x02; // group (sender key)
+
+/** Parsed ratchet header extension (type 0x01) */
+interface RatchetHeaderExtension {
+  type: 0x01;
+  dhPublicKey: Uint8Array;       // 32 bytes
+  previousChainLength: number;   // uint32
+  chainIndex: number;            // uint32
+}
+
+/** Parsed group header extension (type 0x02) */
+interface GroupHeaderExtension {
+  type: 0x02;
+  senderKeyId: Uint8Array;       // 16 bytes
+  iteration: number;             // uint32
+}
+
+/** Parsed initial header extension (type 0x00) */
+interface InitialHeaderExtension {
+  type: 0x00;
   ephemeralPublicKey: Uint8Array; // 32 bytes
-  nonce: Uint8Array;            // 12 bytes
-  ciphertext: Uint8Array;
-  signature: Uint8Array;        // 64 bytes
-}
-
-interface GroupEncryptedMessage {
-  senderIid: Uint8Array;
-  groupId: Uint8Array;
-  senderKeyId: Uint8Array;      // 16 bytes
-  iteration: number;
-  nonce: Uint8Array;
-  ciphertext: Uint8Array;
-  signature: Uint8Array;
 }
 
 interface SenderKeyState {
