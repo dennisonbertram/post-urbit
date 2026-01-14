@@ -58,6 +58,18 @@ The Transport & Connectivity layer provides reliable, secure communication betwe
 | **Relay** | QUIC via relay server | NAT prevents direct connection |
 | **Mailbox** | Store-and-forward (HTTPS) | Recipient offline |
 
+## DHT Integration
+
+The Transport layer provides DHT services for peer discovery. See `00-shared/layer-integration.md` for the authoritative DHT record format.
+
+**DHT Record Format:**
+- Key: `SHA256("post-urbit:identity:" || iid)`
+- Value: IDOC binary envelope
+- TTL: 86400 seconds (24 hours)
+- Signature: Ed25519 by document's signing key
+
+DHT nodes verify the signature before storing, preventing unauthorized updates.
+
 ## Key Decisions Made
 
 | Decision | Choice | Rationale |
@@ -67,6 +79,7 @@ The Transport & Connectivity layer provides reliable, secure communication betwe
 | Relay trust model | Untrusted, encrypted payloads | Relays can't read content |
 | Connection auth | TLS + identity proof | Bind transport to IID |
 | Addressing | IID + endpoint hints | IID is stable, endpoints change |
+| DHT storage | Full IDOC, signed | Verifiable records, spam prevention |
 
 ## Dependencies
 

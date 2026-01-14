@@ -107,8 +107,13 @@ Trusted contacts can collectively authorize recovery of the identity.
        }
      },
      "recovery_proof": {
-       "attestations": [ <array of trustee attestations> ],
-       "initiated_at": "<timestamp>"
+       "method": "social",
+       "initiated_at": "<timestamp>",
+       "cooldown_expires_at": "<timestamp + cooldown_hours>",
+       "status": "pending",
+       "proof_data": {
+         "attestations": [ <array of trustee attestations> ]
+       }
      },
      "signatures": {
        "current": "<sig-by-new-key>",
@@ -125,9 +130,11 @@ Trusted contacts can collectively authorize recovery of the identity.
 function verify_social_recovery(old_doc, new_doc):
     assert old_doc.recovery.method == "social"
     assert new_doc.recovery_proof != null
+    assert new_doc.recovery_proof.method == "social"
 
     config = old_doc.recovery.config
-    attestations = new_doc.recovery_proof.attestations
+    proof_data = new_doc.recovery_proof.proof_data
+    attestations = proof_data.attestations
 
     # Verify threshold met
     valid_attestations = 0
@@ -147,11 +154,11 @@ function verify_social_recovery(old_doc, new_doc):
 
     assert valid_attestations >= config.threshold
 
-    # Verify cooldown (if checking during cooldown, reject activation)
-    initiated = parse_time(new_doc.recovery_proof.initiated_at)
-    cooldown = config.cooldown_hours * 3600
-    if now() < initiated + cooldown:
-        return PENDING_COOLDOWN
+    # Verify cooldown status
+    if new_doc.recovery_proof.status == "pending":
+        cooldown_expires = parse_time(new_doc.recovery_proof.cooldown_expires_at)
+        if now() < cooldown_expires:
+            return PENDING_COOLDOWN
 
     return VALID
 ```
@@ -294,6 +301,8 @@ When recovery is used, the new Identity Document includes proof:
   "recovery_proof": {
     "method": "social|device-escrow|threshold|provider",
     "initiated_at": "<timestamp>",
+    "cooldown_expires_at": "<timestamp>",
+    "status": "pending|active|contested",
     "proof_data": { <method-specific-proof> }
   },
   "recovery": { <new-recovery-config-for-future> },

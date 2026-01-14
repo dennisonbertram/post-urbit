@@ -146,13 +146,38 @@ All keys and signatures use these encodings:
 
 | Field | Type | Constraints | Description |
 |-------|------|-------------|-------------|
-| `keys.signing.previous` | string\|null | Base64, 32 bytes | Previous signing key (for rotation verification) |
+| `keys.signing.previous` | string\|null | Base64, 32 bytes | Previous signing key (for rotation verification; see note below) |
+| `keys.signing.history` | array | Max 3 entries | Previous signing keys with validity windows (for offline signature verification) |
 | `keys.encryption.previous` | array | See EncryptionKeyHistory | Previous encryption keys with validity windows (for offline peers) |
 | `endpoints` | array | Max 10 entries | How to reach this identity's node |
 | `recovery` | object | See recovery spec | Recovery configuration |
 | `claims` | object | See claims spec | Optional public metadata |
 | `extensions` | object | Max 4KB total | App-specific extensions |
 | `signatures.previous` | string\|null | Base64, 64 bytes | Signature by previous key (required during rotation) |
+
+### Signing Key History Entry
+
+Previous signing keys are retained to support signature verification for messages received after key rotation (e.g., mailbox delivery during offline periods):
+
+```json
+{
+  "key": "<base64-raw-ed25519-public-key>",
+  "valid_from": "5",
+  "valid_until": "10",
+  "expires_at": "2025-03-15T00:00:00Z"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `key` | string | Base64-encoded Ed25519 public key (32 bytes) |
+| `valid_from` | string | Sequence number when this key became current |
+| `valid_until` | string | Sequence number when this key was rotated out |
+| `expires_at` | timestamp | After this time, verifiers may reject signatures with this key |
+
+**Retention policy**: Keep at most 3 previous signing keys or 14 days, whichever is less. This is shorter than encryption key history because:
+- Signing keys are only needed for verification, not for reply routing
+- Frequent rotations of signing keys indicate potential compromise
 
 ### Encryption Key History Entry
 
@@ -197,20 +222,24 @@ This is the canonical endpoint schema used by both Identity and Transport layers
 |-------|------|----------|-------------|
 | `type` | string | Yes | `direct`, `relay`, or `mailbox` |
 | `host` | string | Yes | Hostname, IPv4, or `[IPv6]` (brackets for IPv6) |
-| `port` | number | Yes | UDP port number (1-65535) |
-| `transport` | string | No | `quic` (default) or `https` for mailbox |
+| `port` | number | Yes | Service port (1-65535). Protocol determined by `transport`. |
+| `transport` | string | No | `quic` (default, UDP) or `https` (TCP for mailbox) |
 | `priority` | number | Yes | 0-255, lower = higher priority |
 | `relay_id` | string | No | IID of relay operator (for relay type) |
 | `observed_at` | timestamp | No | When this endpoint was last verified reachable |
 | `metadata` | object | No | Type-specific additional data |
 
+**Port interpretation by transport**:
+- `quic`: Port is UDP (e.g., 4433 → UDP/4433)
+- `https`: Port is TCP (e.g., 443 → TCP/443)
+
 **Type-specific notes**:
 
-| Type | Usage |
-|------|-------|
-| `direct` | Direct QUIC connection to host:port |
-| `relay` | QUIC via relay server (relay_id identifies relay) |
-| `mailbox` | Store-and-forward via HTTPS (host:port is mailbox server) |
+| Type | Transport | Usage |
+|------|-----------|-------|
+| `direct` | quic | Direct QUIC connection to host:port (UDP) |
+| `relay` | quic | QUIC via relay server (UDP), relay_id identifies relay |
+| `mailbox` | https | Store-and-forward via HTTPS (TCP) |
 
 **Priority**: Lower number = higher priority. Peers try endpoints in priority order.
 

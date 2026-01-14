@@ -277,8 +277,10 @@ def receive_message(state: RatchetState, header: Header, ciphertext: bytes) -> b
 
 ## Header Format
 
+The ratchet header is placed in the **PUSE header extension** (type `0x01`), NOT in the encrypted plaintext. This is required because the receiver needs the ratchet parameters to derive the decryption key.
+
 ```
-Ratchet Header:
+Ratchet Header (PUSE Header Extension Type 0x01):
 ┌────────────────────────────────────────┐
 │ DH Public Key                          │ 32 bytes
 ├────────────────────────────────────────┤
@@ -290,21 +292,28 @@ Ratchet Header:
 Total: 40 bytes
 ```
 
-This header is included in the secure envelope's plaintext:
+**Wire format in PUSE envelope:**
+```
+header_extension = type (1 byte: 0x01) || length (2 bytes: 40) || ratchet_header (40 bytes)
+```
+
+**IMPORTANT:** The ratchet header is included in the PUSE AAD (authenticated data) but is NOT encrypted. This allows the receiver to:
+1. Parse the ratchet header from PUSE header extension
+2. Derive the correct message key using the DH public key and chain index
+3. Decrypt the ciphertext
+
+The plaintext contains only the message content (no ratchet params):
 
 ```json
 {
   "type": "text",
-  "ratchet": {
-    "dh_public": "<base64-32-bytes>",
-    "previous_chain_length": 5,
-    "chain_index": 3
-  },
   "content": {
     "text": "Hello!"
   }
 }
 ```
+
+**NOTE:** Previous versions of this spec showed ratchet params in plaintext JSON. This was incorrect. The ratchet header MUST be in the PUSE header extension for the receiver to derive decryption keys.
 
 ## State Persistence
 

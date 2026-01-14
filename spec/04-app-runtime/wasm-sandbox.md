@@ -203,7 +203,7 @@ interface FuelConfig {
     // User-triggered actions
     userAction: number;      // e.g., button click handler
     // Background tasks
-    backgroundTask: number;  // e.g., sync callback
+    backgroundTask: number;  // e.g., message delivery, sync event
     // Startup
     appStart: number;        // initial startup
   };

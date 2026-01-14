@@ -226,8 +226,10 @@ The encrypted payload is structured JSON:
 | `receipt` | Read/delivery receipt |
 | `typing` | Typing indicator |
 | `key_update` | Ratchet key update |
-| `sync_op` | Sync operation |
+| `sync_op` | Sync operation (for mailbox fallback delivery; see note) |
 | `app` | Application-specific |
+
+**Note on `sync_op`**: Sync operations normally flow over the dedicated sync stream (0x04) which is NOT PUSE-wrapped. However, when sync data must be delivered via mailbox (e.g., recipient offline), it may be encapsulated in PUSE with type `sync_op`. Recipients must validate the sync operation's own signature in addition to the PUSE envelope signature.
 
 ### Text Message Content
 
@@ -401,7 +403,8 @@ These are NOT implemented by default but can be added by applications.
 Sender signing key (hex): e8f32a1b...
 Sender encryption key (hex): a1b2c3d4...
 Recipient encryption key (hex): 5e6f7a8b...
-Plaintext: {"type":"text","id":"test-1","timestamp":"2025-01-13T12:00:00Z","sequence":"1","content":{"text":"Hello"}}
+Plaintext: {"type":"text","timestamp":"2025-01-13T12:00:00Z","sequence":"1","content":{"text":"Hello"}}
+Note: Message ID is in the PUSE header (16-byte UUID), NOT in plaintext
 
 Expected envelope (hex): 50555345...
 Expected signature (hex): 7a8b9c0d...

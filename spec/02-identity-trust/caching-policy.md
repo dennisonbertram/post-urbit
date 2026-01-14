@@ -252,9 +252,12 @@ interface IdentityTransport {
   // Broadcast identity update to known peers
   broadcastIdentityUpdate(doc: IdentityDocument): Promise<PropagationResult>;
 
-  // DHT operations
-  dhtPut(key: string, value: Uint8Array): Promise<void>;
-  dhtGet(key: string): Promise<Uint8Array[]>;  // May return multiple values
+  // DHT operations (see layer-integration.md for full format)
+  dhtPut(key: string, value: Uint8Array, options: { ttl: number; signature: Uint8Array }): Promise<void>;
+  dhtGet(key: string): Promise<DhtResult[]>;  // May return multiple values
+
+  // DhtResult includes value, signature, and metadata
+  // DHT nodes verify signature before storing (prevents spam)
 
   // Directory operations (optional)
   directoryLookup(iid: IdentityIdentifier): Promise<IdentityDocument | null>;

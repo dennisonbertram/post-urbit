@@ -576,27 +576,9 @@ interface HostBridge {
     args: Bytes
   ): Promise<Result<Bytes, HostError>>;
 
-  // === Callbacks ===
-
-  /**
-   * Register callback for app.
-   */
-  registerCallback(
-    appId: AppId,
-    name: string,
-    entryPoint: string
-  ): void;
-
-  /**
-   * Invoke callback.
-   */
-  invokeCallback(
-    appId: AppId,
-    name: string,
-    args: Bytes
-  ): Promise<void>;
-
   // === Subscriptions ===
+  // Note: No callback registration - the runtime uses polling, not reentrancy.
+  // Subscription events are delivered as new invocations via the `handle` export.
 
   /**
    * Get active subscriptions for app.
@@ -614,7 +596,7 @@ interface Subscription {
   appId: AppId;
   type: SubscriptionType;
   filter: unknown;
-  callbackEntry: string;
+  // Note: No callbackEntry - events delivered via handle export as new invocations
 }
 
 type SubscriptionType =
@@ -772,8 +754,11 @@ type AppRuntimeErrorCode =
 
 ## Event Types
 
+These are host-side events for the Node.js/TypeScript runtime implementation.
+Note: WASM apps do NOT receive callbacks - they use polling. See `abi.md`.
+
 ```typescript
-// Generic event type
+// Generic event type (host-side only, not WASM ABI)
 type Event<T> = {
   subscribe(callback: (data: T) => void): Unsubscribe;
 };

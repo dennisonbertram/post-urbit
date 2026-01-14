@@ -117,7 +117,7 @@ interface EncryptionKeyHistory {
 interface Endpoint {
   type: 'direct' | 'relay' | 'mailbox';
   host: string;                       // Hostname, IPv4, or [IPv6]
-  port: number;                       // UDP port (1-65535)
+  port: number;                       // Service port (1-65535); UDP for quic, TCP for https
   priority: number;                   // 0-255, lower = higher priority
   transport?: 'quic' | 'https';       // Default: quic
   relayId?: IdentityIdentifier;       // For relay endpoints

@@ -95,7 +95,7 @@ Apps declare capabilities in their manifest:
     "required": [
       "storage:app",
       "messaging:send",
-      "messaging:receive"
+      "messaging:subscribe"
     ],
     "optional": [
       "contacts:read:limited",
@@ -313,7 +313,10 @@ async function handleHostCall(
 This mapping is **authoritative**. Method names use `snake_case` as defined in `abi.md`.
 
 ```typescript
-const CAPABILITY_MAP: Record<string, string | null> = {
+// Type: single capability, array (requires ALL), or null (no capability needed)
+type CapabilityRequirement = string | string[] | null;
+
+const CAPABILITY_MAP: Record<string, CapabilityRequirement> = {
   // Storage (all require storage:app)
   'storage.get': 'storage:app',
   'storage.set': 'storage:app',

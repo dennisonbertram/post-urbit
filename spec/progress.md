@@ -1,25 +1,18 @@
 # Specification Progress
 
-## Iteration: 7
-## Mode: DEEP DIVE (04-app-runtime)
-## Status: 85/100 completeness estimate
+## Iteration: 8
+## Mode: HOLISTIC REVIEW (all layers)
+## Status: 90/100 completeness estimate
 
 ### Fully Specified
-- **02-identity-trust**: Core identity system + Device Identifiers (DID)
-- **01-transport-connectivity**: Transport layer + multi-device support
+- **02-identity-trust**: Core identity system + Device Identifiers (DID) + signing key history
+- **01-transport-connectivity**: Transport layer + multi-device support + DHT integration
 - **00-shared**: Layer integration specs + mailbox auth token
-- **03-messaging-sync**: Messaging and sync layer (complete)
-- **04-app-runtime**: Application runtime (complete pending final review)
+- **03-messaging-sync**: Messaging and sync layer + unified signature model
+- **04-app-runtime**: Application runtime (complete)
 
 ### In Progress
-- **04-app-runtime**: Deep dive complete, issues fixed
-  - ✅ overview.md - Layer architecture + document index
-  - ✅ abi.md - **NEW** Authoritative ABI specification
-  - ✅ wasm-sandbox.md - Sandbox config, WASI, execution model
-  - ✅ capability-system.md - Permission model + authoritative mapping
-  - ✅ api-surface.md - Host API methods + subscription lifecycle
-  - ✅ manifest-schema.md - Package format + file integrity hashes
-  - ✅ interfaces.md - TypeScript interfaces
+- **Cross-layer consistency**: Iteration 8 holistic review complete
 
 ### Not Yet Started
 - 05-ux-packaging: NEXT
@@ -33,59 +26,57 @@
 - **Iteration 5 (deep dive)**: 03-messaging-sync initial specs
 - **Iteration 6 (holistic)**: Cross-layer consistency fixes
 - **Iteration 7 (deep dive)**: 04-app-runtime created + reviewed
+- **Iteration 8 (holistic)**: All-layer cross-cutting review
 
-  **BLOCKING Issues Fixed (Iteration 7):**
-  1. ✅ B1: WASM ABI unified in new `abi.md` (imports, exports, signatures)
-  2. ✅ B2: Async model specified (polling via host.poll, no callbacks)
-  3. ✅ B3: Invocation ABI complete (packed i64 return, memory ownership)
-  4. ✅ B4: WASI bypass fixed (clock/random disabled, use Host API)
-  5. ✅ B5: Package signature binds to file hashes in manifest
-  6. ✅ B6: Storage model clarified (Host API primary, no /data FS)
-  7. ✅ B7: Method-to-capability mapping made authoritative (snake_case)
+  **BLOCKING Issues Fixed (Iteration 8):**
+  1. ✅ B1: DID authentication added to peer-handshake.md
+  2. ✅ B2: Ratchet header location clarified (PUSE header extension, not plaintext)
+  3. ✅ B3: Group signature model unified (use PUSE identity signature, no sender-key sig)
+  4. ✅ B4: Callback contradictions resolved (polling-only, no callbacks in WASM ABI)
+  5. ✅ B5: messaging:receive removed, replaced with messaging:subscribe everywhere
+  6. ✅ B6: Recovery proof schema unified across all documents
+  7. ✅ B7: DHT storage format aligned between layers (full IDOC, signed, with TTL)
 
-  **HIGH Issues Fixed (Iteration 7):**
-  1. ✅ H8: Result envelope format unified (ok/error CBOR)
-  2. ✅ H9: Subscription lifecycle defined (persistence, delivery, cleanup)
-  3. ✅ H10: Messaging capability simplified (subscribe implies receive)
-  4. ✅ H11: Deterministic vs crypto random split into two APIs
-  5. ✅ H12: Inter-app invocation semantics (call depth, fuel, exports)
-  6. ✅ H13: Revocation behavior specified (no reprompt, defined cleanup)
+  **HIGH Issues Fixed (Iteration 8):**
+  1. ✅ H8: Signing key history added for offline signature verification
+  2. ✅ H9: Group membership version switched to HLC-style (no coordination needed)
+  3. ✅ H10: Message ID in plaintext contradiction fixed (ID is header-only)
+  4. ✅ H11: sync_op in PUSE clarified (mailbox fallback path)
+  5. ✅ H12: Endpoint port semantics clarified (UDP for quic, TCP for https)
+  6. ✅ H13: Capability mapping type fixed (string | string[] | null)
 
 ### Critical Path Analysis
 ```
-Identity (02) ← COMPLETE + DID
+Identity (02) ← COMPLETE + DID + signing key history
     ↓
-Transport (01) ← COMPLETE + multi-device
+Transport (01) ← COMPLETE + multi-device + DHT section
     ↓
 Layer Integration (00) ← COMPLETE + mailbox auth
     ↓
-Messaging & Sync (03) ← COMPLETE
+Messaging & Sync (03) ← COMPLETE + unified signatures
     ↓
-App Runtime (04) ← COMPLETE (pending iteration 8 review)
+App Runtime (04) ← COMPLETE
     ↓
 Packaging (05) ← NEXT
 ```
 
-### Specification Checklist: 04-app-runtime
-- [x] WASM sandbox execution model
-- [x] Authoritative ABI specification (abi.md)
-- [x] Host-to-guest and guest-to-host interfaces
-- [x] Async model (polling, no callbacks)
-- [x] Capability system with authoritative mapping
-- [x] Permission workflow (install, runtime, revocation)
-- [x] Storage architecture (Host API primary, no /data FS)
-- [x] Manifest schema with file integrity hashes
-- [x] Subscription lifecycle semantics
-- [x] Inter-app invocation model
-- [x] Deterministic vs crypto randomness
+### Specification Checklist Summary
+- [x] All 5 core layers specified
+- [x] Cross-layer type consistency verified
+- [x] Device identifier (DID) flow end-to-end
+- [x] Signature model unified (PUSE identity signatures)
+- [x] Async model unified (polling, no callbacks)
+- [x] DHT format aligned across layers
+- [x] Recovery proof schema unified
 - [ ] Complete test vectors
 - [ ] SDK interface examples
+- [ ] UX/Packaging layer (05)
 
 ### Next Priority
-**Iteration 8 will be HOLISTIC REVIEW** of all layers including new 04-app-runtime
+**Iteration 9 will be DEEP DIVE on 05-ux-packaging**
 
 Focus areas:
-- Cross-layer consistency with messaging/sync
-- API naming conventions alignment
-- Error handling uniformity
-- Security model completeness
+- Package format and signing
+- Installation UX
+- Update mechanisms
+- App store / distribution model

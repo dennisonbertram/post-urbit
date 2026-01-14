@@ -38,7 +38,7 @@ Every application includes a manifest file (`manifest.json`) that declares metad
     "required": [
       "storage:app",
       "messaging:send",
-      "messaging:receive"
+      "messaging:subscribe"
     ],
     "optional": [
       "contacts:read:limited",
@@ -46,6 +46,7 @@ Every application includes a manifest file (`manifest.json`) that declares metad
     ],
     "reasons": {
       "messaging:send": "To send messages to your contacts",
+      "messaging:subscribe": "To receive messages from your contacts",
       "contacts:read:limited": "To show which contacts also use this app"
     }
   },
@@ -495,7 +496,7 @@ function verifyPackageIntegrity(
     "required": [
       "storage:app",
       "messaging:send",
-      "messaging:receive",
+      "messaging:subscribe",
       "contacts:read:limited"
     ],
     "optional": [
@@ -505,7 +506,7 @@ function verifyPackageIntegrity(
     ],
     "reasons": {
       "messaging:send": "To send chat messages to your contacts",
-      "messaging:receive": "To receive chat messages from your contacts",
+      "messaging:subscribe": "To receive chat messages from your contacts",
       "contacts:read:limited": "To show which of your contacts use this app",
       "notifications:show": "To notify you of new messages when the app is in the background",
       "system:background": "To check for new messages periodically"

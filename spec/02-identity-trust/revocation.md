@@ -28,11 +28,13 @@ Revoke a specific key while maintaining identity continuity (equivalent to emerg
   "replacement_document": { <new-identity-document> },
   "signatures": {
     "by_revoked_key": "<sig-by-key-being-revoked>|null",
-    "by_new_key": "<sig-by-new-key>",
-    "by_recovery": { <recovery-proof-if-used> }
-  }
+    "by_new_key": "<sig-by-new-key>"
+  },
+  "recovery_proof": null
 }
 ```
+
+**Note:** When recovery is used (`by_revoked_key` is null), the `recovery_proof` field contains the standard recovery proof structure (see `identity-document-schema.md`). The `replacement_document` also contains `recovery_proof` per the standard identity document format.
 
 ### Revocation Scenarios
 
@@ -49,9 +51,9 @@ User still has access to the compromised key:
 {
   "signatures": {
     "by_revoked_key": "<valid-signature>",
-    "by_new_key": "<valid-signature>",
-    "by_recovery": null
-  }
+    "by_new_key": "<valid-signature>"
+  },
+  "recovery_proof": null
 }
 ```
 
@@ -68,9 +70,14 @@ User lost access to the compromised key:
 {
   "signatures": {
     "by_revoked_key": null,
-    "by_new_key": "<valid-signature>",
-    "by_recovery": {
-      "method": "social",
+    "by_new_key": "<valid-signature>"
+  },
+  "recovery_proof": {
+    "method": "social",
+    "initiated_at": "<RFC3339-timestamp>",
+    "cooldown_expires_at": "<RFC3339-timestamp>",
+    "status": "pending",
+    "proof_data": {
       "attestations": [...]
     }
   }
@@ -181,8 +188,8 @@ function verifyKeyRevocation(revocation: KeyRevocation): VerificationResult {
   const hasNewKeyAuth = signatures.by_new_key &&
     verify(replacement_document.keys.signing.current, revocation, signatures.by_new_key);
 
-  const hasRecoveryAuth = signatures.by_recovery &&
-    verifyRecoveryProof(oldDoc, signatures.by_recovery);
+  const hasRecoveryAuth = recovery_proof &&
+    verifyRecoveryProof(oldDoc, recovery_proof);
 
   if (hasOldKeyAuth && hasNewKeyAuth) {
     // Normal revocation path
@@ -190,8 +197,8 @@ function verifyKeyRevocation(revocation: KeyRevocation): VerificationResult {
   }
 
   if (hasNewKeyAuth && hasRecoveryAuth) {
-    // Recovery path
-    return { valid: true, path: 'recovery' };
+    // Recovery path (subject to cooldown if status == 'pending')
+    return { valid: true, path: 'recovery', cooldown: recovery_proof.status === 'pending' };
   }
 
   return { valid: false, error: 'INSUFFICIENT_AUTHORIZATION' };

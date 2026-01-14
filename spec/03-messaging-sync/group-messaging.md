@@ -76,11 +76,15 @@ interface SenderKey {
   keyId: string;           // Unique identifier (16 bytes, base64)
   senderIid: string;       // IID of the sender (for KDF domain separation)
   chainKey: Uint8Array;    // 32-byte chain key
-  signatureKey: KeyPair;   // Ed25519 for message signing
   createdAt: Timestamp;
   iteration: number;       // How many messages encrypted with this chain
 }
 ```
+
+**Signature model:** Group messages are signed using the **PUSE envelope signature** with the sender's identity signing key (from their identity document). There is no separate sender-key signature. This provides:
+- Non-repudiation tied to identity
+- Consistent verification model with 1:1 messages
+- Simpler key management (no per-sender-key signature keys)
 
 ### Sender Key Chain
 
@@ -102,10 +106,10 @@ def sender_key_encrypt(sender_key: SenderKey, group_id: bytes, plaintext: bytes)
     nonce = generate_nonce()
     ciphertext = ChaCha20Poly1305(message_key, nonce, plaintext)
 
-    # Sign the ciphertext
-    signature = Ed25519Sign(sender_key.signature_key.private, ciphertext)
+    # Note: Signing is done at the PUSE envelope level using the sender's
+    # identity signing key, not here. See secure-envelope.md.
 
-    return encode(sender_key.key_id, sender_key.iteration, nonce, ciphertext, signature)
+    return encode(sender_key.key_id, sender_key.iteration, nonce, ciphertext)
 ```
 
 ## Key Distribution
@@ -127,7 +131,6 @@ When Alice creates a group:
     "sender_iid": "<alice-iid>",
     "key_id": "<sender-key-id>",
     "chain_key": "<base64-32-bytes>",
-    "signature_public_key": "<base64-32-bytes>",
     "iteration": 0
   }
 }
@@ -213,12 +216,17 @@ All membership changes are represented as **Group State Updates** - signed opera
 ```typescript
 interface GroupStateUpdate {
   group_id: string;
-  version: string;                 // Monotonically increasing (decimal string)
+  version: string;                 // HLC-style: "<logical_clock>.<actor_iid_hash>" (decimal string)
   actor_iid: IdentityIdentifier;   // Who performed this action
   action: GroupAction;
   timestamp: string;               // RFC3339
   previous_version: string;        // Version this update builds on
 }
+
+// Version format: Each actor maintains a local logical clock.
+// On update: version = max(local_clock, max_seen_version) + 1
+// Full version string: "<logical_clock>.<first_8_chars_of_actor_iid>"
+// This prevents collisions without requiring coordination.
 
 type GroupAction =
   | { type: 'member_added'; member_iid: string; role: string; invited_by: string }

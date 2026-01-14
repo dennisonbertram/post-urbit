@@ -6,9 +6,9 @@ The Host API is the interface between applications and the node. Applications ca
 
 ## API Design Principles
 
-### Async by Default
+### Async by Polling
 
-All I/O operations are asynchronous. Apps yield to the host and receive callbacks.
+All I/O operations are asynchronous. Apps poll the host via `host.poll()` - there are no callbacks (no reentrancy). See `abi.md` for the authoritative async model.
 
 ### Capability-Gated
 
@@ -208,7 +208,6 @@ type MessagingSendError =
 // Request
 interface MessagingSubscribeRequest {
   filter: MessageFilter;
-  callback_entry: string;   // WASM export to call on message
 }
 
 interface MessageFilter {
@@ -222,11 +221,7 @@ interface MessagingSubscribeResponse {
   subscription_id: string;
 }
 
-// Callback (invoked on matching message)
-interface MessageCallback {
-  message: ReceivedMessage;
-}
-
+// Message delivery (via handle export, NOT callback - see abi.md)
 interface ReceivedMessage {
   id: string;
   sender: string;
@@ -241,28 +236,27 @@ interface ReceivedMessage {
 // Errors
 type MessagingSubscribeError =
   | 'INVALID_FILTER'
-  | 'CALLBACK_NOT_FOUND'
   | 'TOO_MANY_SUBSCRIPTIONS'
   | 'PERMISSION_DENIED';
 ```
 
 ### Subscription Lifecycle
 
-Subscriptions have specific lifecycle semantics:
+Subscriptions have specific lifecycle semantics. Messages are delivered as **new invocations** via the app's `handle` export (NOT callbacks - the runtime uses polling, not reentrancy).
 
 | Event | Behavior |
 |-------|----------|
 | App instance unloaded | Subscription persists in database |
-| Message arrives (app loaded) | Delivered immediately via `handle` |
+| Message arrives (app loaded) | Delivered via `handle` invocation with `type: 'message'` |
 | Message arrives (app unloaded) | Queued (max 1000 messages per app) |
-| App loaded with pending messages | Delivered on next invocation |
+| App loaded with pending messages | Delivered as invocations on next load |
 | App disabled | Subscriptions paused, messages dropped |
 | App uninstalled | Subscriptions deleted, queued messages deleted |
-| App updated | Subscriptions preserved if callback exists |
+| App updated | Subscriptions preserved |
 | Capability revoked | Subscription deleted, queued messages deleted |
 
 **Message delivery:**
-- Messages are delivered as invocations with `type: 'message'`
+- Messages are delivered as invocations with `type: 'message'` (see `abi.md` InvocationContext)
 - Delivery is at-least-once (apps should handle duplicates via message ID)
 - Order is preserved per-sender but not globally
 - Apps need `system:background` capability to receive messages when not actively running

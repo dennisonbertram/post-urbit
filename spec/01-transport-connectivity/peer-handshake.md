@@ -2,14 +2,15 @@
 
 ## Overview
 
-The peer handshake establishes an **identity-authenticated connection** on top of QUIC TLS. After QUIC handshake completes, both peers prove they control their claimed identities.
+The peer handshake establishes an **identity-authenticated connection** on top of QUIC TLS. After QUIC handshake completes, both peers prove they control their claimed identities and optionally their device identifiers (DIDs).
 
 ## Goals
 
 1. **Mutual authentication**: Both peers prove identity ownership
-2. **Binding**: TLS session is bound to specific IIDs
-3. **Key freshness**: Prevent replay of old handshakes
-4. **Document exchange**: Peers share current identity documents
+2. **Device binding**: Optionally bind session to specific device (DID)
+3. **TLS binding**: Session is bound to specific IIDs (and DIDs if provided)
+4. **Key freshness**: Prevent replay of old handshakes
+5. **Document exchange**: Peers share current identity and device documents
 
 ## Handshake Flow
 
@@ -26,6 +27,7 @@ The peer handshake establishes an **identity-authenticated connection** on top o
      │  ┌─────────────────────────────────────────┐  │
      │  │ ClientHello                             │  │
      │  │ - client_iid                            │  │
+     │  │ - client_did (optional)                 │  │
      │  │ - expected_server_iid (optional)        │  │
      │  │ - client_nonce                          │  │
      │  │ - timestamp                             │  │
@@ -35,17 +37,22 @@ The peer handshake establishes an **identity-authenticated connection** on top o
      │  ┌─────────────────────────────────────────┐  │
      │  │ ServerHello                             │  │
      │  │ - server_iid                            │  │
+     │  │ - server_did (optional)                 │  │
      │  │ - server_nonce                          │  │
      │  │ - timestamp                             │  │
      │  │ - identity_document                     │  │
+     │  │ - device_document (if server_did)       │  │
      │  │ - challenge_signature                   │  │
+     │  │ - device_signature (if server_did)      │  │
      │  └─────────────────────────────────────────┘  │
      │ ◄─────────────────────────────────────────────│
      │                                               │
      │  ┌─────────────────────────────────────────┐  │
      │  │ ClientAuth                              │  │
      │  │ - identity_document                     │  │
+     │  │ - device_document (if client_did)       │  │
      │  │ - challenge_signature                   │  │
+     │  │ - device_signature (if client_did)      │  │
      │  └─────────────────────────────────────────┘  │
      │ ─────────────────────────────────────────────►│
      │                                               │
@@ -55,7 +62,7 @@ The peer handshake establishes an **identity-authenticated connection** on top o
      │  └─────────────────────────────────────────┘  │
      │ ◄─────────────────────────────────────────────│
      │                                               │
-     │        (Connection authenticated)             │
+     │   (Connection authenticated: iid + optional did)
      │                                               │
 ```
 
@@ -68,6 +75,7 @@ The peer handshake establishes an **identity-authenticated connection** on top o
   "type": "client_hello",
   "version": 1,
   "client_iid": "<32-char-base32-iid>",
+  "client_did": "<32-char-base32-did>|null",
   "expected_server_iid": "<32-char-base32-iid>|null",
   "client_nonce": "<32-bytes-base64>",
   "timestamp": "<RFC3339-UTC>",
@@ -80,6 +88,7 @@ The peer handshake establishes an **identity-authenticated connection** on top o
 | `type` | Yes | Message type identifier |
 | `version` | Yes | Handshake protocol version |
 | `client_iid` | Yes | Client's identity identifier |
+| `client_did` | No | Client's device identifier (for per-device sessions) |
 | `expected_server_iid` | No | Expected server IID (if connecting to specific peer) |
 | `client_nonce` | Yes | 32 random bytes for challenge |
 | `timestamp` | Yes | Current time, must be within ±5 minutes |
@@ -92,13 +101,22 @@ The peer handshake establishes an **identity-authenticated connection** on top o
   "type": "server_hello",
   "version": 1,
   "server_iid": "<32-char-base32-iid>",
+  "server_did": "<32-char-base32-did>|null",
   "server_nonce": "<32-bytes-base64>",
   "timestamp": "<RFC3339-UTC>",
   "identity_document": { /* full identity document */ },
+  "device_document": { /* device document, if server_did */ },
   "challenge_signature": "<Ed25519-signature-base64>",
+  "device_signature": "<Ed25519-signature-base64>|null",
   "tls_binding": "<TLS-exporter-derived-value-base64>"
 }
 ```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `server_did` | No | Server's device identifier |
+| `device_document` | If `server_did` | Device document proving DID ownership |
+| `device_signature` | If `server_did` | Signature using device signing key |
 
 ### Challenge Signature
 
@@ -117,13 +135,39 @@ challenge_data = concat(
 challenge_signature = Ed25519_Sign(server_signing_key, SHA256(challenge_data))
 ```
 
+### Device Signature (if DID provided)
+
+If the server provides a `server_did`, it must also prove device ownership:
+
+```
+device_challenge_data = concat(
+  "post-urbit-device-handshake-v1",  // domain separator
+  client_nonce,
+  server_nonce,
+  tls_binding,
+  server_iid,
+  server_did
+)
+
+device_signature = Ed25519_Sign(device_signing_key, SHA256(device_challenge_data))
+```
+
+**Device verification:**
+1. Verify `device_document.signature_by_identity` using identity's current signing key
+2. Verify `device_signature` using `device_document.device_signing_key`
+3. Check `device_document.iid` matches `server_iid`
+4. Check `device_document.did` matches `server_did`
+5. Check device document is not expired (`expires_at` if present)
+
 ### ClientAuth
 
 ```json
 {
   "type": "client_auth",
   "identity_document": { /* full identity document */ },
-  "challenge_signature": "<Ed25519-signature-base64>"
+  "device_document": { /* device document, if client_did */ },
+  "challenge_signature": "<Ed25519-signature-base64>",
+  "device_signature": "<Ed25519-signature-base64>|null"
 }
 ```
 
@@ -140,6 +184,21 @@ challenge_data = concat(
 )
 
 challenge_signature = Ed25519_Sign(client_signing_key, SHA256(challenge_data))
+```
+
+If `client_did` was provided in ClientHello, client also includes device proof:
+
+```
+device_challenge_data = concat(
+  "post-urbit-device-handshake-v1",
+  server_nonce,
+  client_nonce,
+  tls_binding,
+  client_iid,
+  client_did
+)
+
+device_signature = Ed25519_Sign(device_signing_key, SHA256(device_challenge_data))
 ```
 
 ### HandshakeComplete
