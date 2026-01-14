@@ -253,22 +253,46 @@ If a peer receives a document with `sequence = N+K` when they last saw `sequence
 
 ### Conflict Resolution (Same Sequence Number)
 
-If two valid documents exist with the same `sequence`:
+Same-sequence conflicts indicate a serious problem: either a bug (multi-writer without coordination) or an active attack.
 
-1. Both must have valid signatures
-2. **Deterministic tiebreaker**: Compare SHA256 hash of canonical documents (without signatures)
-3. Accept document with lexicographically lower hash
-4. Log conflict for investigation (may indicate compromise)
+**Resolution Strategy**: Trust-on-first-use (TOFU) with manual resolution.
 
-```python
-def resolve_conflict(doc_a, doc_b):
-    assert doc_a.sequence == doc_b.sequence
-    hash_a = sha256(canonical_without_signatures(doc_a))
-    hash_b = sha256(canonical_without_signatures(doc_b))
-    return doc_a if hash_a < hash_b else doc_b
+```
+function handle_conflict(local_doc, incoming_doc):
+    assert local_doc.sequence == incoming_doc.sequence
+    assert local_doc.iid == incoming_doc.iid
+
+    if canonical_bytes(local_doc) == canonical_bytes(incoming_doc):
+        # Same document, no conflict
+        return local_doc
+
+    # Real conflict - DO NOT auto-resolve with hash comparison
+    # (hash tiebreaker is gameable by attackers who control keys)
+
+    # Option 1: Prefer document you saw first (TOFU)
+    if local_doc.first_seen_at < incoming_doc.received_at:
+        log_conflict(local_doc, incoming_doc, "keeping first-seen")
+        return local_doc
+
+    # Option 2: If both arrived simultaneously, require manual resolution
+    mark_conflict(local_doc.iid, [local_doc, incoming_doc])
+    notify_user("Identity conflict detected for {iid}, manual resolution required")
+    return null  # Suspend operations until resolved
 ```
 
-**Note**: Conflicts should be rare. Frequent conflicts suggest either compromise or misconfiguration.
+**Manual Resolution Options**:
+1. Contact identity owner out-of-band to verify which document is legitimate
+2. If key compromise suspected, wait for recovery-based update with higher sequence
+3. If one document has valid previous-key signature and other doesn't, prefer it
+
+**Why Not Hash Tiebreaker?**
+
+A hash-based tiebreaker allows an attacker with key access to intentionally craft a conflicting document that "wins" by manipulating claims/extensions/endpoints to achieve a lower hash. This turns same-sequence conflict into a stable takeover mechanism.
+
+**Prevention**:
+- Single-writer discipline: only one device/process updates identity at a time
+- Coordination: before updating, fetch current sequence and verify no concurrent updates
+- Recovery: if conflict occurs, use recovery mechanism to create authoritative high-sequence update
 
 ## State Machine
 

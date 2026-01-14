@@ -38,17 +38,56 @@ interface IdentityDocument {
   claims: Claims;
   extensions: Record<string, unknown>;
   signatures: SignatureSet;
+  // Present only when update was authorized via recovery (not key continuity)
+  recoveryProof?: RecoveryProofEmbed;
+}
+
+// Recovery proof embedded in identity document
+interface RecoveryProofEmbed {
+  method: 'social' | 'device-escrow' | 'threshold' | 'provider';
+  initiatedAt: Timestamp;
+  cooldownExpiresAt: Timestamp;
+  status: 'pending' | 'active' | 'contested';
+  proofData: SocialRecoveryProof | DeviceEscrowProof | ThresholdProof | ProviderProof;
+}
+
+interface SocialRecoveryProof {
+  attestations: RecoveryAttestation[];
+}
+
+interface DeviceEscrowProof {
+  escrowSignature: Signature;
+}
+
+interface ThresholdProof {
+  reconstructedSignature: Signature;
+}
+
+interface ProviderProof {
+  providerIid: IdentityIdentifier;
+  providerAttestation: Signature;
+  verificationMethod: string;
 }
 
 interface KeySet {
   signing: {
+    genesis: PublicKey;           // IMMUTABLE - IID derived from this, never changes
     current: PublicKey;
     previous: PublicKey | null;
   };
   encryption: {
     current: PublicKey;
-    previous: PublicKey | null;
+    // Support multiple previous keys for offline peers
+    previous: EncryptionKeyHistory[];
   };
+}
+
+// Previous encryption keys with validity windows
+interface EncryptionKeyHistory {
+  key: PublicKey;
+  validFrom: SequenceNumber;      // Sequence when this key became current
+  validUntil: SequenceNumber;     // Sequence when this key was rotated out
+  expiresAt: Timestamp;           // After this time, senders should not use this key
 }
 
 interface Endpoint {
@@ -451,16 +490,14 @@ interface KeyStorage {
 
   /**
    * Store a private key securely.
+   * @param keyId Unique identifier (e.g., "signing:current", "encryption:seq:5")
+   * @param keyType Type of key for proper handling
+   * @param privateKey Raw 32-byte private key, Base64 encoded
    */
-  storeKey(keyId: string, privateKey: PrivateKey): Promise<void>;
+  storeKey(keyId: string, keyType: 'ed25519' | 'x25519', privateKey: PrivateKey): Promise<void>;
 
   /**
-   * Retrieve a private key.
-   */
-  getKey(keyId: string): Promise<PrivateKey | null>;
-
-  /**
-   * Delete a private key.
+   * Delete a private key securely (zero memory before release).
    */
   deleteKey(keyId: string): Promise<void>;
 
@@ -469,19 +506,62 @@ interface KeyStorage {
    */
   listKeys(): Promise<string[]>;
 
-  // === Signing (key never leaves storage) ===
+  /**
+   * Check if a key exists.
+   */
+  hasKey(keyId: string): Promise<boolean>;
+
+  // === Ed25519 Signing (key never leaves storage) ===
 
   /**
-   * Sign data using a stored key (key never exposed).
+   * Sign data using a stored Ed25519 key.
+   * @param keyId ID of the signing key
+   * @param data Data to sign
+   * @returns Raw 64-byte Ed25519 signature, Base64 encoded
    */
   signWith(keyId: string, data: Uint8Array): Promise<Signature>;
 
+  // === X25519 Key Agreement (for E2E encryption) ===
+  // NOTE: X25519 is a Diffie-Hellman primitive, NOT direct encryption.
+  // Use ECDH to derive a shared secret, then use that with AEAD.
+
   /**
-   * Decrypt data using stored encryption key.
+   * Perform X25519 key agreement to derive a shared secret.
+   * @param keyId ID of the local X25519 private key
+   * @param peerPublicKey Peer's X25519 public key (raw 32 bytes, Base64)
+   * @returns 32-byte shared secret (use with HKDF to derive encryption keys)
    */
-  decryptWith(keyId: string, ciphertext: Uint8Array): Promise<Uint8Array>;
+  deriveSharedSecret(keyId: string, peerPublicKey: PublicKey): Promise<Uint8Array>;
+
+  /**
+   * Derive encryption keys from shared secret using HKDF.
+   * @param sharedSecret From deriveSharedSecret()
+   * @param info Context string (e.g., "message-encryption" or "session-key")
+   * @param salt Optional salt (use conversation ID or nonce)
+   * @returns Derived key material for AEAD (e.g., 32 bytes for ChaCha20-Poly1305)
+   */
+  deriveKey(sharedSecret: Uint8Array, info: string, salt?: Uint8Array): Promise<Uint8Array>;
 }
 ```
+
+### Encryption Scheme Contract
+
+**X25519 is used for key agreement, not direct encryption.**
+
+The identity layer provides X25519 key pairs. Messaging and other layers use them as follows:
+
+1. **Key Agreement**: `shared_secret = X25519(my_private, peer_public)`
+2. **Key Derivation**: `encryption_key = HKDF-SHA256(shared_secret, salt, info)`
+3. **Encryption**: `ciphertext = ChaCha20-Poly1305(encryption_key, nonce, plaintext)`
+
+| Component | Algorithm |
+|-----------|-----------|
+| Key agreement | X25519 |
+| Key derivation | HKDF-SHA256 |
+| Symmetric encryption | ChaCha20-Poly1305 |
+| Nonce size | 12 bytes (96 bits) |
+
+**Messaging layer** will specify the full encryption protocol including session keys, ratcheting, and forward secrecy.
 
 ## Events
 
