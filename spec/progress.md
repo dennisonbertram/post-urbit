@@ -1,7 +1,7 @@
 # Specification Progress
 
-## Iteration: 14
-## Mode: HOLISTIC REVIEW (RFC + layer alignment)
+## Iteration: 15
+## Mode: DEEP DIVE (RFC-0002 Transport)
 ## Status: 99/100 completeness estimate
 
 ### Fully Specified
@@ -13,10 +13,9 @@
 - **05-ux-packaging**: UX and packaging layer + aligned auth model (cookie-based)
 
 ### In Progress
-- 06-rfcs: RFC-0001 Identity complete; RFC-0002, RFC-0003 pending
+- 06-rfcs: RFC-0001 Identity complete; RFC-0002 Transport complete; RFC-0003 pending
 
 ### Not Yet Started
-- RFC-0002 Transport (peer handshake, relay protocol)
 - RFC-0003 Messaging (PUSE envelope, Double Ratchet)
 - 07-implementation: Ready to start
 - 08-security: Can proceed in parallel
@@ -34,6 +33,7 @@
 - **Iteration 12 (holistic)**: Final cross-layer consistency review
 - **Iteration 13 (deep dive)**: RFC-0001 Identity Document drafted
 - **Iteration 14 (holistic)**: RFC + layer alignment review
+- **Iteration 15 (deep dive)**: RFC-0002 Transport Protocol drafted + reviewed
 
   **Cross-Layer Issues Fixed (Iteration 14):**
   1. B1: Domain separation aligned across all identity docs and test vectors
@@ -42,6 +42,17 @@
   4. B4: Multi-device session model clarified (v1 = identity-level sessions)
   5. B5: QUIC stream framing unified (stream type once, then length-prefixed JSON)
   6. B6: App manifest signing cleaned up (SIGNATURE file only, no embedded signature)
+
+  **RFC-0002 Issues Fixed (Iteration 15):**
+  1. B1: Handshake stream identification clarified (first client-initiated bidi stream)
+  2. B2: Application error code registry unified (0x105 = DUPLICATE_CONNECTION)
+  3. B3-B4: PURL packet type registry normalized (ERROR=0x07, REBIND=0x08)
+  4. B5: Base32 encoding fully specified (Crockford variant)
+  5. B6: Domain separator byte lengths corrected
+  6. B7: Anonymous connections declared out-of-scope for v1
+  7. B8: Stream payload typing clarified (JSON vs binary per stream type)
+  8. B9: Relay encapsulation model specified (full PURL forwarding)
+  9. B10: Test vectors completed with deterministic values
 
   **RFC-0001 Issues Fixed (Iteration 13):**
   1. B1: Bootstrap verification algorithm defined (TOFU + genesis fetch)
@@ -116,9 +127,11 @@ The spec is now **RFC-ready**. Suggested breakdown:
 - **RFC-0003**: PUSE Envelope + Double Ratchet + Mailbox
 
 ### Next Priority
-**Iteration 15 will be DEEP DIVE on RFC-0002 (Transport):**
+**Iteration 16 will be HOLISTIC REVIEW:**
 
 Focus areas:
-- Draft RFC-0002 covering peer handshake, relay protocol, QUIC integration
-- Include wire formats and test vectors
-- Cross-reference with 01-transport-connectivity specs
+- Verify RFC-0001 and RFC-0002 align with all layer specs
+- Check Base32 encoding (Crockford) is consistent across all documents
+- Verify error code registries are consistent
+- Confirm domain separator registry is complete
+- Check for any remaining cross-layer inconsistencies

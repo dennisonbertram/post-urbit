@@ -1,5 +1,7 @@
 # Peer Handshake Protocol
 
+**Note:** The authoritative specification is RFC-0002 (Transport Protocol). This document provides additional context and implementation guidance.
+
 ## Overview
 
 The peer handshake establishes an **identity-authenticated connection** on top of QUIC TLS. After QUIC handshake completes, both peers prove they control their claimed identities and optionally their device identifiers (DIDs).

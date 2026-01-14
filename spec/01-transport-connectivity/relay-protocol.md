@@ -191,14 +191,15 @@ Relay Packet:
 │ Payload (QUIC packet)                  │ <length> bytes
 └────────────────────────────────────────┘
 
-Packet Types:
+Packet Types (see RFC-0002 §7.5 for authoritative registry):
   0x01 = DATA          Forward to destination
   0x02 = PING          Keepalive
   0x03 = PONG          Keepalive response
-  0x04 = ALLOCATE      Request allocation (over HTTPS, not UDP)
+  0x04 = Reserved      (allocation via HTTPS, not UDP)
   0x05 = REFRESH       Extend allocation
   0x06 = RELEASE       End allocation
-  0x07 = ERROR         Relay error
+  0x07 = ERROR         Relay error response
+  0x08 = REBIND        Update source IP:port binding
 
 IID Encoding:
   - IID on wire is the raw 20-byte hash value (NOT Base32 encoded)

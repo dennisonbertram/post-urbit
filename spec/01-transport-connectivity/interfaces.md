@@ -264,7 +264,7 @@ interface TransportService {
   }>;
 }
 
-// Connection deduplication rules
+// Connection deduplication rules (see RFC-0002 §9.2 for error code registry)
 const CONNECTION_DEDUP = {
   /**
    * Connections are unique per (local_iid, local_did, peer_iid, peer_did) tuple.
@@ -279,7 +279,7 @@ const CONNECTION_DEDUP = {
    * Note: did may be undefined; undefined sorts before any defined value.
    */
   GLARE_RESOLUTION: 'smaller_iid_did_tuple_initiator_wins',
-  DUPLICATE_CONNECTION_CODE: 0x105,
+  DUPLICATE_CONNECTION_CODE: 0x105,  // RFC-0002 §9.2: DUPLICATE_CONNECTION
 } as const;
 ```
 
