@@ -22,8 +22,10 @@ IID = Base32Lower(SHA-256(genesis_signing_public_key_raw_bytes)[0:20])
 | **Hash output** | First 20 bytes (160 bits) of SHA-256 |
 | **Length** | 32 characters |
 | **Normalization** | Always lowercase; reject non-canonical forms |
+| **Valid characters** | `a-z` and `2-7` only (RFC4648 Base32 lowercase) |
 
-- **Example**: `k5xq7z8m9n2p3r4s5t6u7v8w9x0y1z2a`
+- **Example**: `k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a`
+- **Invalid examples**: `abc01890xyz` (contains 0, 1, 8, 9 which are not in Base32 alphabet)
 - **Derivation**: Hash of the FIRST (genesis) signing key ever used
 - **Immutable**: Never changes, even after key rotation
 
@@ -52,7 +54,7 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
 {
   "version": 1,
   "iid": "<base32-lowercase-identity-identifier>",
-  "sequence": <uint64>,
+  "sequence": "<uint64-as-decimal-string>",
   "timestamp": "<RFC3339-timestamp-UTC>",
   "keys": {
     "signing": {
@@ -62,7 +64,14 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
     },
     "encryption": {
       "current": "<base64-raw-x25519-public-key-32-bytes>",
-      "previous": "<base64-raw-x25519-public-key-32-bytes>|null"
+      "previous": [
+        {
+          "key": "<base64-raw-x25519-public-key>",
+          "valid_from": "<sequence-when-became-current>",
+          "valid_until": "<sequence-when-rotated-out>",
+          "expires_at": "<RFC3339-timestamp>"
+        }
+      ]
     }
   },
   "endpoints": [
@@ -114,8 +123,8 @@ All keys and signatures use these encodings:
 |-------|------|-------------|-------------|
 | `version` | uint8 | Must be `1` | Schema version for forward compatibility |
 | `iid` | string | 32 chars, Base32 lowercase | Identity Identifier, immutable |
-| `sequence` | uint64 | Monotonically increasing, max 2^64-2 | Prevents replay, must increment on every update |
-| `timestamp` | string | RFC3339, UTC, within ±24h of now | When this version was created |
+| `sequence` | string (uint64) | Monotonically increasing decimal string, max "18446744073709551614" | Prevents replay, must increment on every update |
+| `timestamp` | string | RFC3339, UTC, see validation rules | When this version was created |
 | `keys.signing.genesis` | string | Base64, 32 bytes decoded | Genesis Ed25519 public key (NEVER changes) |
 | `keys.signing.current` | string | Base64, 32 bytes decoded | Current Ed25519 public key |
 | `keys.encryption.current` | string | Base64, 32 bytes decoded | Current X25519 public key |
@@ -126,31 +135,77 @@ All keys and signatures use these encodings:
 | Field | Type | Constraints | Description |
 |-------|------|-------------|-------------|
 | `keys.signing.previous` | string\|null | Base64, 32 bytes | Previous signing key (for rotation verification) |
-| `keys.encryption.previous` | string\|null | Base64, 32 bytes | Previous encryption key (for decrypting old messages) |
+| `keys.encryption.previous` | array | See EncryptionKeyHistory | Previous encryption keys with validity windows (for offline peers) |
 | `endpoints` | array | Max 10 entries | How to reach this identity's node |
 | `recovery` | object | See recovery spec | Recovery configuration |
 | `claims` | object | See claims spec | Optional public metadata |
 | `extensions` | object | Max 4KB total | App-specific extensions |
 | `signatures.previous` | string\|null | Base64, 64 bytes | Signature by previous key (required during rotation) |
 
-### Endpoint Object
+### Encryption Key History Entry
+
+Previous encryption keys are retained with validity windows to support decryption by offline peers:
+
+```json
+{
+  "key": "<base64-raw-x25519-public-key>",
+  "valid_from": "5",
+  "valid_until": "10",
+  "expires_at": "2025-03-15T00:00:00Z"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `key` | string | Base64-encoded X25519 public key (32 bytes) |
+| `valid_from` | string | Sequence number when this key became current |
+| `valid_until` | string | Sequence number when this key was rotated out |
+| `expires_at` | timestamp | After this time, senders should not use this key |
+
+**Retention policy**: Keep at most 5 previous keys or 30 days, whichever is less. Senders should prefer `current` key; fall back to `previous` only for replying to old messages.
+
+### Endpoint Object (Normative, shared with Transport layer)
+
+This is the canonical endpoint schema used by both Identity and Transport layers.
 
 ```json
 {
   "type": "direct|relay|mailbox",
-  "address": "<protocol-specific-address>",
-  "priority": 0-255,
-  "metadata": { <optional-type-specific-data> }
+  "host": "<hostname-or-ip>",
+  "port": 4433,
+  "transport": "quic",
+  "priority": 0,
+  "relay_id": "<relay-iid-if-type-relay>",
+  "observed_at": "<RFC3339-when-last-verified>",
+  "metadata": {}
 }
 ```
 
-| Type | Address Format | Description |
-|------|----------------|-------------|
-| `direct` | `host:port` or `[ipv6]:port` | Direct QUIC connection |
-| `relay` | `https://relay.example.com/path` | Relay service URL |
-| `mailbox` | `https://mailbox.example.com/iid` | Store-and-forward service |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | `direct`, `relay`, or `mailbox` |
+| `host` | string | Yes | Hostname, IPv4, or `[IPv6]` (brackets for IPv6) |
+| `port` | number | Yes | UDP port number (1-65535) |
+| `transport` | string | No | `quic` (default) or `https` for mailbox |
+| `priority` | number | Yes | 0-255, lower = higher priority |
+| `relay_id` | string | No | IID of relay operator (for relay type) |
+| `observed_at` | timestamp | No | When this endpoint was last verified reachable |
+| `metadata` | object | No | Type-specific additional data |
+
+**Type-specific notes**:
+
+| Type | Usage |
+|------|-------|
+| `direct` | Direct QUIC connection to host:port |
+| `relay` | QUIC via relay server (relay_id identifies relay) |
+| `mailbox` | Store-and-forward via HTTPS (host:port is mailbox server) |
 
 **Priority**: Lower number = higher priority. Peers try endpoints in priority order.
+
+**Host normalization**:
+- Hostnames: lowercase, no trailing dot
+- IPv4: standard dotted decimal
+- IPv6: lowercase, bracketed `[2001:db8::1]`, no zone ID
 
 ### Recovery Configuration
 
@@ -229,7 +284,7 @@ signature = Ed25519_Sign(signing_private_key, canonical_bytes)
 
 1. Verify `iid == Base32Lower(SHA256(keys.signing.genesis)[0:20])` (genesis key must match IID)
 2. Verify `sequence > previous_known_sequence`
-3. Verify `timestamp` is within ±24 hours of current time (reject stale/future docs)
+3. Verify timestamp (see Timestamp Validation Rules below)
 4. Verify `signatures.current` over canonical document using `keys.signing.current`
 5. Authorization check (one of the following must pass):
    - **Key continuity**: If `keys.signing.current` differs from previous known:
@@ -238,6 +293,23 @@ signature = Ed25519_Sign(signing_private_key, canonical_bytes)
    - **Recovery authorization**: If `signatures.previous` is null and `recovery_proof` exists:
      - Verify recovery proof according to the method (see recovery-mechanisms.md)
      - If `recovery_proof.status == "pending"`, treat document as provisional until cooldown expires
+
+### Timestamp Validation Rules
+
+The `timestamp` field prevents future-dated documents but does NOT enforce a maximum age (which would break caching and offline operation):
+
+| Rule | Constraint | Rationale |
+|------|------------|-----------|
+| **Future limit** | MUST NOT be more than 24 hours ahead of verifier's clock | Prevents pre-dating attacks |
+| **Monotonicity** | MUST be ≥ previous document's timestamp (if known) | Prevents backdating |
+| **No max age** | MAY be arbitrarily old | Enables caching, offline, and archival |
+| **Clock skew** | Allow reasonable tolerance (~5 minutes) for sync errors | Network/device variance |
+
+**Implementation guidance**:
+- Reject documents with `timestamp > now + 24h`
+- Accept documents with old timestamps if sequence number is valid
+- UI MAY warn on "stale" documents (e.g., >30 days old), but MUST NOT auto-reject
+- Sequence number is the primary replay protection, not timestamp
 
 ### Handling Missed Sequence Numbers (Gaps)
 
@@ -339,26 +411,31 @@ For network transmission, Identity Documents are encoded as:
 
 ### Genesis Document (New Identity)
 
+Note: All keys are raw 32-byte Ed25519/X25519 keys encoded as Base64 (NOT DER/SPKI).
+Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
+
 ```json
 {
   "version": 1,
-  "iid": "k5xq7z8m9n2p3r4s5t6u7v8w9x0y1z2a",
-  "sequence": 0,
+  "iid": "k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a",
+  "sequence": "0",
   "timestamp": "2025-01-13T12:00:00Z",
   "keys": {
     "signing": {
-      "current": "MCowBQYDK2VwAyEA...",
+      "genesis": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M",
+      "current": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M",
       "previous": null
     },
     "encryption": {
-      "current": "MCowBQYDK2VuAyEA...",
+      "current": "R4tK2mN8pQ6sL1wF3vX5yZ7aB9cD0eG2hJ4kM6nP8r",
       "previous": null
     }
   },
   "endpoints": [
     {
       "type": "direct",
-      "address": "192.168.1.100:4433",
+      "host": "192.168.1.100",
+      "port": 4433,
       "priority": 0
     }
   ],
@@ -371,40 +448,64 @@ For network transmission, Identity Documents are encoded as:
   },
   "extensions": {},
   "signatures": {
-    "current": "MEUCIQD...",
+    "current": "kL3mN4pQ5rS6tU7vW8xY9zA0bC1dE2fG3hI4jK5lM6nO7pQ8rS9tU0vW1xY2zA3bC4dE5fG6hI7jK8lM9nO0pQr",
     "previous": null
   }
 }
 ```
+
+**Genesis document invariants**:
+- `keys.signing.genesis == keys.signing.current` (genesis doc uses genesis key)
+- `iid == Base32Lower(SHA256(keys.signing.genesis)[0:20])`
+- `sequence == 0`
+- `signatures.previous == null`
 
 ### After Key Rotation (sequence = 1)
 
 ```json
 {
   "version": 1,
-  "iid": "k5xq7z8m9n2p3r4s5t6u7v8w9x0y1z2a",
-  "sequence": 1,
+  "iid": "k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a",
+  "sequence": "1",
   "timestamp": "2025-02-15T08:30:00Z",
   "keys": {
     "signing": {
-      "current": "MCowBQYDK2VwAyEA<NEW>...",
-      "previous": "MCowBQYDK2VwAyEA<OLD>..."
+      "genesis": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M",
+      "current": "xN2wP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8p",
+      "previous": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M"
     },
     "encryption": {
-      "current": "MCowBQYDK2VuAyEA<NEW>...",
-      "previous": "MCowBQYDK2VuAyEA<OLD>..."
+      "current": "aB3cD5eF7gH9iJ1kL3mN5oP7qR9sT1uV3wX5yZ7aB9c",
+      "previous": "R4tK2mN8pQ6sL1wF3vX5yZ7aB9cD0eG2hJ4kM6nP8r"
     }
   },
-  "endpoints": [...],
-  "recovery": {...},
-  "claims": {...},
+  "endpoints": [
+    {
+      "type": "direct",
+      "host": "192.168.1.100",
+      "port": 4433,
+      "priority": 0
+    }
+  ],
+  "recovery": {
+    "method": "none",
+    "config": {}
+  },
+  "claims": {
+    "name": "Alice"
+  },
   "extensions": {},
   "signatures": {
-    "current": "<signature-by-NEW-key>",
-    "previous": "<signature-by-OLD-key>"
+    "current": "newKeySignature0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567",
+    "previous": "oldKeySignature0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567"
   }
 }
 ```
+
+**Key rotation invariants**:
+- `keys.signing.genesis` NEVER changes (same as sequence 0)
+- `keys.signing.previous` contains the key from prior document
+- `signatures.previous` proves authorization by the old key holder
 
 ## Error Conditions
 

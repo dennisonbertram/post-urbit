@@ -72,14 +72,15 @@ interface StreamInfo {
 
 type StreamType = 'control' | 'identity' | 'message' | 'sync' | 'bulk';
 
-// Endpoint type (from identity document)
+// Endpoint type (normative definition in 02-identity-trust/identity-document-schema.md)
+// This is the canonical schema shared between Identity and Transport layers
 interface Endpoint {
   type: 'direct' | 'relay' | 'mailbox';
-  address: string;                    // IP or hostname
-  port: number;
+  host: string;                       // Hostname, IPv4, or [IPv6]
+  port: number;                       // UDP port (1-65535)
   priority: number;                   // 0-255, lower = higher priority
   transport?: 'quic' | 'https';       // Default: quic
-  relayId?: string;                   // For relay endpoints
+  relayId?: IdentityIdentifier;       // For relay endpoints (relay's IID)
   observedAt?: Timestamp;             // When this endpoint was last verified
   metadata?: Record<string, string>;
 }

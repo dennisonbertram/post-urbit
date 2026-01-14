@@ -71,7 +71,7 @@ The peer handshake establishes an **identity-authenticated connection** on top o
   "expected_server_iid": "<32-char-base32-iid>|null",
   "client_nonce": "<32-bytes-base64>",
   "timestamp": "<RFC3339-UTC>",
-  "tls_binding": "<SHA256-of-TLS-session-id-base64>"
+  "tls_binding": "<TLS-exporter-derived-value-base64>"
 }
 ```
 
@@ -96,7 +96,7 @@ The peer handshake establishes an **identity-authenticated connection** on top o
   "timestamp": "<RFC3339-UTC>",
   "identity_document": { /* full identity document */ },
   "challenge_signature": "<Ed25519-signature-base64>",
-  "tls_binding": "<SHA256-of-TLS-session-id-base64>"
+  "tls_binding": "<TLS-exporter-derived-value-base64>"
 }
 ```
 

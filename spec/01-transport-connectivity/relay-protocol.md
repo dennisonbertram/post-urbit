@@ -43,19 +43,42 @@ Clients allocate a relay address before receiving connections.
 
 ### Allocation Request
 
+Allocation uses signed request body (NOT JWT) to prove identity ownership:
+
 ```
 POST /allocate HTTP/1.1
 Host: relay.example.com
 Content-Type: application/json
-Authorization: Bearer <jwt-signed-by-identity>
 
 {
   "iid": "<client's identity identifier>",
   "lifetime": 3600,
-  "signature": "<Ed25519 signature over request body>",
-  "timestamp": "<RFC3339>"
+  "timestamp": "<RFC3339-UTC>",
+  "nonce": "<16-bytes-base64-random>",
+  "identity_doc_sequence": 42,
+  "signature": "<Ed25519-signature-base64>"
 }
 ```
+
+**Signature construction**:
+```
+signature_input = concat(
+  "post-urbit-relay-allocate-v1",  // domain separator
+  iid,                              // 32-char Base32
+  lifetime (big-endian uint32),     // 4 bytes
+  timestamp (UTF-8),                // variable
+  nonce (raw bytes)                 // 16 bytes
+)
+signature = Ed25519_Sign(signing_key, SHA256(signature_input))
+```
+
+**Relay verification**:
+1. Parse request body
+2. Check `timestamp` within ±5 minutes of relay clock
+3. Check `nonce` not seen before (replay cache with 10-minute TTL)
+4. Fetch/cache identity document for `iid` at `identity_doc_sequence` or higher
+5. Reconstruct signature input and verify against identity document's current signing key
+6. If valid, create allocation bound to source IP:port
 
 ### Allocation Response
 
@@ -70,6 +93,31 @@ Authorization: Bearer <jwt-signed-by-identity>
 }
 ```
 
+### Allocation Binding and Mobility
+
+**IP Binding**: Allocations are bound to the source IP:port at creation time.
+
+| Scenario | Behavior |
+|----------|----------|
+| Same IP:port | Token accepted, packet forwarded |
+| Different IP, same token | Rejected (potential token theft) |
+| NAT rebinding (new port) | Client must send REBIND message |
+| Mobile handoff | Client must send REBIND message |
+
+**REBIND Message**: When a client's IP changes (NAT rebinding, WiFi→cellular), it sends a signed REBIND:
+
+```json
+{
+  "type": "rebind",
+  "allocation_id": "<id>",
+  "token": "<allocation-token>",
+  "timestamp": "<RFC3339>",
+  "signature": "<Ed25519-sig-over-rebind-request>"
+}
+```
+
+The relay verifies the signature, updates the binding, and resumes forwarding.
+
 ### Allocation Lifecycle
 
 ```
@@ -81,10 +129,10 @@ Authorization: Bearer <jwt-signed-by-identity>
 ┌─────────────┐
 │  ALLOCATED  │ ← Can receive connections
 └──────┬──────┘
-       │ timeout / refresh
+       │ timeout / refresh / rebind
        ▼
 ┌─────────────┐
-│  ALLOCATED  │ ← Renewed
+│  ALLOCATED  │ ← Renewed or rebound
 └──────┬──────┘
        │ expire / release
        ▼
@@ -112,9 +160,9 @@ Relay Packet:
 ├────────────────────────────────────────┤
 │ Allocation Token                       │ 16 bytes
 ├────────────────────────────────────────┤
-│ Destination IID (first 16 bytes)       │ 16 bytes (or 0 for relay commands)
+│ Destination IID (raw, decoded)         │ 20 bytes (or 0 for relay commands)
 ├────────────────────────────────────────┤
-│ Payload Length                         │ 2 bytes
+│ Payload Length (big-endian)            │ 2 bytes
 ├────────────────────────────────────────┤
 │ Payload (QUIC packet)                  │ <length> bytes
 └────────────────────────────────────────┘
@@ -127,6 +175,15 @@ Packet Types:
   0x05 = REFRESH       Extend allocation
   0x06 = RELEASE       End allocation
   0x07 = ERROR         Relay error
+
+IID Encoding:
+  - IID on wire is the raw 20-byte hash value (NOT Base32 encoded)
+  - Decode Base32 IID string to get 20 bytes for packet
+  - Zero-fill (20 null bytes) for relay commands that don't target a peer
+
+Allocation Token Encoding:
+  - 16 raw bytes
+  - When returned in API as string: Base64url (no padding), yielding 22 chars
 ```
 
 ### Relay Data Flow

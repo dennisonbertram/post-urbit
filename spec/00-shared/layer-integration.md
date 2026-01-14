@@ -1,0 +1,273 @@
+# Layer Integration (Glue Specification)
+
+## Overview
+
+This document specifies how the Identity and Transport layers integrate. It resolves ambiguities identified during holistic review and provides normative definitions for cross-layer contracts.
+
+## Identity↔Transport Integration
+
+### Discovery Contract
+
+The Transport layer provides peer discovery. The Identity layer uses it for identity document propagation.
+
+```typescript
+// What Identity layer expects (from caching-policy.md)
+interface IdentityTransport {
+  // Publish identity document to DHT
+  publishIdentity(document: IdentityDocument): Promise<void>;
+
+  // Fetch identity document by IID
+  fetchIdentity(iid: IdentityIdentifier): Promise<IdentityDocument | null>;
+}
+
+// What Transport layer provides (from interfaces.md)
+interface DiscoveryService {
+  // Register identity with DHT
+  registerIdentity(document: IdentityDocument): Promise<void>;
+
+  // Look up peer endpoints from DHT
+  lookupPeer(iid: IdentityIdentifier): Promise<PeerEndpoints | null>;
+}
+```
+
+**Resolution**: The Transport layer stores the **full identity document** in DHT, not just endpoints. `lookupPeer` returns endpoints, but internally the DHT stores the complete IDOC.
+
+### DHT Record Format
+
+What gets stored in the DHT:
+
+```
+DHT Key:   SHA256("post-urbit:identity:" || iid)
+DHT Value: IDOC binary envelope (see identity-document-schema.md)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Key | 32 bytes | SHA256 of prefixed IID |
+| Value | bytes | IDOC envelope (magic + version + length + JSON) |
+| TTL | uint32 | Time-to-live in seconds (default: 86400 = 24 hours) |
+| Signature | 64 bytes | Ed25519 signature by document's signing key |
+
+**Verification**: DHT nodes MUST verify the identity document signature before storing. This prevents arbitrary data storage and ensures only identity owners can update their records.
+
+### Transport API Bridge
+
+Concrete mapping between layers:
+
+```typescript
+// Identity calls this
+async function publishIdentity(document: IdentityDocument): Promise<void> {
+  // Serialize to IDOC envelope
+  const idocBytes = encodeIdoc(document);
+
+  // Compute DHT key
+  const key = sha256(concat("post-urbit:identity:", document.iid));
+
+  // Sign the DHT record
+  const recordSig = await keyStorage.signWith("signing:current", idocBytes);
+
+  // Use Transport's underlying DHT
+  await dht.put(key, idocBytes, { ttl: 86400, signature: recordSig });
+}
+
+// Identity calls this
+async function fetchIdentity(iid: IdentityIdentifier): Promise<IdentityDocument | null> {
+  const key = sha256(concat("post-urbit:identity:", iid));
+  const result = await dht.get(key);
+
+  if (!result) return null;
+
+  const document = decodeIdoc(result.value);
+
+  // Verify signature matches document
+  if (!verifyDocument(document)) return null;
+
+  return document;
+}
+```
+
+## Identity Updates Over Authenticated Connections
+
+When peers are connected, identity updates are pushed directly rather than through DHT.
+
+### Stream Type
+
+Identity updates use the `identity` stream type (0x02) on authenticated QUIC connections.
+
+### Message Format
+
+```
+Identity Update Stream:
+┌────────────────────────────────────────┐
+│ Stream Type: 0x02 (identity)           │ 1 byte
+├────────────────────────────────────────┤
+│ Message Type                           │ 1 byte
+├────────────────────────────────────────┤
+│ Length (big-endian)                    │ 4 bytes
+├────────────────────────────────────────┤
+│ Payload                                │ <length> bytes
+└────────────────────────────────────────┘
+
+Message Types:
+  0x01 = IDENTITY_UPDATE    Push new identity document
+  0x02 = IDENTITY_REQUEST   Request peer's current identity
+  0x03 = IDENTITY_RESPONSE  Response with identity document
+  0x04 = IDENTITY_ACK       Acknowledge receipt of update
+```
+
+### Update Push Flow
+
+```
+Alice                                    Bob
+  │                                       │
+  │ ─────── IDENTITY_UPDATE ────────────► │
+  │         (new IdentityDocument)        │
+  │                                       │
+  │ ◄────── IDENTITY_ACK ──────────────── │
+  │         (accepted: true, sequence: N) │
+  │                                       │
+```
+
+### Request Flow
+
+```
+Alice                                    Bob
+  │                                       │
+  │ ─────── IDENTITY_REQUEST ───────────► │
+  │         (known_sequence: N-1)         │
+  │                                       │
+  │ ◄────── IDENTITY_RESPONSE ─────────── │
+  │         (document or "no update")     │
+  │                                       │
+```
+
+## QUIC TLS Certificate Policy
+
+### Certificate Requirements
+
+| Requirement | Value |
+|-------------|-------|
+| Certificate type | Self-signed, ephemeral |
+| Signature algorithm | ECDSA P-256 or Ed25519 |
+| Validity period | 1 hour to 30 days |
+| Subject/Issuer | Not verified (any value) |
+
+### Verification Strategy
+
+TLS certificates are NOT used for identity verification. Instead:
+
+1. QUIC TLS provides transport encryption with forward secrecy
+2. **Accept any valid TLS certificate** (self-signed OK)
+3. Perform identity handshake (see peer-handshake.md) after TLS
+4. Identity handshake binds the TLS session to specific IIDs
+
+**Rationale**: This avoids dependency on PKI/CA infrastructure while still getting TLS 1.3 security. Identity is verified cryptographically through the post-TLS handshake.
+
+### DoS Considerations
+
+- Rate limit TLS handshakes per source IP
+- Require valid TLS before allocating connection resources
+- Drop connections that don't complete identity handshake within 30s
+
+## Mailbox Protocol (Store-and-Forward)
+
+### Overview
+
+Mailbox servers store messages for offline recipients. This is a minimal specification to enable offline messaging.
+
+### Mailbox Endpoint
+
+In identity document:
+```json
+{
+  "type": "mailbox",
+  "host": "mailbox.example.com",
+  "port": 443,
+  "transport": "https",
+  "priority": 100
+}
+```
+
+### API
+
+```
+POST /store/{recipient_iid}
+Content-Type: application/octet-stream
+Authorization: Bearer <sender-signed-token>
+
+Body: Encrypted message envelope (opaque to mailbox)
+
+Response: 201 Created, {"id": "<message-id>", "expires_at": "<timestamp>"}
+```
+
+```
+GET /retrieve/{my_iid}
+Authorization: Bearer <recipient-signed-token>
+
+Response: 200 OK, [{"id": "...", "envelope": "...", "stored_at": "..."}]
+```
+
+```
+DELETE /retrieve/{my_iid}/{message_id}
+Authorization: Bearer <recipient-signed-token>
+
+Response: 204 No Content
+```
+
+### Trust Model
+
+- Mailbox sees: sender IID (in signed token), recipient IID, encrypted blob, timing
+- Mailbox does NOT see: message contents (E2E encrypted)
+- Mailbox MAY: rate limit, charge for storage, impose size/duration limits
+- Mailbox MUST NOT: decrypt, modify, or selectively block messages
+
+### Message Envelope
+
+Encrypted message for mailbox storage (full format specified in 03-messaging-sync):
+
+```
+Mailbox Envelope (outer layer, minimal):
+┌────────────────────────────────────────┐
+│ Version: 0x01                          │ 1 byte
+├────────────────────────────────────────┤
+│ Sender IID (raw 20 bytes)              │ 20 bytes
+├────────────────────────────────────────┤
+│ Recipient IID (raw 20 bytes)           │ 20 bytes
+├────────────────────────────────────────┤
+│ Encrypted payload length               │ 4 bytes
+├────────────────────────────────────────┤
+│ Encrypted payload                      │ variable
+└────────────────────────────────────────┘
+```
+
+## Error Code Registry
+
+To prevent overlaps, error codes are allocated by layer:
+
+| Range | Layer | Examples |
+|-------|-------|----------|
+| 0x000-0x0FF | QUIC standard | NO_ERROR, PROTOCOL_VIOLATION |
+| 0x100-0x1FF | Transport | IDENTITY_MISMATCH, HANDSHAKE_FAILED |
+| 0x200-0x2FF | Identity | INVALID_DOCUMENT, SIGNATURE_FAILED |
+| 0x300-0x3FF | Messaging | (reserved for 03-messaging-sync) |
+| 0x400-0x4FF | Sync | (reserved for 03-messaging-sync) |
+| 0x500-0x5FF | App Runtime | (reserved for 04-app-runtime) |
+
+## Global Conventions
+
+### Endianness
+
+All multi-byte integers in binary wire formats are **big-endian** (network byte order) unless explicitly stated otherwise.
+
+### Timestamps
+
+All timestamps are **RFC3339 UTC** (e.g., `2025-01-13T12:00:00Z`).
+
+### Encoding
+
+| Type | Encoding | Notes |
+|------|----------|-------|
+| IID on wire | 32-char Base32 lowercase | Human-readable |
+| IID in packets | 20 raw bytes | Space-efficient |
+| Keys/signatures | Base64 standard (no padding) | `A-Za-z0-9+/` |
+| Sequence numbers | Decimal string | Avoid JSON number precision loss |

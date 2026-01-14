@@ -4,6 +4,27 @@
 
 This document specifies the complete API surface for the Identity & Trust layer. These interfaces are used by other layers (Transport, Messaging, Apps) and by applications.
 
+## Wire Format vs TypeScript Convention
+
+| Context | Convention | Example |
+|---------|------------|---------|
+| **On-wire JSON** | snake_case | `recovery_proof`, `initiated_at`, `signing_key` |
+| **TypeScript interfaces** | camelCase | `recoveryProof`, `initiatedAt`, `signingKey` |
+
+**Normative rule**: The on-wire JSON format uses snake_case (as shown in identity-document-schema.md). TypeScript interfaces use camelCase for developer ergonomics. Implementations MUST:
+1. Serialize to snake_case when sending over the wire
+2. Deserialize from snake_case when receiving
+3. Use JCS (JSON Canonicalization Scheme) on the snake_case wire format for signature verification
+
+**Field mapping** (TypeScript → Wire):
+- `recoveryProof` → `recovery_proof`
+- `initiatedAt` → `initiated_at`
+- `cooldownExpiresAt` → `cooldown_expires_at`
+- `proofData` → `proof_data`
+- `validFrom` → `valid_from`
+- `validUntil` → `valid_until`
+- `expiresAt` → `expires_at`
+
 ## Core Types
 
 ```typescript
@@ -21,7 +42,9 @@ type Signature = string;
 type Timestamp = string;
 
 // Monotonically increasing version number
-type SequenceNumber = number;
+// On-wire: decimal string to support uint64 safely (JSON numbers lose precision >2^53)
+// In TypeScript: use string or bigint, never number
+type SequenceNumber = string;  // Decimal string, e.g., "0", "42", "18446744073709551614"
 ```
 
 ## Identity Document Types
@@ -90,10 +113,15 @@ interface EncryptionKeyHistory {
   expiresAt: Timestamp;           // After this time, senders should not use this key
 }
 
+// Normative definition in identity-document-schema.md
 interface Endpoint {
   type: 'direct' | 'relay' | 'mailbox';
-  address: string;
-  priority: number; // 0-255, lower = higher priority
+  host: string;                       // Hostname, IPv4, or [IPv6]
+  port: number;                       // UDP port (1-65535)
+  priority: number;                   // 0-255, lower = higher priority
+  transport?: 'quic' | 'https';       // Default: quic
+  relayId?: IdentityIdentifier;       // For relay endpoints
+  observedAt?: Timestamp;             // When this endpoint was last verified
   metadata?: Record<string, string>;
 }
 

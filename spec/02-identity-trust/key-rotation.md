@@ -172,21 +172,26 @@ After creating a rotated document:
 - **Retain public key** in `keys.encryption.previous` indefinitely
 - Senders may encrypt to previous key if they haven't received update
 
-## Concurrent Updates
+## Concurrent Updates (Conflict Handling)
 
 If two devices attempt rotation simultaneously:
 
 1. Both create documents with `sequence = N + 1`
-2. Network will see conflicting documents
-3. **Resolution**: Accept the document with:
-   - Lower timestamp (if within 1 minute)
-   - Otherwise, require manual resolution via recovery
+2. Network will see conflicting documents with same sequence number
+3. **Resolution**: TOFU (trust-on-first-use) with manual fallback
 
-### Prevention
+**Resolution rules** (aligned with identity-document-schema.md):
+- **Same canonical content**: No conflict, documents are identical
+- **First-seen wins**: Each peer keeps the first valid document received
+- **No timestamp tiebreaker**: Timestamp comparison is gameable by attackers
+- **Manual resolution**: If conflict cannot be auto-resolved, mark identity as conflicted and notify user
 
-- **Coordination**: Before rotating, check for recent updates
-- **Advisory lock**: Post intent to rotate, wait 10 seconds for conflicts
-- **Single-writer**: Designate one device as primary for identity updates
+### Prevention (Strongly Recommended)
+
+- **Single-writer discipline**: Designate one device as primary for identity updates
+- **Coordination**: Before rotating, fetch latest sequence and verify no concurrent updates
+- **Advisory lock**: Post intent to rotate, wait 10 seconds for conflicts before publishing
+- **Recovery fallback**: If conflict occurs, use recovery mechanism to create authoritative update with higher sequence
 
 ## Rotation Frequency Recommendations
 
