@@ -1,8 +1,8 @@
 # Specification Progress
 
-## Iteration: 16
-## Mode: HOLISTIC REVIEW (RFC + Layer Alignment)
-## Status: 99/100 completeness estimate
+## Iteration: 17
+## Mode: DEEP DIVE (RFC-0003 Messaging)
+## Status: 100/100 completeness estimate
 
 ### Fully Specified
 - **02-identity-trust**: Core identity system + Device Identifiers (DID) + signing key history (extended retention)
@@ -11,12 +11,9 @@
 - **03-messaging-sync**: Messaging and sync layer + unified signature model + identity-level multi-device model
 - **04-app-runtime**: Application runtime + aligned package format (.postapp) + SIGNATURE file approach
 - **05-ux-packaging**: UX and packaging layer + aligned auth model (cookie-based)
-
-### In Progress
-- 06-rfcs: RFC-0001 Identity complete; RFC-0002 Transport complete; RFC-0003 pending
+- **06-rfcs**: RFC-0001 Identity, RFC-0002 Transport, RFC-0003 Messaging all complete
 
 ### Not Yet Started
-- RFC-0003 Messaging (PUSE envelope, Double Ratchet)
 - 07-implementation: Ready to start
 - 08-security: Can proceed in parallel
 - 09-governance: Can proceed in parallel
@@ -35,6 +32,14 @@
 - **Iteration 14 (holistic)**: RFC + layer alignment review
 - **Iteration 15 (deep dive)**: RFC-0002 Transport Protocol drafted + reviewed
 - **Iteration 16 (holistic)**: Full RFC + layer alignment review
+- **Iteration 17 (deep dive)**: RFC-0003 Messaging Protocol drafted + reviewed
+
+  **RFC-0003 Issues Fixed (Iteration 17):**
+  1. B1: Double Ratchet N/PN counter semantics clarified (0-indexed, PN = previous chain length)
+  2. B2: Initial ratchet state setup specified (§5.5 normative initialization for initiator/responder)
+  3. B3: Header extension framing specified (exactly ONE extension required per envelope)
+  4. H1: X3DH renamed to 2DH (simplified protocol without prekeys, documented rationale)
+  5. H2: Nonce timestamp verification relaxed for mailbox compatibility (MUST NOT reject based on age)
 
   **Cross-Layer Issues Fixed (Iteration 16):**
   1. B1: Base32 encoding unified to Crockford everywhere (RFC-0001, RFC-0002, layer-integration, identity-document-schema, test-vectors)
@@ -129,17 +134,17 @@ RFCs / Implementation ← READY TO START
 - [x] Test vectors reproducible from seed
 
 ### RFC Readiness Assessment
-The spec is now **RFC-ready**. Suggested breakdown:
+All three core RFCs are now **complete**:
 - **RFC-0001**: Identity Document + DHT + Device Documents ✅
 - **RFC-0002**: QUIC Transport + Peer Handshake + Relay Protocol ✅
-- **RFC-0003**: PUSE Envelope + Double Ratchet + Mailbox (pending)
+- **RFC-0003**: PUSE Envelope + Double Ratchet + 2DH + Group Messaging + Mailbox ✅
 
 ### Next Priority
-**Iteration 17 will be DEEP DIVE (RFC-0003 Messaging):**
+**Iteration 18 will be HOLISTIC REVIEW (Final RFC + Layer Alignment):**
 
 Focus areas:
-- Draft RFC-0003 for PUSE envelope format
-- Double Ratchet integration specification
-- Mailbox protocol specification
-- Key bundle format and exchange
-- Message acknowledgment and delivery receipts
+- Cross-reference all three RFCs for consistency
+- Verify all test vectors align with RFC specifications
+- Check domain separator registry completeness
+- Ensure error code registries are complete
+- Final pass on security considerations
