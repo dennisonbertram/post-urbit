@@ -421,10 +421,12 @@ interface RelayServer {
 interface RelayAllocation {
   allocationId: string;
   relay: RelayServer;
-  allocatedAddress: string;
-  allocatedPort: number;
+  // NOTE: allocatedAddress/Port refer to the CLIENT's bound address (their NAT mapping),
+  // NOT a relay-assigned port. The relay uses a stable port model (see relay-protocol.md).
+  boundAddress: string;     // Client's observed public IP
+  boundPort: number;        // Client's observed public port (NAT mapping)
   expiresAt: Timestamp;
-  token: string;
+  token: string;            // Base64url, 16 bytes
 }
 ```
 

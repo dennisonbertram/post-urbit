@@ -36,7 +36,7 @@ interface AppManifest {
   handlers: HandlersConfig;
   background: BackgroundConfig;
   dependencies: DependenciesConfig;
-  signature: SignatureConfig;
+  files: FilesConfig;
 }
 
 interface AppInfo {
@@ -127,10 +127,12 @@ interface DependenciesConfig {
   apps?: Record<AppId, string>;
 }
 
-interface SignatureConfig {
-  algorithm: 'ed25519';
-  publicKey: string;
-  signature: string;
+// NOTE: Package signature is in SIGNATURE file, not manifest.json
+// See 05-ux-packaging/app-distribution.md for the authoritative signing specification
+
+interface FilesConfig {
+  hashes: Record<string, string>;  // path -> "sha256:<hex>"
+  totalSize: number;                // Total uncompressed size in bytes
 }
 ```
 

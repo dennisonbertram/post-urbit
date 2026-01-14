@@ -210,28 +210,34 @@ Allocation Token Encoding:
   - When returned in API as string: Base64url (no padding), yielding 22 chars
 ```
 
-### Relay Data Flow
+### Relay Data Flow (Stable Port Model)
 
 ```
 Alice ──────────────────────────────────────────────────── Bob
   │                                                          │
   │  ┌─────────────────────────────────────────────────┐    │
-  │  │              Relay Server                        │    │
+  │  │              Relay Server (port 4433)            │    │
   │  │                                                  │    │
   │  │   ┌─────────────────┐    ┌─────────────────┐    │    │
   ├──┼──►│ Alice's Alloc   │    │ Bob's Alloc     │◄───┼────┤
-  │  │   │ Port: 52341     │    │ Port: 52342     │    │    │
+  │  │   │ Token: abc123   │    │ Token: xyz789   │    │    │
   │  │   └────────┬────────┘    └────────┬────────┘    │    │
   │  │            │    Forward           │             │    │
   │  │            └──────────────────────┘             │    │
   │  └─────────────────────────────────────────────────┘    │
   │                                                          │
 
-1. Alice sends to relay:52341 with dest=Bob's IID
-2. Relay looks up Bob's allocation
-3. Relay forwards to Bob via Bob's allocation port
-4. Bob receives with source=relay (Alice's original IP hidden)
+1. Alice connects to relay:4433, authenticates with her token
+2. Alice sends packet with dest=Bob's IID in PURL header
+3. Relay looks up Bob's allocation by IID
+4. Relay forwards to Bob's bound IP:port (Bob's NAT-mapped address)
+5. Bob receives with source=relay:4433 (Alice's IP hidden)
 ```
+
+**Key points:**
+- All clients connect to the SAME relay port (4433)
+- Routing is by destination IID, not per-allocation ports
+- Allocations track the client's bound IP:port (their NAT mapping), not relay-assigned ports
 
 ## Relay Authentication
 

@@ -306,23 +306,51 @@ Receivers MUST parse in this order:
 ### Signature Verification
 
 ```python
-def verify_envelope(envelope: bytes, sender_doc: IdentityDocument) -> bool:
+def verify_envelope(envelope: bytes, sender_doc: IdentityDocument,
+                    envelope_timestamp: Timestamp = None) -> bool:
+    """
+    Verify PUSE envelope signature against sender's identity document.
+
+    For delayed messages (e.g., mailbox delivery), envelope_timestamp helps
+    select the appropriate historical signing key.
+    """
     # Extract signature (last 64 bytes)
     signature = envelope[-64:]
     signed_data = envelope[:-64]
 
-    # Verify with sender's current or previous signing key
-    current_key = sender_doc.keys.signing.current
-    if ed25519_verify(current_key, signed_data, signature):
+    # 1. Try current signing key
+    if ed25519_verify(sender_doc.keys.signing.current, signed_data, signature):
         return True
 
-    # Try previous key (for recent key rotations)
+    # 2. Try previous signing key (for recent rotations)
     if sender_doc.keys.signing.previous:
         if ed25519_verify(sender_doc.keys.signing.previous, signed_data, signature):
             return True
 
+    # 3. Try historical signing keys (for delayed messages, see identity-document-schema.md)
+    # This is important for mailbox-delivered messages that may be days old
+    for hist_entry in sender_doc.keys.signing.get('history', []):
+        # If we have a timestamp, only try keys that were valid at that time
+        if envelope_timestamp:
+            # Check if key was active at envelope time
+            if hist_entry.valid_from <= envelope_timestamp <= hist_entry.expires_at:
+                if ed25519_verify(hist_entry.key, signed_data, signature):
+                    return True
+        else:
+            # Without timestamp, try all non-expired keys
+            if hist_entry.expires_at > now():
+                if ed25519_verify(hist_entry.key, signed_data, signature):
+                    return True
+
     return False
 ```
+
+**Key lookup order:**
+1. `keys.signing.current` - Most common case
+2. `keys.signing.previous` - Recent rotation
+3. `keys.signing.history[]` - For delayed/archived messages
+
+See `02-identity-trust/identity-document-schema.md` § Signing Key History Entry for the history entry format and retention policy (10 keys or 2 years).
 
 ## Forward Secrecy
 
@@ -395,22 +423,63 @@ When updating the ratchet, send a key update message:
 
 These are NOT implemented by default but can be added by applications.
 
+## Multi-Device Model
+
+### Identity-Level Addressing (Normative)
+
+PUSE envelopes are **addressed to identities (IIDs), not devices (DIDs)**. This is a deliberate design choice:
+
+| Aspect | Design |
+|--------|--------|
+| Envelope routing | `recipient_iid` only (no DID in envelope) |
+| Mailbox storage | Keyed by recipient IID |
+| Ratchet sessions | Per (sender_iid, recipient_iid) pair |
+| Device fanout | Handled by recipient's node internally |
+
+### Why Identity-Level Addressing?
+
+1. **Simpler mailbox model**: Senders don't need to know which devices are online
+2. **Privacy**: Senders don't learn recipient's device inventory
+3. **Consistent encryption**: One ratchet session per peer identity
+4. **Offline delivery**: Mailbox works without per-device endpoints
+
+### Device Fanout (Internal to Node)
+
+When a node receives a message for an identity:
+
+1. **Primary device decrypts**: The receiving device decrypts the PUSE envelope
+2. **Internal sync**: Plaintext (or re-encrypted) is synced to other devices via the sync protocol
+3. **Device-level trust**: All devices of an identity share access to message history
+
+```
+External View:
+  Sender → [PUSE to Alice IID] → Mailbox/Transport → Alice's Node
+
+Internal to Alice's Node:
+  Alice's Phone → [internal sync] → Alice's Laptop
+                                 → Alice's Desktop
+```
+
+### Security Implications
+
+- **Compromise of one device**: Exposes identity's message history (sync shares data)
+- **Revoked device**: Must be removed from sync access; identity may need key rotation
+- **Device isolation**: NOT supported at the PUSE layer; apps can add per-device encryption on top
+
+### When DIDs Matter
+
+DIDs are used for:
+- **Transport connections**: Establish per-device transport sessions
+- **Device discovery**: Find which devices are reachable
+- **Device revocation**: Identify specific compromised devices
+- **NOT for messaging encryption**: That's identity-level
+
 ## Test Vectors
 
-### Test Vector 1: Basic Envelope
-
-```
-Sender signing key (hex): e8f32a1b...
-Sender encryption key (hex): a1b2c3d4...
-Recipient encryption key (hex): 5e6f7a8b...
-Plaintext: {"type":"text","timestamp":"2025-01-13T12:00:00Z","sequence":"1","content":{"text":"Hello"}}
-Note: Message ID is in the PUSE header (16-byte UUID), NOT in plaintext
-
-Expected envelope (hex): 50555345...
-Expected signature (hex): 7a8b9c0d...
-```
-
-(Full test vectors to be generated during implementation)
+See `00-shared/test-vectors.md` for authoritative, reproducible test vectors including:
+- PUSE envelope construction
+- Signature generation and verification
+- X3DH key agreement for initial messages
 
 ## Implementation Notes
 

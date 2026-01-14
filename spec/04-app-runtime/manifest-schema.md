@@ -85,12 +85,16 @@ Every application includes a manifest file (`manifest.json`) that declares metad
     "node_version": ">=1.0.0",
     "api_version": "1"
   },
-  "signature": {
-    "algorithm": "ed25519",
-    "public_key": "<base64-ed25519-pubkey>",
-    "signature": "<base64-signature-over-manifest>"
+  "files": {
+    "hashes": {
+      "main.wasm": "sha256:a1b2c3d4...",
+      "assets/icon.png": "sha256:e5f6a7b8..."
+    },
+    "total_size": 1048576
   }
 }
+// NOTE: Signature is in separate SIGNATURE file, NOT in manifest.json
+// See 05-ux-packaging/app-distribution.md for signing/verification
 ```
 
 ## Field Specifications
@@ -284,42 +288,55 @@ interface DependenciesConfig {
 }
 ```
 
-### Signature
+### Package Signature (Normative)
+
+**IMPORTANT:** Package signing uses the **SIGNATURE file approach**, NOT an embedded manifest.signature field.
+
+The authoritative specification is in `05-ux-packaging/app-distribution.md`. Key points:
+
+1. **SIGNATURE file is REQUIRED** in the `.postapp` ZIP archive
+2. **manifest.json does NOT contain a signature field**
+3. The SIGNATURE file contains:
+   - `author_iid`: Signer's identity identifier
+   - `timestamp`: When the package was signed
+   - `signature`: Ed25519 signature over the signing payload
+   - `signed_manifest_hash`: SHA256 of canonical manifest.json
+
+### File Hashes
+
+File hashes are REQUIRED in manifest.json for package integrity:
 
 ```typescript
-interface SignatureConfig {
-  signature: {
-    // Signing algorithm
-    algorithm: 'ed25519';
-
-    // Public key of signer
-    public_key: string;     // Base64 encoded, 32 bytes
-
-    // Signature over canonical manifest (without signature field)
-    signature: string;      // Base64 encoded, 64 bytes
+interface FilesConfig {
+  // Content hashes for all files in package
+  files: {
+    hashes: Record<string, string>;  // path -> "sha256:<hex>"
+    total_size: number;               // Total uncompressed size in bytes
   };
-
-  // Content hashes for package integrity (REQUIRED)
-  files: Record<string, string>;  // path -> "sha256:<hex>"
 }
 ```
-
-**File hashes are mandatory.** The signature covers the entire manifest including `files`, ensuring the signature binds to package contents.
 
 Example:
 ```json
 {
   "files": {
-    "main.wasm": "sha256:a1b2c3d4e5f6...",
-    "assets/icon.png": "sha256:f6e5d4c3b2a1..."
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "public_key": "...",
-    "signature": "..."
+    "hashes": {
+      "main.wasm": "sha256:a1b2c3d4e5f6...",
+      "assets/icon.png": "sha256:f6e5d4c3b2a1..."
+    },
+    "total_size": 1234567
   }
 }
 ```
+
+### Verification Flow
+
+See `05-ux-packaging/app-distribution.md` § Verification Process for the complete verification algorithm:
+
+1. Extract and verify SIGNATURE file
+2. Verify manifest hash matches signed_manifest_hash
+3. Verify each file hash matches manifest.files.hashes
+4. Verify author's identity and signing key validity
 
 ## Manifest Validation
 

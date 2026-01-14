@@ -1,22 +1,22 @@
 # Specification Progress
 
-## Iteration: 11
-## Mode: DEEP DIVE (test vectors)
-## Status: 97/100 completeness estimate
+## Iteration: 12
+## Mode: HOLISTIC REVIEW (all layers)
+## Status: 98/100 completeness estimate
 
 ### Fully Specified
 - **02-identity-trust**: Core identity system + Device Identifiers (DID) + signing key history (extended retention)
-- **01-transport-connectivity**: Transport layer + multi-device + DHT integration + stable relay port model
-- **00-shared**: Layer integration specs + mailbox auth + device DHT records + **test vectors**
-- **03-messaging-sync**: Messaging and sync layer + unified signature model (no sender-key sig) + header extension framing fixed
-- **04-app-runtime**: Application runtime + aligned package format (.postapp)
+- **01-transport-connectivity**: Transport layer + multi-device + DHT integration + stable relay port model (corrected)
+- **00-shared**: Layer integration specs + mailbox auth + device DHT records + test vectors + encoding conventions
+- **03-messaging-sync**: Messaging and sync layer + unified signature model + identity-level multi-device model
+- **04-app-runtime**: Application runtime + aligned package format (.postapp) + SIGNATURE file approach
 - **05-ux-packaging**: UX and packaging layer + aligned auth model (cookie-based)
 
 ### In Progress
-- SDK interface examples
+- Final polish before RFC drafting
 
 ### Not Yet Started
-- 06-rfcs: Can draft RFC-0001 through RFC-0003
+- 06-rfcs: Ready to draft (RFC-0001 Identity, RFC-0002 Transport, RFC-0003 Messaging)
 - 07-implementation: Ready to start
 - 08-security: Can proceed in parallel
 - 09-governance: Can proceed in parallel
@@ -30,61 +30,72 @@
 - **Iteration 9 (deep dive)**: 05-ux-packaging layer created + reviewed
 - **Iteration 10 (holistic)**: Full 6-layer consistency review
 - **Iteration 11 (deep dive)**: Test vectors with real crypto values
+- **Iteration 12 (holistic)**: Final cross-layer consistency review
 
-  **Issues Fixed (Iteration 11):**
-  1. ✅ Test vectors created with reproducible cryptographic values
-  2. ✅ HKDF salt handling made normative (empty salt → 32 zero bytes)
-  3. ✅ Header extension framing aligned (no inner length field)
-  4. ✅ IID/DID derivation vectors with verifiable outputs
-  5. ✅ X3DH key agreement vectors with computed DH outputs
-  6. ✅ Peer handshake challenge vectors with signatures
-  7. ✅ KDF chain step and root chain KDF vectors
+  **BLOCKING Issues Fixed (Iteration 12):**
+  1. ✅ B1: Multi-device messaging model clarified (identity-level addressing, device fanout internal)
+  2. ✅ B2: Relay stable port model diagram/description aligned (removed per-allocation ports)
+  3. ✅ B3: QUIC stream type framing unified (type once at stream start, then frames)
+  4. ✅ B4: App manifest/package signing unified (SIGNATURE file approach, removed manifest.signature)
+
+  **HIGH Issues Fixed (Iteration 12):**
+  1. ✅ H5: PUSE signature verification now checks keys.signing.history for delayed messages
+  2. ✅ H6: Device document DHT signature authority clarified (identity key, not device key)
+  3. ✅ H7: Base64 vs Base64url encoding convention documented
 
 ### Critical Path Analysis
 ```
-Identity (02) ← COMPLETE + extended key history
+Identity (02) ← COMPLETE
     ↓
-Transport (01) ← COMPLETE + stable relay port
+Transport (01) ← COMPLETE (relay model fixed)
     ↓
-Layer Integration (00) ← COMPLETE + device DHT records + TEST VECTORS
+Layer Integration (00) ← COMPLETE (framing, encoding aligned)
     ↓
-Messaging & Sync (03) ← COMPLETE + unified signatures + header framing
+Messaging & Sync (03) ← COMPLETE (multi-device model)
     ↓
-App Runtime (04) ← COMPLETE + .postapp format
+App Runtime (04) ← COMPLETE (signing unified)
     ↓
-Packaging (05) ← COMPLETE + aligned auth model
+Packaging (05) ← COMPLETE
     ↓
 RFCs / Implementation ← READY TO START
 ```
 
 ### Specification Checklist Summary
 - [x] All 6 layers specified
-- [x] Cross-layer type consistency verified (iteration 10)
-- [x] Package format unified (.postapp ZIP)
+- [x] Cross-layer type consistency verified (iteration 10, 12)
+- [x] Package format unified (.postapp ZIP + SIGNATURE file)
 - [x] Device identifier (DID) flow end-to-end with DHT records
-- [x] Signature model unified (PUSE identity signatures)
+- [x] Signature model unified (PUSE identity signatures + history lookup)
 - [x] Async model unified (polling, no callbacks)
 - [x] DHT format aligned across layers (identity, devices, revocation)
 - [x] Recovery proof schema unified
 - [x] Auth model aligned (cookie/browser, bearer/CLI)
-- [x] Relay stable port model
+- [x] Relay stable port model (diagram corrected)
 - [x] Signing key history extended for long-lived verification
 - [x] Complete test vectors (iteration 11)
-- [ ] SDK interface examples
+- [x] Multi-device messaging model (identity-level with internal fanout)
+- [x] Stream framing aligned (type once, then frames)
+- [x] Encoding conventions documented (Base64 vs Base64url)
+- [ ] SDK interface examples (optional for MVP)
 
 ### Holistic Health Check
 - [x] All interfaces align across components
-- [x] No contradictions between specs (5 BLOCKING fixed in iteration 10)
+- [x] No contradictions between specs (4 BLOCKING fixed in iteration 12)
 - [x] Dependencies form a DAG (no cycles)
 - [x] Core vision preserved
 - [x] Appropriate level of detail
 - [x] Test vectors reproducible from seed
 
+### RFC Readiness Assessment
+The spec is now **RFC-ready**. Suggested breakdown:
+- **RFC-0001**: Identity Document + DHT + Device Documents
+- **RFC-0002**: QUIC Transport + Peer Handshake + Relay Protocol
+- **RFC-0003**: PUSE Envelope + Double Ratchet + Mailbox
+
 ### Next Priority
-**Iteration 12 will be HOLISTIC REVIEW:**
+**Iteration 13 will be DEEP DIVE on RFC drafting:**
 
 Focus areas:
-- Final cross-layer consistency check
-- SDK interface examples
-- Security audit documentation (08-security)
-- Implementation phase planning (07-implementation)
+- Draft RFC-0001 (Identity) with wire formats and test vectors
+- Ensure all normative requirements use RFC 2119 language
+- Cross-reference to implementation test vectors

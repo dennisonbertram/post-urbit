@@ -110,7 +110,7 @@ Multi-device support requires discovering devices associated with an identity.
 
 ```
 DHT Key:   SHA256("post-urbit:device:" || did)
-DHT Value: Device document envelope (signed by device key)
+DHT Value: Device document (JSON, signed by identity's signing key)
 ```
 
 | Field | Type | Description |
@@ -118,7 +118,8 @@ DHT Value: Device document envelope (signed by device key)
 | Key | 32 bytes | SHA256 of prefixed DID |
 | Value | bytes | Device document (JSON, structure below) |
 | TTL | uint32 | Time-to-live (default: 86400 = 24 hours) |
-| Signature | 64 bytes | Ed25519 signature by identity's signing key |
+
+**Signature authority:** The device document is signed by the **identity's signing key** (NOT the device key). This proves the identity owner authorized this device.
 
 **Device Document Structure:**
 ```json
@@ -137,10 +138,16 @@ DHT Value: Device document envelope (signed by device key)
 }
 ```
 
+**Why identity signature (not device signature)?**
+- Device keys are subordinate to identity keys
+- Identity owner must authorize devices
+- DHT nodes can verify authorization without knowing device private key
+- Device keys prove possession during transport handshake (see peer-handshake.md)
+
 **Verification:**
 1. Fetch identity document for `iid`
-2. Verify device document signature against identity's current signing key
-3. Verify `did` matches expected format (derived from device_signing_key)
+2. Verify `signature` field using identity's current (or historical) signing key
+3. Verify `did == Base32Lower(SHA256(device_signing_key)[0:20])`
 
 ### Device Index DHT Record
 
@@ -198,24 +205,35 @@ Identity updates use the `identity` stream type (0x02) on authenticated QUIC con
 
 ### Message Format
 
+**Stream type is written ONCE at stream start**, then message frames follow:
+
 ```
 Identity Update Stream:
+
+Stream Header (first byte of stream, written once):
 ┌────────────────────────────────────────┐
 │ Stream Type: 0x02 (identity)           │ 1 byte
-├────────────────────────────────────────┤
+└────────────────────────────────────────┘
+
+Each Message Frame (repeated):
+┌────────────────────────────────────────┐
 │ Message Type                           │ 1 byte
 ├────────────────────────────────────────┤
 │ Length (big-endian)                    │ 4 bytes
 ├────────────────────────────────────────┤
 │ Payload                                │ <length> bytes
 └────────────────────────────────────────┘
-
-Message Types:
-  0x01 = IDENTITY_UPDATE    Push new identity document
-  0x02 = IDENTITY_REQUEST   Request peer's current identity
-  0x03 = IDENTITY_RESPONSE  Response with identity document
-  0x04 = IDENTITY_ACK       Acknowledge receipt of update
 ```
+
+**Message Types:**
+| Code | Name | Description |
+|------|------|-------------|
+| 0x01 | IDENTITY_UPDATE | Push new identity document |
+| 0x02 | IDENTITY_REQUEST | Request peer's current identity |
+| 0x03 | IDENTITY_RESPONSE | Response with identity document |
+| 0x04 | IDENTITY_ACK | Acknowledge receipt of update |
+
+**Note:** This pattern (stream type once, then length-prefixed frames) is consistent across all QUIC stream types. See `01-transport-connectivity/quic-integration.md` and `01-transport-connectivity/peer-handshake.md` for the normative framing specification.
 
 ### Update Push Flow
 
@@ -409,4 +427,11 @@ All timestamps are **RFC3339 UTC** (e.g., `2025-01-13T12:00:00Z`).
 | IID on wire | 32-char Base32 lowercase | Human-readable |
 | IID in packets | 20 raw bytes | Space-efficient |
 | Keys/signatures | Base64 standard (no padding) | `A-Za-z0-9+/` |
+| Tokens (relay, auth) | Base64url (no padding) | `A-Za-z0-9-_` (URL-safe) |
 | Sequence numbers | Decimal string | Avoid JSON number precision loss |
+
+**Base64 vs Base64url:**
+- **Keys and signatures**: Always use standard Base64 (`+/` chars)
+- **Tokens and URL-safe data**: Use Base64url (`-_` chars)
+- Both use no padding
+- Implementations MUST decode using the correct alphabet for each type
