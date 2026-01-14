@@ -58,6 +58,8 @@ The Transport & Connectivity layer provides reliable, secure communication betwe
 | **Relay** | QUIC via relay server | NAT prevents direct connection |
 | **Mailbox** | Store-and-forward (HTTPS) | Recipient offline |
 
+**Note on Mailbox:** Mailbox is an HTTPS service, not QUIC-based. The mailbox API is defined in `00-shared/layer-integration.md` §Mailbox Protocol and is implemented by the Messaging layer (RFC-0003) for store-and-forward delivery. The Transport layer only handles real-time QUIC connections (direct and relay).
+
 ## DHT Integration
 
 The Transport layer provides DHT services for peer discovery. See `00-shared/layer-integration.md` for the authoritative DHT record format.

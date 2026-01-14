@@ -253,11 +253,13 @@ interface IdentityTransport {
   broadcastIdentityUpdate(doc: IdentityDocument): Promise<PropagationResult>;
 
   // DHT operations (see layer-integration.md for full format)
-  dhtPut(key: string, value: Uint8Array, options: { ttl: number; signature: Uint8Array }): Promise<void>;
+  // Note: No separate signature parameter. The IDOC envelope contains signatures.current
+  // which DHT nodes use for verification before storing.
+  dhtPut(key: string, value: Uint8Array, options: { ttl: number }): Promise<void>;
   dhtGet(key: string): Promise<DhtResult[]>;  // May return multiple values
 
-  // DhtResult includes value, signature, and metadata
-  // DHT nodes verify signature before storing (prevents spam)
+  // DhtResult includes value and metadata
+  // DHT nodes verify IDOC's internal signature before storing (prevents spam)
 
   // Directory operations (optional)
   directoryLookup(iid: IdentityIdentifier): Promise<IdentityDocument | null>;

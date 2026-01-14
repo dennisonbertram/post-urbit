@@ -47,17 +47,26 @@ Identity Document v(N):
      "timestamp": "<now>",
      "keys": {
        "signing": {
+         "genesis": "<K_sign_genesis>",
          "current": "<K_sign_new>",
          "previous": "<K_sign_old>"
        },
        "encryption": {
          "current": "<K_enc_new>",
-         "previous": "<K_enc_old>"
+         "previous": [
+           {
+             "key": "<K_enc_old>",
+             "valid_from": "<old-doc-timestamp>",
+             "valid_until": null
+           }
+         ]
        }
      },
      ...
    }
    ```
+
+   **Note:** `keys.encryption.previous` is an array of history entries (not a single key string). Each entry includes `key`, `valid_from`, and optional `valid_until` for decryption key selection.
 
 3. **Sign with BOTH keys**
    ```

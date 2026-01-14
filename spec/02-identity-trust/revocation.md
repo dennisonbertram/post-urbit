@@ -27,50 +27,61 @@ Revoke a specific key while maintaining identity continuity (equivalent to emerg
   "effective_at": "<RFC3339-timestamp>",
   "replacement_document": { <new-identity-document> },
   "signatures": {
-    "by_revoked_key": "<sig-by-key-being-revoked>|null",
-    "by_new_key": "<sig-by-new-key>"
+    "by_current_signing_key": "<sig-by-current-signing-key>",
+    "by_new_signing_key": "<sig-by-new-signing-key>|null"
   },
   "recovery_proof": null
 }
 ```
 
-**Note:** When recovery is used (`by_revoked_key` is null), the `recovery_proof` field contains the standard recovery proof structure (see `identity-document-schema.md`). The `replacement_document` also contains `recovery_proof` per the standard identity document format.
+**Signature Requirements by Key Type:**
+
+| Revoking | Has Old Key | Required Signatures |
+|----------|-------------|---------------------|
+| Signing key | Yes | `by_current_signing_key` (old) + `by_new_signing_key` (new) |
+| Signing key | No | `by_new_signing_key` + `recovery_proof` |
+| Encryption key | Yes | `by_current_signing_key` only (X25519 can't sign) |
+| Encryption key | No | `by_new_signing_key` + `recovery_proof` |
+
+**Note:** X25519 keys cannot create signatures. Encryption key revocation is always authorized by the signing key. When recovery is used, `recovery_proof` contains the standard recovery proof structure (see `identity-document-schema.md`). The `replacement_document` also contains `recovery_proof` per the standard identity document format.
 
 ### Revocation Scenarios
 
-#### Scenario A: Key holder initiates (normal rotation path)
+#### Scenario A: Signing key revocation (has old key)
 
-User still has access to the compromised key:
+User still has access to the compromised signing key:
 
-1. Generate new keys
+1. Generate new signing key
 2. Create revocation document
-3. Sign with BOTH old and new keys
+3. Sign with BOTH old signing key and new signing key
 4. Publish immediately (no cooldown)
 
 ```json
 {
+  "revoked_key_type": "signing",
   "signatures": {
-    "by_revoked_key": "<valid-signature>",
-    "by_new_key": "<valid-signature>"
+    "by_current_signing_key": "<sig-by-old-signing-key>",
+    "by_new_signing_key": "<sig-by-new-signing-key>"
   },
   "recovery_proof": null
 }
 ```
 
-#### Scenario B: Key lost, use recovery
+#### Scenario B: Signing key revocation (key lost)
 
-User lost access to the compromised key:
+User lost access to the compromised signing key:
 
-1. Generate new keys
+1. Generate new signing key
 2. Initiate recovery (see recovery-mechanisms.md)
 3. Create revocation document with recovery proof
 4. Subject to recovery cooldown
 
 ```json
 {
+  "revoked_key_type": "signing",
   "signatures": {
-    "by_revoked_key": null,
-    "by_new_key": "<valid-signature>"
+    "by_current_signing_key": null,
+    "by_new_signing_key": "<sig-by-new-signing-key>"
   },
   "recovery_proof": {
     "method": "social",
@@ -83,6 +94,28 @@ User lost access to the compromised key:
   }
 }
 ```
+
+#### Scenario C: Encryption key revocation
+
+User wants to revoke an encryption key. X25519 keys cannot sign, so authorization is always via the signing key:
+
+1. Generate new encryption key
+2. Create revocation document
+3. Sign with current signing key only
+4. Publish immediately (no cooldown)
+
+```json
+{
+  "revoked_key_type": "encryption",
+  "signatures": {
+    "by_current_signing_key": "<sig-by-current-signing-key>",
+    "by_new_signing_key": null
+  },
+  "recovery_proof": null
+}
+```
+
+**Note:** If the signing key is also compromised (and encryption key revocation is needed), revoke the signing key first using recovery, then revoke the encryption key.
 
 ## Identity Revocation
 
@@ -164,7 +197,7 @@ function handle_revocation(revocation):
 
 ```typescript
 function verifyKeyRevocation(revocation: KeyRevocation): VerificationResult {
-  const { iid, revoked_key, replacement_document, signatures } = revocation;
+  const { iid, revoked_key, revoked_key_type, replacement_document, signatures, recovery_proof } = revocation;
 
   // Verify new document is valid
   const newDocValid = verifyIdentityDocument(replacement_document);
@@ -181,24 +214,60 @@ function verifyKeyRevocation(revocation: KeyRevocation): VerificationResult {
     return { valid: false, error: 'SEQUENCE_REGRESSION' };
   }
 
-  // Verify authorization (at least one valid path)
-  const hasOldKeyAuth = signatures.by_revoked_key &&
-    verify(revoked_key, revocation, signatures.by_revoked_key);
-
-  const hasNewKeyAuth = signatures.by_new_key &&
-    verify(replacement_document.keys.signing.current, revocation, signatures.by_new_key);
-
-  const hasRecoveryAuth = recovery_proof &&
-    verifyRecoveryProof(oldDoc, recovery_proof);
-
-  if (hasOldKeyAuth && hasNewKeyAuth) {
-    // Normal revocation path
-    return { valid: true, path: 'key_holder' };
+  // Verify revoked_key matches stored document
+  if (revoked_key_type === 'signing') {
+    if (revoked_key !== oldDoc.keys.signing.current &&
+        !oldDoc.keys.signing.history?.some(h => h.key === revoked_key)) {
+      return { valid: false, error: 'REVOKED_KEY_NOT_FOUND' };
+    }
+  } else if (revoked_key_type === 'encryption') {
+    if (revoked_key !== oldDoc.keys.encryption.current &&
+        !oldDoc.keys.encryption.previous?.some(h => h.key === revoked_key)) {
+      return { valid: false, error: 'REVOKED_KEY_NOT_FOUND' };
+    }
   }
 
-  if (hasNewKeyAuth && hasRecoveryAuth) {
-    // Recovery path (subject to cooldown if status == 'pending')
-    return { valid: true, path: 'recovery', cooldown: recovery_proof.status === 'pending' };
+  // Verify authorization based on key type
+  if (revoked_key_type === 'signing') {
+    // Signing key revocation requires either:
+    // - Both old and new signing key signatures, OR
+    // - New signing key signature + recovery proof
+    const hasOldKeyAuth = signatures.by_current_signing_key &&
+      verify(oldDoc.keys.signing.current, revocation, signatures.by_current_signing_key);
+
+    const hasNewKeyAuth = signatures.by_new_signing_key &&
+      verify(replacement_document.keys.signing.current, revocation, signatures.by_new_signing_key);
+
+    const hasRecoveryAuth = recovery_proof &&
+      verifyRecoveryProof(oldDoc, recovery_proof);
+
+    if (hasOldKeyAuth && hasNewKeyAuth) {
+      return { valid: true, path: 'key_holder' };
+    }
+
+    if (hasNewKeyAuth && hasRecoveryAuth) {
+      return { valid: true, path: 'recovery', cooldown: recovery_proof.status === 'pending' };
+    }
+
+  } else if (revoked_key_type === 'encryption') {
+    // Encryption key revocation: X25519 can't sign, so we need current signing key
+    const hasSigningAuth = signatures.by_current_signing_key &&
+      verify(oldDoc.keys.signing.current, revocation, signatures.by_current_signing_key);
+
+    if (hasSigningAuth) {
+      return { valid: true, path: 'signing_key_auth' };
+    }
+
+    // If signing key is also being revoked (via recovery), allow recovery path
+    const hasRecoveryAuth = recovery_proof &&
+      verifyRecoveryProof(oldDoc, recovery_proof);
+
+    const hasNewKeyAuth = signatures.by_new_signing_key &&
+      verify(replacement_document.keys.signing.current, revocation, signatures.by_new_signing_key);
+
+    if (hasNewKeyAuth && hasRecoveryAuth) {
+      return { valid: true, path: 'recovery', cooldown: recovery_proof.status === 'pending' };
+    }
   }
 
   return { valid: false, error: 'INSUFFICIENT_AUTHORIZATION' };

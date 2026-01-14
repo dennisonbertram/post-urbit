@@ -168,7 +168,7 @@ All keys and signatures use these encodings:
 | Field | Type | Constraints | Description |
 |-------|------|-------------|-------------|
 | `keys.signing.previous` | string\|null | Base64, 32 bytes | Previous signing key (for rotation verification; see note below) |
-| `keys.signing.history` | array | Max 3 entries | Previous signing keys with validity windows (for offline signature verification) |
+| `keys.signing.history` | array | Max 10 entries | Previous signing keys with validity windows (for offline signature verification) |
 | `keys.encryption.previous` | array | See EncryptionKeyHistory | Previous encryption keys with validity windows (for offline peers) |
 | `endpoints` | array | Max 10 entries | How to reach this identity's node |
 | `recovery` | object | See recovery spec | Recovery configuration |

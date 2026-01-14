@@ -579,15 +579,18 @@ Future versions may add signed prekeys for X3DH-equivalent security if needed.
 
 Each identity publishes in their identity document:
 - **Identity Key (IK):** Long-term X25519 key (`keys.encryption.current`)
+- **Previous Keys:** Historical encryption keys (`keys.encryption.previous[]`) for recipients who haven't updated
 
 The initiator generates:
 - **Ephemeral Key (EK):** One-time X25519 key pair
+
+**Key Selection Rule:** Always use `keys.encryption.current`. If the recipient rotated keys and the sender has an outdated identity document, the recipient can still decrypt using keys from `previous[]` (matching by key bytes or identity document sequence).
 
 ### 5.3 Protocol
 
 **Alice wants to message Bob (first time):**
 
-1. Alice retrieves Bob's identity document
+1. Alice retrieves Bob's identity document (prefer fresh fetch from DHT)
 2. Alice extracts Bob's identity key: `IK_B = bob.keys.encryption.current`
 3. Alice generates ephemeral key pair: `EK_A = generate_x25519_keypair()`
 4. Alice computes DH outputs:
@@ -1148,6 +1151,35 @@ Receipt types: `delivered`, `read`
 | `RATE_LIMITED` | 429 | Exceeded rate limits | Back off and retry |
 | `MAILBOX_FULL` | 507 | Recipient quota exceeded | Retry later |
 | `MESSAGE_TOO_LARGE` | 413 | Envelope > 1 MB | Fragment or reduce |
+
+### 9.5 Transport Integration
+
+PUSE envelopes are delivered over QUIC connections using stream type 0x03 (Message).
+
+**Stream Framing (see RFC-0002 and layer-integration.md):**
+
+```
+Stream Header (written once at stream start):
+┌──────────────────────────────┐
+│ Stream Type: 0x03            │ 1 byte
+└──────────────────────────────┘
+
+Each Message Frame (repeated):
+┌──────────────────────────────┐
+│ Length (big-endian)          │ 4 bytes
+├──────────────────────────────┤
+│ PUSE Envelope                │ <length> bytes
+└──────────────────────────────┘
+```
+
+**Delivery Rules:**
+1. Open a bidirectional stream with type 0x03
+2. Write PUSE envelope as a single frame (4-byte length prefix + raw bytes)
+3. Multiple envelopes MAY be sent on the same stream
+4. Stream closes gracefully after last envelope or on error
+
+**Mailbox Delivery:**
+For offline recipients, use HTTP-based mailbox (§7). The PUSE envelope is stored as an opaque binary blob via the mailbox REST API.
 
 ---
 

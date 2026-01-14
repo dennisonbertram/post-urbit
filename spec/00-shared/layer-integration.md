@@ -64,17 +64,15 @@ Concrete mapping between layers:
 ```typescript
 // Identity calls this
 async function publishIdentity(document: IdentityDocument): Promise<void> {
-  // Serialize to IDOC envelope
+  // Serialize to IDOC envelope (includes signatures.current from identity layer)
   const idocBytes = encodeIdoc(document);
 
   // Compute DHT key
   const key = sha256(concat("post-urbit:identity:", document.iid));
 
-  // Sign the DHT record
-  const recordSig = await keyStorage.signWith("signing:current", idocBytes);
-
   // Use Transport's underlying DHT
-  await dht.put(key, idocBytes, { ttl: 86400, signature: recordSig });
+  // Note: No separate DHT signature needed; IDOC's internal signature provides auth
+  await dht.put(key, idocBytes, { ttl: 86400 });
 }
 
 // Identity calls this
@@ -399,6 +397,46 @@ The `Authorization: Bearer` token is a signed request object (Base64-encoded JSO
 - Signature verification using sender's signing key (from identity document)
 - Per-sender rate limits (e.g., 100 stores/minute)
 
+### MailboxService Interface
+
+The mailbox API as a TypeScript interface (implemented by Messaging layer, RFC-0003):
+
+```typescript
+interface MailboxService {
+  /**
+   * Store a message in recipient's mailbox.
+   * @param recipientIid Recipient's identity identifier
+   * @param envelope Encrypted PUSE envelope (opaque to mailbox)
+   * @returns Message ID and expiration
+   */
+  store(
+    recipientIid: IdentityIdentifier,
+    envelope: Uint8Array
+  ): Promise<{ messageId: string; expiresAt: Timestamp }>;
+
+  /**
+   * Retrieve messages from own mailbox.
+   * @param sinceCursor Optional cursor to fetch only new messages
+   * @returns Array of stored messages
+   */
+  retrieve(sinceCursor?: string): Promise<MailboxMessage[]>;
+
+  /**
+   * Acknowledge/delete a message from mailbox.
+   * @param messageId Message to delete
+   */
+  acknowledge(messageId: string): Promise<void>;
+}
+
+interface MailboxMessage {
+  messageId: string;
+  envelope: Uint8Array;
+  storedAt: Timestamp;
+}
+```
+
+**Implementation Note:** The messaging layer uses this interface to store messages for offline recipients. It handles the HTTP requests to the recipient's configured mailbox endpoint (from their identity document) and the auth token generation.
+
 ### Trust Model
 
 - Mailbox sees: sender IID (from token), recipient IID, encrypted blob, timing
@@ -424,6 +462,35 @@ Mailbox Envelope (outer layer, minimal):
 │ Encrypted payload                      │ variable
 └────────────────────────────────────────┘
 ```
+
+## Domain Separator Registry (Normative)
+
+All cryptographic domain separators used across the Post-Urbit protocol. Implementations MUST use these exact byte sequences.
+
+| Context | Domain Separator | Bytes | Used For |
+|---------|------------------|-------|----------|
+| **Identity Layer (RFC-0001)** | | | |
+| Identity document signature | `post-urbit:idoc:v1:` | 19 | Ed25519 signature over JCS-canonicalized IDOC |
+| DHT identity key | `post-urbit:identity:` | 20 | SHA256 prefix for DHT key derivation |
+| DHT device key | `post-urbit:device:` | 18 | SHA256 prefix for device DHT key |
+| DHT device index | `post-urbit:devices-for:` | 22 | SHA256 prefix for device list DHT key |
+| **Transport Layer (RFC-0002)** | | | |
+| Peer handshake | `post-urbit-handshake-v1` | 23 | Ed25519 signature in peer authentication |
+| Device handshake | `post-urbit-device-v1` | 20 | Ed25519 signature for device auth |
+| Relay allocation | `post-urbit-relay-alloc-v1` | 25 | Ed25519 signature for relay registration |
+| Relay rebind | `post-urbit-rebind-v1` | 20 | Ed25519 signature for address rebinding |
+| **Messaging Layer (RFC-0003)** | | | |
+| Double Ratchet root KDF | `post-urbit-ratchet-v1` | 21 | HKDF info for root chain derivation |
+| 2DH initial KDF | `post-urbit-x3dh-v1` | 18 | HKDF info for initial key derivation |
+| Sender key KDF | `post-urbit-sender-key-v1:` | 24+ | HMAC domain prefix + binding data |
+| Mailbox token | `post-urbit-mailbox-token-v1` | 27 | Ed25519 signature for mailbox auth |
+
+**Notes:**
+- All strings are UTF-8/ASCII encoded (no NUL terminator unless specified)
+- Byte counts are derived by `len(string.encode('utf-8'))`
+- DHT prefixes use colon as separator (`:`)
+- Protocol version separators use hyphen (`-v1`)
+- The sender key KDF prefix is followed by binding data (`group_id:sender_iid:key_id`)
 
 ## Error Code Registry
 
