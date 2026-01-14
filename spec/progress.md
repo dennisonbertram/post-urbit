@@ -1,8 +1,8 @@
 # Specification Progress
 
-## Iteration: 12
-## Mode: HOLISTIC REVIEW (all layers)
-## Status: 98/100 completeness estimate
+## Iteration: 13
+## Mode: DEEP DIVE (RFC-0001 Identity)
+## Status: 99/100 completeness estimate
 
 ### Fully Specified
 - **02-identity-trust**: Core identity system + Device Identifiers (DID) + signing key history (extended retention)
@@ -13,10 +13,11 @@
 - **05-ux-packaging**: UX and packaging layer + aligned auth model (cookie-based)
 
 ### In Progress
-- Final polish before RFC drafting
+- 06-rfcs: RFC-0001 Identity complete; RFC-0002, RFC-0003 pending
 
 ### Not Yet Started
-- 06-rfcs: Ready to draft (RFC-0001 Identity, RFC-0002 Transport, RFC-0003 Messaging)
+- RFC-0002 Transport (peer handshake, relay protocol)
+- RFC-0003 Messaging (PUSE envelope, Double Ratchet)
 - 07-implementation: Ready to start
 - 08-security: Can proceed in parallel
 - 09-governance: Can proceed in parallel
@@ -31,6 +32,19 @@
 - **Iteration 10 (holistic)**: Full 6-layer consistency review
 - **Iteration 11 (deep dive)**: Test vectors with real crypto values
 - **Iteration 12 (holistic)**: Final cross-layer consistency review
+- **Iteration 13 (deep dive)**: RFC-0001 Identity Document drafted
+
+  **RFC-0001 Issues Fixed (Iteration 13):**
+  1. B1: Bootstrap verification algorithm defined (TOFU + genesis fetch)
+  2. B2: Wire encoding canonicalization (JCS for full document)
+  3. B3: DHT storage simplified (no separate signature, uses internal IDOC sig)
+  4. B4: DHT key derivation specified (UTF-8/ASCII encoding)
+  5. B5: Social recovery attestation signing fully specified
+  6. H1: Optional field defaults clarified (semantic only)
+  7. H2: Sequence number constraints (regex, bounds)
+  8. H3: Base64 validation rules (no padding, exact lengths)
+  9. H4: Domain separation for all signatures
+  10. Additional test vectors (DHT keys, wire format, domain separator)
 
   **BLOCKING Issues Fixed (Iteration 12):**
   1. ✅ B1: Multi-device messaging model clarified (identity-level addressing, device fanout internal)
@@ -93,9 +107,9 @@ The spec is now **RFC-ready**. Suggested breakdown:
 - **RFC-0003**: PUSE Envelope + Double Ratchet + Mailbox
 
 ### Next Priority
-**Iteration 13 will be DEEP DIVE on RFC drafting:**
+**Iteration 14 will be HOLISTIC REVIEW:**
 
 Focus areas:
-- Draft RFC-0001 (Identity) with wire formats and test vectors
-- Ensure all normative requirements use RFC 2119 language
-- Cross-reference to implementation test vectors
+- Verify RFC-0001 aligns with all layer specs
+- Cross-reference test vectors between RFC and 00-shared/test-vectors.md
+- Prepare for RFC-0002 (Transport) and RFC-0003 (Messaging)
