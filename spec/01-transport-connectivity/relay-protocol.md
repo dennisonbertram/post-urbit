@@ -1,0 +1,323 @@
+# Relay Protocol
+
+## Overview
+
+Relays provide connectivity when direct connections fail (symmetric NAT, firewalls, mobile networks). They are **untrusted intermediaries** that forward encrypted data.
+
+## Trust Model
+
+| Property | Guarantee |
+|----------|-----------|
+| **Content confidentiality** | Relays see encrypted blobs only |
+| **Metadata visibility** | Relays see: source IP, dest IID, timestamps, sizes |
+| **Availability** | Relays can drop connections or go offline |
+| **No authority** | Relays cannot modify, inject, or impersonate |
+
+**Key principle**: Relays are replaceable. Users can run their own or choose from multiple providers.
+
+## Relay Selection
+
+Nodes discover relays from:
+
+1. **Hardcoded defaults**: Bootstrap relays in client software
+2. **Identity document**: Peer's preferred relays listed in endpoints
+3. **DHT announcement**: Relays advertise availability
+4. **Manual configuration**: User-specified relays
+
+### Relay Requirements
+
+A relay must:
+- Accept authenticated allocations
+- Forward packets bidirectionally
+- Provide stable addressing for allocation lifetime
+- Rate limit to prevent abuse
+
+A relay must NOT:
+- Require payment in protocol (out-of-band acceptable)
+- Have special identity privileges
+- Be able to decrypt content
+
+## Allocation Protocol
+
+Clients allocate a relay address before receiving connections.
+
+### Allocation Request
+
+```
+POST /allocate HTTP/1.1
+Host: relay.example.com
+Content-Type: application/json
+Authorization: Bearer <jwt-signed-by-identity>
+
+{
+  "iid": "<client's identity identifier>",
+  "lifetime": 3600,
+  "signature": "<Ed25519 signature over request body>",
+  "timestamp": "<RFC3339>"
+}
+```
+
+### Allocation Response
+
+```json
+{
+  "allocation_id": "<unique-allocation-id>",
+  "relay_address": "relay.example.com",
+  "relay_port": 4433,
+  "allocated_port": 52341,
+  "expires_at": "<RFC3339>",
+  "token": "<allocation-token-for-renewal>"
+}
+```
+
+### Allocation Lifecycle
+
+```
+┌─────────────┐
+│    NONE     │
+└──────┬──────┘
+       │ allocate()
+       ▼
+┌─────────────┐
+│  ALLOCATED  │ ← Can receive connections
+└──────┬──────┘
+       │ timeout / refresh
+       ▼
+┌─────────────┐
+│  ALLOCATED  │ ← Renewed
+└──────┬──────┘
+       │ expire / release
+       ▼
+┌─────────────┐
+│  RELEASED   │
+└─────────────┘
+```
+
+## Relay Wire Protocol
+
+QUIC connections through relay use a framing layer.
+
+### Relay Header
+
+Every packet through relay has a header:
+
+```
+Relay Packet:
+┌────────────────────────────────────────┐
+│ Magic: 0x50 0x55 0x52 0x4C ("PURL")   │ 4 bytes
+├────────────────────────────────────────┤
+│ Version: 0x01                          │ 1 byte
+├────────────────────────────────────────┤
+│ Packet Type                            │ 1 byte
+├────────────────────────────────────────┤
+│ Allocation Token                       │ 16 bytes
+├────────────────────────────────────────┤
+│ Destination IID (first 16 bytes)       │ 16 bytes (or 0 for relay commands)
+├────────────────────────────────────────┤
+│ Payload Length                         │ 2 bytes
+├────────────────────────────────────────┤
+│ Payload (QUIC packet)                  │ <length> bytes
+└────────────────────────────────────────┘
+
+Packet Types:
+  0x01 = DATA          Forward to destination
+  0x02 = PING          Keepalive
+  0x03 = PONG          Keepalive response
+  0x04 = ALLOCATE      Request allocation (over HTTPS, not UDP)
+  0x05 = REFRESH       Extend allocation
+  0x06 = RELEASE       End allocation
+  0x07 = ERROR         Relay error
+```
+
+### Relay Data Flow
+
+```
+Alice ──────────────────────────────────────────────────── Bob
+  │                                                          │
+  │  ┌─────────────────────────────────────────────────┐    │
+  │  │              Relay Server                        │    │
+  │  │                                                  │    │
+  │  │   ┌─────────────────┐    ┌─────────────────┐    │    │
+  ├──┼──►│ Alice's Alloc   │    │ Bob's Alloc     │◄───┼────┤
+  │  │   │ Port: 52341     │    │ Port: 52342     │    │    │
+  │  │   └────────┬────────┘    └────────┬────────┘    │    │
+  │  │            │    Forward           │             │    │
+  │  │            └──────────────────────┘             │    │
+  │  └─────────────────────────────────────────────────┘    │
+  │                                                          │
+
+1. Alice sends to relay:52341 with dest=Bob's IID
+2. Relay looks up Bob's allocation
+3. Relay forwards to Bob via Bob's allocation port
+4. Bob receives with source=relay (Alice's original IP hidden)
+```
+
+## Relay Authentication
+
+### Client → Relay Authentication
+
+Clients authenticate allocations with their identity:
+
+1. Create allocation request with timestamp
+2. Sign with identity signing key
+3. Relay verifies signature against IID's identity document
+4. Relay caches identity document for allocation lifetime
+
+```typescript
+interface AllocationAuth {
+  iid: string;
+  timestamp: Timestamp;
+  nonce: string;            // Prevent replay
+  signature: Signature;     // Ed25519(signing_key, iid + timestamp + nonce)
+}
+```
+
+### Relay → Client Authentication
+
+Relays prove identity via TLS certificate or signed announcement:
+
+```typescript
+interface RelayInfo {
+  relayId: string;          // Stable identifier
+  addresses: string[];      // IP addresses
+  ports: number[];          // UDP ports
+  publicKey: PublicKey;     // For verifying announcements
+  operator: string;         // Human-readable operator name
+  terms?: string;           // Link to terms of service
+}
+```
+
+## Rate Limiting
+
+Relays enforce limits to prevent abuse:
+
+| Limit | Default | Purpose |
+|-------|---------|---------|
+| Allocations per IID | 5 | Prevent allocation exhaustion |
+| Packets per second | 1000 | Prevent flooding |
+| Bytes per second | 10 MB | Bandwidth cap |
+| Concurrent connections | 100 | Resource protection |
+| Allocation lifetime | 3600s | Reclaim unused allocations |
+
+### Rate Limit Response
+
+When limits exceeded:
+
+```
+ERROR Packet:
+┌────────────────────────────────────────┐
+│ ... header ...                         │
+├────────────────────────────────────────┤
+│ Error Code: 0x01 (RATE_LIMITED)        │ 1 byte
+├────────────────────────────────────────┤
+│ Retry After (seconds)                  │ 4 bytes
+├────────────────────────────────────────┤
+│ Message (UTF-8)                        │ variable
+└────────────────────────────────────────┘
+
+Error Codes:
+  0x01 = RATE_LIMITED
+  0x02 = ALLOCATION_NOT_FOUND
+  0x03 = ALLOCATION_EXPIRED
+  0x04 = INVALID_DESTINATION
+  0x05 = RELAY_OVERLOADED
+  0x06 = AUTHENTICATION_FAILED
+  0x07 = BANNED
+```
+
+## Multiple Relays
+
+Nodes can use multiple relays for redundancy:
+
+```typescript
+interface RelayConfig {
+  // Primary relay (used first)
+  primary: RelayInfo;
+
+  // Fallback relays (tried in order)
+  fallbacks: RelayInfo[];
+
+  // Selection strategy
+  strategy: 'failover' | 'round-robin' | 'latency-based';
+}
+```
+
+### Failover Process
+
+```
+1. Allocate on primary relay
+2. If primary fails:
+   a. Try allocation on first fallback
+   b. Update endpoints in identity document
+   c. Notify connected peers of new relay
+3. Periodically check primary, migrate back if available
+```
+
+## Relay-Assisted Hole Punching
+
+Relays can coordinate hole punching:
+
+```
+1. Alice and Bob both have allocations on same relay
+2. Alice requests hole punch via relay
+3. Relay sends coordination messages to both
+4. Alice and Bob attempt direct connection
+5. If successful: close relay path, use direct
+6. If failed: continue via relay
+```
+
+### Hole Punch Coordination Message
+
+```json
+{
+  "type": "hole_punch_coordinate",
+  "transaction_id": "<random-16-bytes>",
+  "initiator_iid": "<alice>",
+  "target_iid": "<bob>",
+  "initiator_candidates": [
+    {"address": "1.2.3.4", "port": 5000, "type": "srflx"},
+    {"address": "10.0.0.5", "port": 5000, "type": "host"}
+  ],
+  "timestamp": "<RFC3339>"
+}
+```
+
+## Relay Operator Guidelines
+
+For those running relays:
+
+### Infrastructure
+
+- Stable IP address and DNS
+- Sufficient bandwidth (100 Mbps+)
+- Low latency location relative to users
+- DDoS protection recommended
+
+### Privacy
+
+- Minimize logging (no content, minimal metadata)
+- Clear data retention policy
+- Consider Tor-like onion relay mode (future enhancement)
+
+### Economics
+
+- Relays are NOT required to be free
+- Payment is out-of-band (subscription, tokens, etc.)
+- Free tier with rate limits is recommended for bootstrapping
+
+## Security Considerations
+
+1. **Relay impersonation**: Verify relay identity via TLS and/or signed announcements
+2. **Traffic analysis**: Relays see metadata; consider padding and timing obfuscation
+3. **Relay compromise**: Use multiple relays from different operators
+4. **Censorship**: Relay blocking is possible; support relay discovery via DHT
+5. **Sybil relays**: Malicious relays could collect metadata; prefer known operators
+
+## Test Scenarios
+
+1. **Successful allocation**: Client allocates, receives traffic, releases
+2. **Allocation expiry**: Allocation times out, client re-allocates
+3. **Rate limiting**: Client exceeds limits, receives error, backs off
+4. **Relay failover**: Primary fails, client migrates to fallback
+5. **Hole punch via relay**: Relay coordinates direct connection attempt
+6. **Invalid destination**: Client sends to unknown IID, receives error
