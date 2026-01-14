@@ -231,23 +231,27 @@ Each Message Frame (repeated):
 ┌────────────────────────────────────────┐
 │ Length (big-endian)                    │ 4 bytes
 ├────────────────────────────────────────┤
-│ JSON Payload (UTF-8)                   │ <length> bytes
+│ Payload                                │ <length> bytes
 └────────────────────────────────────────┘
 ```
 
 **Key points:**
 - Stream type written ONCE at stream start
-- No per-message type byte (message type is in JSON `type` field)
-- 4-byte length prefix for each message
-- JSON payload contains a `type` field to distinguish message kinds
+- 4-byte big-endian length prefix for each message
+- Payload format depends on stream type (see below)
 
-**Stream Types:**
-| Code | Name | Purpose |
-|------|------|---------|
-| 0x01 | Control | Handshake, connection management |
-| 0x02 | Identity | Identity document updates |
-| 0x03 | Messaging | PUSE envelopes |
-| 0x04 | Sync | CRDT sync operations |
+**Stream Types and Payload Formats:**
+| Code | Name | Payload Format | Notes |
+|------|------|----------------|-------|
+| 0x01 | Control | UTF-8 JSON | Has `type` field for message kind |
+| 0x02 | Identity | UTF-8 JSON | Has `type` field for message kind |
+| 0x03 | Message | Binary (PUSE) | Raw PUSE envelope bytes |
+| 0x04 | Sync | Binary (CBOR) | CBOR-encoded sync operation |
+| 0x05 | Bulk | Binary | Raw data transfer |
+
+**JSON streams (0x01, 0x02):** Payload is UTF-8 JSON with a `type` field to distinguish message kinds.
+
+**Binary streams (0x03, 0x04, 0x05):** Payload is raw bytes; format is defined by the respective layer specification.
 
 **Identity Update Message Types (JSON `type` field):**
 | Type | Description |
@@ -257,7 +261,7 @@ Each Message Frame (repeated):
 | `identity_response` | Response with identity document |
 | `identity_ack` | Acknowledge receipt of update |
 
-This framing pattern is consistent across all QUIC stream types. See `01-transport-connectivity/peer-handshake.md` for the normative specification.
+This framing pattern (stream type + length-prefixed frames) is consistent across all QUIC stream types. Payload encoding varies by stream type as specified above. See `06-rfcs/RFC-0002-transport.md` §6 for the authoritative specification.
 
 ### Update Push Flow
 
@@ -448,11 +452,24 @@ All timestamps are **RFC3339 UTC** (e.g., `2025-01-13T12:00:00Z`).
 
 | Type | Encoding | Notes |
 |------|----------|-------|
-| IID on wire | 32-char Base32 lowercase | Human-readable |
-| IID in packets | 20 raw bytes | Space-efficient |
+| IID/DID on wire | 32-char Crockford Base32 lowercase | Human-readable |
+| IID/DID in packets | 20 raw bytes | Space-efficient |
 | Keys/signatures | Base64 standard (no padding) | `A-Za-z0-9+/` |
 | Tokens (relay, auth) | Base64url (no padding) | `A-Za-z0-9-_` (URL-safe) |
 | Sequence numbers | Decimal string | Avoid JSON number precision loss |
+
+**Crockford Base32 (Normative):**
+
+All identity identifiers (IID), device identifiers (DID), and group identifiers use **Crockford Base32** encoding:
+
+- **Alphabet:** `0123456789abcdefghjkmnpqrstvwxyz` (32 chars)
+- **Case:** Lowercase only (reject uppercase or normalize to lowercase)
+- **Length:** 32 characters for 20-byte (160-bit) values
+- **Excluded characters:** `i`, `l`, `o`, `u` (to avoid ambiguity)
+
+Example valid IID: `abzy73bycgb9ybrg12tynyxgkfzyh3bk`
+
+See RFC-0002 §2.1 for the authoritative Base32 specification.
 
 **Base64 vs Base64url:**
 - **Keys and signatures**: Always use standard Base64 (`+/` chars)

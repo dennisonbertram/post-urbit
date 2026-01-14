@@ -16,28 +16,47 @@ IID = Base32Lower(SHA-256(genesis_signing_public_key_raw_bytes)[0:20])
 
 | Aspect | Specification |
 |--------|---------------|
-| **Base32 alphabet** | RFC4648 `A-Z2-7`, converted to lowercase |
+| **Base32 alphabet** | Crockford Base32: `0123456789abcdefghjkmnpqrstvwxyz` |
 | **Padding** | No padding |
 | **Input to hash** | Raw 32-byte Ed25519 public key (NOT DER/SPKI) |
 | **Hash output** | First 20 bytes (160 bits) of SHA-256 |
 | **Length** | 32 characters |
 | **Normalization** | Always lowercase; reject non-canonical forms |
-| **Valid characters** | `a-z` and `2-7` only (RFC4648 Base32 lowercase) |
+| **Valid characters** | `0-9a-hj-km-np-tv-z` (Crockford excludes `i`, `l`, `o`, `u`) |
 
-- **Example**: `k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a`
-- **Invalid examples**: `abc01890xyz` (contains 0, 1, 8, 9 which are not in Base32 alphabet)
+- **Example**: `b1anasr5h0bj3832xqexwy0f0987e1xb`
+- **Invalid examples**: `hello_world` (contains invalid chars `i`, `l`, `o`)
 - **Derivation**: Hash of the FIRST (genesis) signing key ever used
 - **Immutable**: Never changes, even after key rotation
+
+See RFC-0002 §2.1 and `00-shared/layer-integration.md` for the authoritative Base32 specification.
 
 ### IID Derivation Algorithm
 
 ```python
+# Crockford Base32 alphabet (excludes i, l, o, u)
+CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
+
+def crockford_encode(data: bytes) -> str:
+    """Encode bytes to Crockford Base32 lowercase string."""
+    result = []
+    bits = 0
+    buffer = 0
+    for byte in data:
+        buffer = (buffer << 8) | byte
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            result.append(CROCKFORD_ALPHABET[(buffer >> bits) & 0x1F])
+    if bits > 0:
+        result.append(CROCKFORD_ALPHABET[(buffer << (5 - bits)) & 0x1F])
+    return "".join(result)
+
 def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
     assert len(genesis_signing_public_key_raw) == 32  # Raw Ed25519 pubkey
     hash_bytes = sha256(genesis_signing_public_key_raw)
     truncated = hash_bytes[:20]  # First 160 bits
-    base32_upper = base64.b32encode(truncated).decode('ascii').rstrip('=')
-    return base32_upper.lower()
+    return crockford_encode(truncated)
 ```
 
 ### Why Genesis Key Hash?
@@ -121,11 +140,13 @@ All keys and signatures use these encodings:
 
 | Type | Encoding | Decoded Size | Notes |
 |------|----------|--------------|-------|
-| Ed25519 public key | Base64 (RFC4648, standard alphabet, no padding) | 32 bytes | Raw key bytes, NOT DER/SPKI |
-| X25519 public key | Base64 (RFC4648, standard alphabet, no padding) | 32 bytes | Raw key bytes |
-| Ed25519 signature | Base64 (RFC4648, standard alphabet, no padding) | 64 bytes | Raw R\|\|S bytes |
+| Ed25519 public key | Base64 standard (no padding) | 32 bytes | Raw key bytes, NOT DER/SPKI |
+| X25519 public key | Base64 standard (no padding) | 32 bytes | Raw key bytes |
+| Ed25519 signature | Base64 standard (no padding) | 64 bytes | Raw R\|\|S bytes |
 
 **Base64 Alphabet**: `A-Za-z0-9+/` (standard), no padding characters.
+
+**Note:** Keys and signatures use Base64 (standard alphabet). IIDs and DIDs use Crockford Base32 - see Encoding Specification above.
 
 ## Field Specifications
 
@@ -312,10 +333,10 @@ An identity may be active on multiple devices simultaneously. Each device is ide
 ### DID Derivation
 
 ```
-DID = Base32Lower(SHA256(device_signing_public_key_raw)[0:20])
+DID = CrockfordBase32Lower(SHA256(device_signing_public_key_raw)[0:20])
 ```
 
-Same encoding rules as IID: 32-character Base32 lowercase string.
+Same encoding rules as IID: 32-character Crockford Base32 lowercase string.
 
 ### Device Document
 

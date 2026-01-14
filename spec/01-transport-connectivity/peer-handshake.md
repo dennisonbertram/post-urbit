@@ -364,34 +364,11 @@ This ensures:
 
 ## Anonymous Connections
 
-Some scenarios allow anonymous connections (no client authentication):
+**Note:** Anonymous connections are **OUT OF SCOPE for v1**. All peer-to-peer connections MUST be mutually authenticated. See RFC-0002 §5.14 for the authoritative specification.
 
-1. **Public relays**: Client authenticates to relay, relay doesn't authenticate to client beyond TLS
-2. **Discovery servers**: Simple request/response, no identity needed
-3. **DHT queries**: May not require authentication
+Relay and DHT services use separate protocols (HTTPS for relay allocation, DHT-native authentication) that don't require the identity handshake.
 
-For anonymous connections, skip `ClientAuth` and proceed with `HandshakeComplete` after `ServerHello`.
-
-### Anonymous Handshake
-
-```json
-// ClientHello with no identity claim
-{
-  "type": "client_hello",
-  "version": 1,
-  "client_iid": null,              // Anonymous
-  "expected_server_iid": "<...>",
-  "client_nonce": "<...>",
-  "timestamp": "<...>",
-  "tls_binding": "<...>"
-}
-
-// ServerHello as normal
-
-// No ClientAuth
-
-// HandshakeComplete
-```
+Future versions may define anonymous connection modes for specific use cases.
 
 ## Connection Resumption
 

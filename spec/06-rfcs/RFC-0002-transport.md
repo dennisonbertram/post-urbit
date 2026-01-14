@@ -334,20 +334,20 @@ challenge_signature = Ed25519_Sign(
 
 If a Device Identifier (DID) is provided, the party MUST also prove device ownership.
 
-**Domain Separator:** `post-urbit-device-v1` (19 ASCII bytes)
+**Domain Separator:** `post-urbit-device-v1` (20 ASCII bytes)
 
 ```
-DEVICE_DOMAIN = b"post-urbit-device-v1"   // exactly 19 bytes
+DEVICE_DOMAIN = b"post-urbit-device-v1"   // exactly 20 bytes
 
 device_challenge_data = concat(
-  DEVICE_DOMAIN,                   // 19 bytes
+  DEVICE_DOMAIN,                   // 20 bytes
   decode_base64(their_nonce),      // 32 bytes
   decode_base64(my_nonce),         // 32 bytes
   decode_base64(tls_binding),      // 32 bytes
   decode_base32(my_iid),           // 20 bytes raw
   decode_base32(my_did)            // 20 bytes raw
 )
-// Total: 19 + 32 + 32 + 32 + 20 + 20 = 155 bytes
+// Total: 20 + 32 + 32 + 32 + 20 + 20 = 156 bytes
 
 device_signature = Ed25519_Sign(
   device_signing_key,
@@ -670,19 +670,19 @@ Content-Type: application/json
 
 **Signature Construction:**
 
-**Domain Separator:** `post-urbit-relay-alloc-v1` (24 ASCII bytes)
+**Domain Separator:** `post-urbit-relay-alloc-v1` (25 ASCII bytes)
 
 ```
-DOMAIN = b"post-urbit-relay-alloc-v1"  // exactly 24 bytes
+DOMAIN = b"post-urbit-relay-alloc-v1"  // exactly 25 bytes
 
 signature_input = concat(
-  DOMAIN,                              // 24 bytes
+  DOMAIN,                              // 25 bytes
   encode_utf8(iid),                    // 32 bytes (Base32 string)
   encode_be_u32(lifetime),             // 4 bytes
   encode_utf8(timestamp),              // 20 bytes (canonical)
   decode_base64url(nonce)              // 16 bytes raw
 )
-// Total: 24 + 32 + 4 + 20 + 16 = 96 bytes
+// Total: 25 + 32 + 4 + 20 + 16 = 97 bytes
 
 signature = Ed25519_Sign(
   signing_key,
@@ -737,13 +737,13 @@ When a client's IP changes (NAT rebinding, network handoff):
 
 **Signature Construction:**
 
-**Domain Separator:** `post-urbit-rebind-v1` (19 ASCII bytes)
+**Domain Separator:** `post-urbit-rebind-v1` (20 ASCII bytes)
 
 ```
-DOMAIN = b"post-urbit-rebind-v1"  // exactly 19 bytes
+DOMAIN = b"post-urbit-rebind-v1"  // exactly 20 bytes
 
 rebind_input = concat(
-  DOMAIN,                          // 19 bytes
+  DOMAIN,                          // 20 bytes
   encode_utf8(allocation_id),      // variable
   decode_base64url(token),         // 16 bytes
   encode_utf8(timestamp)           // 20 bytes (canonical)
@@ -1023,11 +1023,11 @@ signature (base64, no pad) = [compute with Ed25519 using seed 0x03*32]
 ```
 Input:
   Token (hex): 00112233445566778899aabbccddeeff
-  Dest IID (Base32): abzy73bycgb9ybrgi2tynyxgkfzyh3bk
+  Dest IID (Crockford Base32): abzy73bycgb9ybrgi2tynyxgkfzyh3bk
   Payload (4 bytes): 01020304
 
 Packet (hex):
-  50555254         // Magic "PURL"
+  5055524c         // Magic "PURL" (P=0x50, U=0x55, R=0x52, L=0x4c)
   01               // Version
   01               // Type: DATA
   00112233445566778899aabbccddeeff  // Token (16 bytes)
@@ -1036,10 +1036,12 @@ Packet (hex):
   01020304         // Payload
 
 Full packet (48 bytes hex):
-  50555254 01 01 00112233445566778899aabbccddeeff
+  5055524c 01 01 00112233445566778899aabbccddeeff
   55ff38e37cc2169c2e2412a7c6f2f8517f0f8c34
   0004 01020304
 ```
+
+**Magic Verification:** `0x50 0x55 0x52 0x4c` = ASCII "PURL"
 
 ### 11.4 Allocation Signature
 
@@ -1052,9 +1054,9 @@ nonce (16 bytes, hex) = 00000000000000000000000000000000
 signing_key (seed, hex) = 0000...0000 (32 zeros)
 ```
 
-**Signature Input Construction (96 bytes):**
+**Signature Input Construction (97 bytes):**
 ```
-DOMAIN (24 bytes): "post-urbit-relay-alloc-v1"
+DOMAIN (25 bytes): "post-urbit-relay-alloc-v1"
   = 706f73742d757262 69742d72656c6179 2d616c6c6f632d76 31
 iid_utf8 (32 bytes): "abzy73bycgb9ybrgi2tynyxgkfzyh3bk"
   = 61627a7937336279 6367623979627267 6932746e79786766 7a796833626b
@@ -1082,9 +1084,9 @@ signature (base64, no pad) = [compute with Ed25519 using seed 0x00*32]
 | Context | Domain Separator | Length |
 |---------|------------------|--------|
 | Handshake | `post-urbit-handshake-v1` | 23 bytes |
-| Device | `post-urbit-device-v1` | 19 bytes |
-| Relay Allocate | `post-urbit-relay-alloc-v1` | 24 bytes |
-| Relay Rebind | `post-urbit-rebind-v1` | 19 bytes |
+| Device | `post-urbit-device-v1` | 20 bytes |
+| Relay Allocate | `post-urbit-relay-alloc-v1` | 25 bytes |
+| Relay Rebind | `post-urbit-rebind-v1` | 20 bytes |
 
 ## 12. Implementation Notes
 

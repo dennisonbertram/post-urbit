@@ -92,22 +92,25 @@ Where:
 - `genesis_signing_public_key_raw` is the 32-byte Ed25519 public key (raw bytes, NOT DER/SPKI)
 - `SHA-256` produces a 32-byte hash
 - `[0:20]` takes the first 20 bytes (160 bits)
-- `Base32Lower` encodes using RFC 4648 alphabet (A-Z, 2-7) converted to lowercase
+- `Base32Lower` encodes using Crockford Base32 alphabet, lowercase
 
 ### 3.2 Encoding Specification
 
 | Property | Value |
 |----------|-------|
-| Alphabet | `a-z2-7` (RFC 4648 Base32, lowercase) |
+| Alphabet | Crockford Base32: `0123456789abcdefghjkmnpqrstvwxyz` |
 | Padding | None |
 | Length | 32 characters |
 | Input | Raw 32-byte Ed25519 public key |
 | Hash | SHA-256, first 20 bytes |
+| Excluded chars | `i`, `l`, `o`, `u` (for visual clarity) |
+
+**Note:** Crockford Base32 excludes `i`, `l`, `o`, `u` to avoid confusion with digits `1`, `1`, `0`, and vowel avoidance. See RFC-0002 §2.1 for the authoritative Base32 specification.
 
 ### 3.3 Validation
 
 Implementations MUST:
-- Reject IIDs containing characters outside `a-z2-7`
+- Reject IIDs containing characters outside `0-9a-hj-km-np-tv-z`
 - Reject IIDs not exactly 32 characters long
 - Normalize to lowercase before comparison
 - Reject non-canonical forms (e.g., uppercase)
@@ -116,7 +119,24 @@ Implementations MUST:
 
 ```python
 import hashlib
-import base64
+
+# Crockford Base32 alphabet (excludes i, l, o, u)
+CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
+
+def crockford_encode(data: bytes) -> str:
+    """Encode bytes to Crockford Base32 lowercase string."""
+    result = []
+    bits = 0
+    buffer = 0
+    for byte in data:
+        buffer = (buffer << 8) | byte
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            result.append(CROCKFORD_ALPHABET[(buffer >> bits) & 0x1F])
+    if bits > 0:
+        result.append(CROCKFORD_ALPHABET[(buffer << (5 - bits)) & 0x1F])
+    return "".join(result)
 
 def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
     """
@@ -126,13 +146,12 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
         genesis_signing_public_key_raw: 32-byte raw Ed25519 public key
 
     Returns:
-        32-character lowercase Base32 string
+        32-character lowercase Crockford Base32 string
     """
     assert len(genesis_signing_public_key_raw) == 32, "Must be raw 32-byte Ed25519 pubkey"
     hash_bytes = hashlib.sha256(genesis_signing_public_key_raw).digest()
     truncated = hash_bytes[:20]  # First 160 bits
-    base32_upper = base64.b32encode(truncated).decode('ascii').rstrip('=')
-    return base32_upper.lower()
+    return crockford_encode(truncated)
 ```
 
 ## 4. Document Schema
@@ -790,10 +809,10 @@ Nodes MUST reject documents that fail signature verification.
 
 ### 13.1 Device Identifier (DID)
 
-Same derivation as IID, applied to device signing key:
+Same derivation as IID, applied to device signing key (Crockford Base32):
 
 ```
-DID = Base32Lower(SHA256(device_signing_public_key_raw)[0:20])
+DID = CrockfordBase32Lower(SHA256(device_signing_public_key_raw)[0:20])
 ```
 
 ### 13.2 Device Document
@@ -895,18 +914,18 @@ SHA-256 hash (full 32 bytes, hex):
 First 20 bytes (hex):
 586a763f2c82b31a0c5de9dcaef01e0261e0785b
 
-Base32 encoding (uppercase, then lowercase):
-LBVHMPZMQKZRUDC55HOK54A6AJQ6A6C3 → lbvhmpzmqkzrudc55hok54a6ajq6a6c3
+Crockford Base32 encoding:
+b1anasr5h0bj3832xqexwy0f0987e1xb
 
 IID:
-lbvhmpzmqkzrudc55hok54a6ajq6a6c3
+b1anasr5h0bj3832xqexwy0f0987e1xb
 ```
 
 **Verification steps:**
 1. SHA-256 of 32-byte pubkey → 32 bytes
 2. Take first 20 bytes → 160 bits
-3. Base32 encode (RFC 4648) → 32 chars (no padding since 160/5 = 32)
-4. Lowercase → IID
+3. Crockford Base32 encode → 32 chars (no padding since 160/5 = 32)
+4. Result is already lowercase
 
 ### 15.2 Document Signature
 
@@ -1042,7 +1061,8 @@ This document defines the following identifiers:
 
 - RFC 2119: Key words for use in RFCs
 - RFC 3339: Date and Time on the Internet: Timestamps
-- RFC 4648: The Base16, Base32, and Base64 Data Encodings
+- [Crockford Base32](https://www.crockford.com/base32.html): Base32 encoding (for IID/DID)
+- RFC 4648: The Base16, Base32, and Base64 Data Encodings (for Base64 only)
 - RFC 8785: JSON Canonicalization Scheme (JCS)
 - RFC 8032: Edwards-Curve Digital Signature Algorithm (EdDSA)
 - RFC 7748: Elliptic Curves for Security (X25519)

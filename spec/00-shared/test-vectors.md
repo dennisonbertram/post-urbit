@@ -10,7 +10,9 @@ This document provides concrete, reproducible cryptographic test vectors for imp
 |--------|----------|-------|
 | hex | Hexadecimal (lowercase) | Used for raw bytes |
 | base64 | RFC4648 standard alphabet, **no padding** | `A-Za-z0-9+/` |
-| base32 | RFC4648 lowercase, **no padding** | `a-z2-7` |
+| base32 | Crockford Base32 lowercase, **no padding** | `0-9a-hj-km-np-tv-z` |
+
+**Note:** IIDs and DIDs use Crockford Base32 (excludes `i`, `l`, `o`, `u` for clarity).
 
 ## HKDF Salt Handling (Normative)
 
@@ -68,14 +70,14 @@ Ed25519 public key (base64):
 3. Take first 20 bytes (160 bits):
    586a763f2c82b31a0c5de9dcaef01e0261e0785b
 
-4. Base32 lowercase encode (no padding):
-   lbvhmpzmqkzrudc55hok54a6ajq6a6c3
+4. Crockford Base32 lowercase encode (no padding):
+   b1anasr5h0bj3832xqexwy0f0987e1xb
 ```
 
 ### Expected Output
 
 ```
-IID: lbvhmpzmqkzrudc55hok54a6ajq6a6c3
+IID: b1anasr5h0bj3832xqexwy0f0987e1xb
 IID length: 32 characters
 ```
 
@@ -459,10 +461,10 @@ Device signing public key (hex):
 ### Derivation
 
 ```
-DID = Base32Lower(SHA256(device_signing_public_key)[0:20])
+DID = CrockfordBase32Lower(SHA256(device_signing_public_key)[0:20])
 ```
 
-(Same steps as IID derivation in Test Vector 1)
+(Same steps as IID derivation in Test Vector 1, using Crockford Base32)
 
 ---
 

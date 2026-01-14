@@ -1,7 +1,7 @@
 # Specification Progress
 
-## Iteration: 15
-## Mode: DEEP DIVE (RFC-0002 Transport)
+## Iteration: 16
+## Mode: HOLISTIC REVIEW (RFC + Layer Alignment)
 ## Status: 99/100 completeness estimate
 
 ### Fully Specified
@@ -34,14 +34,14 @@
 - **Iteration 13 (deep dive)**: RFC-0001 Identity Document drafted
 - **Iteration 14 (holistic)**: RFC + layer alignment review
 - **Iteration 15 (deep dive)**: RFC-0002 Transport Protocol drafted + reviewed
+- **Iteration 16 (holistic)**: Full RFC + layer alignment review
 
-  **Cross-Layer Issues Fixed (Iteration 14):**
-  1. B1: Domain separation aligned across all identity docs and test vectors
-  2. B2: DHT authentication simplified (uses internal IDOC signature only)
-  3. B3: Device document schema canonicalized (consistent field names, endpoints included)
-  4. B4: Multi-device session model clarified (v1 = identity-level sessions)
-  5. B5: QUIC stream framing unified (stream type once, then length-prefixed JSON)
-  6. B6: App manifest signing cleaned up (SIGNATURE file only, no embedded signature)
+  **Cross-Layer Issues Fixed (Iteration 16):**
+  1. B1: Base32 encoding unified to Crockford everywhere (RFC-0001, RFC-0002, layer-integration, identity-document-schema, test-vectors)
+  2. B2: Stream framing payload typing corrected (JSON for 0x01-0x02, binary for 0x03-0x05)
+  3. B5: Domain separator byte lengths fixed in RFC-0002 (relay-alloc: 25, rebind: 20, device: 20)
+  4. B6: PURL magic test vector fixed (0x5055524c "PURL", not 0x50555254 "PURT")
+  5. H12: Anonymous handshake contradiction resolved (out-of-scope for v1 in peer-handshake.md)
 
   **RFC-0002 Issues Fixed (Iteration 15):**
   1. B1: Handshake stream identification clarified (first client-initiated bidi stream)
@@ -65,6 +65,14 @@
   8. H3: Base64 validation rules (no padding, exact lengths)
   9. H4: Domain separation for all signatures
   10. Additional test vectors (DHT keys, wire format, domain separator)
+
+  **Cross-Layer Issues Fixed (Iteration 14):**
+  1. B1: Domain separation aligned across all identity docs and test vectors
+  2. B2: DHT authentication simplified (uses internal IDOC signature only)
+  3. B3: Device document schema canonicalized (consistent field names, endpoints included)
+  4. B4: Multi-device session model clarified (v1 = identity-level sessions)
+  5. B5: QUIC stream framing unified (stream type once, then length-prefixed JSON)
+  6. B6: App manifest signing cleaned up (SIGNATURE file only, no embedded signature)
 
   **BLOCKING Issues Fixed (Iteration 12):**
   1. ✅ B1: Multi-device messaging model clarified (identity-level addressing, device fanout internal)
@@ -96,7 +104,7 @@ RFCs / Implementation ← READY TO START
 
 ### Specification Checklist Summary
 - [x] All 6 layers specified
-- [x] Cross-layer type consistency verified (iteration 10, 12)
+- [x] Cross-layer type consistency verified (iteration 10, 12, 16)
 - [x] Package format unified (.postapp ZIP + SIGNATURE file)
 - [x] Device identifier (DID) flow end-to-end with DHT records
 - [x] Signature model unified (PUSE identity signatures + history lookup)
@@ -106,15 +114,15 @@ RFCs / Implementation ← READY TO START
 - [x] Auth model aligned (cookie/browser, bearer/CLI)
 - [x] Relay stable port model (diagram corrected)
 - [x] Signing key history extended for long-lived verification
-- [x] Complete test vectors (iteration 11)
+- [x] Complete test vectors (iteration 11, updated for Crockford in 16)
 - [x] Multi-device messaging model (identity-level with internal fanout)
-- [x] Stream framing aligned (type once, then frames)
-- [x] Encoding conventions documented (Base64 vs Base64url)
+- [x] Stream framing aligned (type once, then frames; JSON vs binary)
+- [x] Encoding conventions documented (Base64 vs Base64url, Crockford Base32)
 - [ ] SDK interface examples (optional for MVP)
 
 ### Holistic Health Check
 - [x] All interfaces align across components
-- [x] No contradictions between specs (4 BLOCKING fixed in iteration 12)
+- [x] No contradictions between specs (5 issues fixed in iteration 16)
 - [x] Dependencies form a DAG (no cycles)
 - [x] Core vision preserved
 - [x] Appropriate level of detail
@@ -122,16 +130,16 @@ RFCs / Implementation ← READY TO START
 
 ### RFC Readiness Assessment
 The spec is now **RFC-ready**. Suggested breakdown:
-- **RFC-0001**: Identity Document + DHT + Device Documents
-- **RFC-0002**: QUIC Transport + Peer Handshake + Relay Protocol
-- **RFC-0003**: PUSE Envelope + Double Ratchet + Mailbox
+- **RFC-0001**: Identity Document + DHT + Device Documents ✅
+- **RFC-0002**: QUIC Transport + Peer Handshake + Relay Protocol ✅
+- **RFC-0003**: PUSE Envelope + Double Ratchet + Mailbox (pending)
 
 ### Next Priority
-**Iteration 16 will be HOLISTIC REVIEW:**
+**Iteration 17 will be DEEP DIVE (RFC-0003 Messaging):**
 
 Focus areas:
-- Verify RFC-0001 and RFC-0002 align with all layer specs
-- Check Base32 encoding (Crockford) is consistent across all documents
-- Verify error code registries are consistent
-- Confirm domain separator registry is complete
-- Check for any remaining cross-layer inconsistencies
+- Draft RFC-0003 for PUSE envelope format
+- Double Ratchet integration specification
+- Mailbox protocol specification
+- Key bundle format and exchange
+- Message acknowledgment and delivery receipts
