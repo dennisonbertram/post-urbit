@@ -175,9 +175,15 @@ Previous signing keys are retained to support signature verification for message
 | `valid_until` | string | Sequence number when this key was rotated out |
 | `expires_at` | timestamp | After this time, verifiers may reject signatures with this key |
 
-**Retention policy**: Keep at most 3 previous signing keys or 14 days, whichever is less. This is shorter than encryption key history because:
-- Signing keys are only needed for verification, not for reply routing
-- Frequent rotations of signing keys indicate potential compromise
+**Retention policy**: Keep at most **10 previous signing keys or 2 years**, whichever is less.
+
+**Rationale for extended retention:**
+- App package signatures may need verification long after signing (months/years)
+- Mailbox-delivered messages may be delayed significantly (days/weeks)
+- Verifiers can check `keys.signing.history` if `current`/`previous` don't match
+- Historical IDOC versions may also be cached locally (see caching-policy.md)
+
+**Storage impact**: ~500 bytes per historical key entry. 10 entries = ~5KB additional document size, acceptable tradeoff for verification flexibility.
 
 ### Encryption Key History Entry
 

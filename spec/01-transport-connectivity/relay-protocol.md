@@ -87,11 +87,35 @@ signature = Ed25519_Sign(signing_key, SHA256(signature_input))
   "allocation_id": "<unique-allocation-id>",
   "relay_address": "relay.example.com",
   "relay_port": 4433,
-  "allocated_port": 52341,
   "expires_at": "<RFC3339>",
   "token": "<allocation-token-for-renewal>"
 }
 ```
+
+### Stable Relay Port Model
+
+**Important**: Relays use a **stable port model** for discovery compatibility:
+
+| Aspect | Design |
+|--------|--------|
+| Relay port | Stable (e.g., 4433) - same for all clients |
+| Routing key | Destination IID in packet header |
+| Allocation token | Authenticates sender to relay |
+| Identity publishing | Publish relay endpoint as `relay.example.com:4433` |
+
+**Why stable port?**
+- Identity documents publish relay endpoints (e.g., `{ type: 'relay', host: 'relay.example.com', port: 4433 }`)
+- Identity publishing is expensive (signed, sequence-incrementing)
+- Allocation lifetimes (~1h) are shorter than identity publish intervals (~24h)
+- Per-allocation ports would require hourly identity updates
+
+**How routing works:**
+1. Sender connects to relay's stable port
+2. Sender includes destination IID in packet header
+3. Relay looks up active allocation for that IID
+4. Relay forwards packet to allocation's bound IP:port
+
+This means a relay can host many identities on one port, with the allocation token + IID determining which client receives forwarded data.
 
 ### Allocation Binding and Mobility
 

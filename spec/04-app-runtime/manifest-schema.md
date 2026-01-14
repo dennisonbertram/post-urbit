@@ -555,26 +555,25 @@ function verifyPackageIntegrity(
 
 ## Package Format
 
+**Canonical format:** `.postapp` (ZIP archive) - see `05-ux-packaging/app-distribution.md` for complete specification.
+
 ### Directory Structure
 
 ```
-myapp-1.0.0.pkg/
-├── manifest.json           # Required: App manifest
+myapp-1.0.0.postapp (ZIP archive)
+├── manifest.json           # Required: App manifest with signature
+├── SIGNATURE               # Required: Package signature file
 ├── main.wasm               # Required: Entry point
 ├── assets/                 # Optional: Static assets
 │   ├── icon.png
+│   ├── icon-small.png
+│   └── screenshots/
+├── ui/                     # Optional: Web UI files
+│   ├── index.html
 │   └── ...
-├── lib/                    # Optional: WASM libraries
+├── locales/                # Optional: Localization
 │   └── ...
-└── CHANGELOG.md            # Optional: Version history
-```
-
-### Package Archive
-
-Packages are distributed as gzip-compressed tar archives:
-
-```
-myapp-1.0.0.pkg.tar.gz
+└── README.md               # Optional: Documentation
 ```
 
 ### Content Addressing
@@ -585,6 +584,20 @@ Packages are identified by their content hash:
 package_hash = SHA256(package_bytes)
 package_id = "sha256:" + hex(package_hash)
 ```
+
+### Package Signing
+
+The package signature binds author identity to package contents. Two related signatures exist:
+
+1. **SIGNATURE file** (in package root): Author's signature over manifest hash with timestamp
+   - See `05-ux-packaging/app-distribution.md` for signing/verification process
+   - Payload: `"postapp-signature-v1:" || manifest_hash || ":" || timestamp`
+
+2. **manifest.signature** (in manifest.json): Signature over canonical manifest (optional, for self-contained verification)
+   - Payload: Canonical manifest JSON (without signature field)
+   - Same author key as SIGNATURE file
+
+**Primary verification uses SIGNATURE file.** The embedded manifest signature is provided for compatibility with systems that only receive the manifest.
 
 ### Package Verification
 
@@ -598,15 +611,20 @@ interface VerificationResult {
   valid: boolean;
   manifest: Manifest;
   contentHash: string;
+  authorIid: string;
+  signedAt: string;
   errors: string[];
 }
 ```
 
 Verification steps:
-1. Extract archive
-2. Parse manifest.json
-3. Validate manifest schema
-4. Verify manifest signature
-5. Verify entry point exists
-6. Validate WASM binary
-7. Check all referenced files exist
+1. Extract ZIP archive
+2. Parse SIGNATURE file (author_iid, timestamp, signature, signed_manifest_hash)
+3. Parse manifest.json
+4. Validate manifest schema
+5. Canonicalize manifest.json (JCS)
+6. Verify manifest hash matches SIGNATURE.signed_manifest_hash
+7. Fetch author's identity document
+8. Verify signature using author's signing key valid at timestamp
+9. Verify each file hash in manifest.files matches actual file
+10. Verify entry point exists and is valid WASM

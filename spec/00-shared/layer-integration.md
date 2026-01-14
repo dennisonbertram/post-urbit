@@ -102,6 +102,92 @@ async function fetchIdentity(iid: IdentityIdentifier): Promise<IdentityDocument 
 }
 ```
 
+## Device DHT Records
+
+Multi-device support requires discovering devices associated with an identity.
+
+### Device Document DHT Format
+
+```
+DHT Key:   SHA256("post-urbit:device:" || did)
+DHT Value: Device document envelope (signed by device key)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| Key | 32 bytes | SHA256 of prefixed DID |
+| Value | bytes | Device document (JSON, structure below) |
+| TTL | uint32 | Time-to-live (default: 86400 = 24 hours) |
+| Signature | 64 bytes | Ed25519 signature by identity's signing key |
+
+**Device Document Structure:**
+```json
+{
+  "did": "<device-identifier>",
+  "iid": "<owner-identity-identifier>",
+  "name": "My Phone",
+  "device_signing_key": "<base64-ed25519-public>",
+  "device_transport_key": "<base64-x25519-public>",
+  "endpoints": [
+    { "type": "direct", "host": "...", "port": 4433, "transport": "quic" }
+  ],
+  "created_at": "<RFC3339>",
+  "last_seen": "<RFC3339>",
+  "signature": "<base64-signature-by-identity-signing-key>"
+}
+```
+
+**Verification:**
+1. Fetch identity document for `iid`
+2. Verify device document signature against identity's current signing key
+3. Verify `did` matches expected format (derived from device_signing_key)
+
+### Device Index DHT Record
+
+To discover all devices for an identity:
+
+```
+DHT Key:   SHA256("post-urbit:devices-for:" || iid)
+DHT Value: Device index (list of DIDs, signed by identity)
+```
+
+**Device Index Structure:**
+```json
+{
+  "iid": "<identity-identifier>",
+  "devices": [
+    { "did": "<did-1>", "name": "Phone", "last_seen": "<RFC3339>" },
+    { "did": "<did-2>", "name": "Laptop", "last_seen": "<RFC3339>" }
+  ],
+  "updated_at": "<RFC3339>",
+  "signature": "<base64-signature-by-identity-signing-key>"
+}
+```
+
+**Note:** The DHT does NOT support prefix queries. The device index record provides an explicit list that clients can fetch with a single lookup, then fetch individual device documents as needed.
+
+### Device Discovery Flow
+
+```
+1. Peer wants to connect to identity "k5xq7z4m..."
+2. Fetch device index: DHT.get(SHA256("post-urbit:devices-for:k5xq7z4m..."))
+3. Parse device list, verify signature
+4. For each device with recent last_seen:
+   a. Fetch device doc: DHT.get(SHA256("post-urbit:device:<did>"))
+   b. Connect to device endpoints
+   c. Perform identity handshake (peer-handshake.md)
+5. First successful connection wins
+```
+
+### Device Record TTL and Refresh
+
+| Record Type | TTL | Refresh Interval |
+|-------------|-----|------------------|
+| Device document | 24 hours | Every 12 hours |
+| Device index | 24 hours | On device add/remove, or every 24h |
+
+Devices should refresh their DHT records before TTL expiry to maintain discoverability.
+
 ## Identity Updates Over Authenticated Connections
 
 When peers are connected, identity updates are pushed directly rather than through DHT.

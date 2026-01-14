@@ -17,16 +17,22 @@ When serializing to JSON, convert camelCase to snake_case.
 
 ### Authentication
 
+**Browser sessions use HttpOnly cookies (not bearer tokens in response body).**
+See `node-daemon.md` Authentication section for full auth model.
+
 ```typescript
 // Login request/response
 interface LoginRequest {
   password: string;
-  rememberDevice?: boolean;
+  rememberDevice?: boolean;  // If true, extends session and sets persistent device cookie
 }
 
 interface LoginResponse {
   session: Session;
-  token: string;  // Bearer token for API calls
+  // NOTE: No token returned in body for browser auth.
+  // Session cookie is set via Set-Cookie header (HttpOnly, SameSite=Strict).
+  // Bearer tokens are only used for CLI/API key auth (not browser login).
+  csrfToken: string;  // CSRF token for subsequent requests
 }
 
 interface Session {
@@ -36,7 +42,8 @@ interface Session {
   lastActivity: Timestamp;
   userAgent: string;
   ipAddress: string;
-  deviceId?: string;
+  deviceId?: string;        // Set if rememberDevice was true
+  requiresFreshAuth: boolean;  // True if sensitive ops need re-auth
 }
 
 // API key management
@@ -551,19 +558,11 @@ interface PaginatedResult<T> {
 
 ```typescript
 // Recovery configuration for identity
+// NOTE: This mirrors the canonical schema from 02-identity-trust/recovery-mechanisms.md
+// Method-specific config is nested under `config` field.
 interface RecoveryConfig {
   method: RecoveryMethod;
-  // For social recovery
-  trustees?: TrusteeConfig[];
-  threshold?: number;          // M-of-N threshold
-  // For device escrow
-  escrowDevice?: DeviceIdentifier;
-  // For provider recovery
-  provider?: {
-    name: string;
-    endpoint: string;
-    publicKey: string;
-  };
+  config: RecoveryMethodConfig;
 }
 
 type RecoveryMethod =
@@ -573,19 +572,68 @@ type RecoveryMethod =
   | 'threshold'      // Shamir secret sharing
   | 'provider';      // Third-party recovery service
 
+// Union type for method-specific configuration
+type RecoveryMethodConfig =
+  | NoneRecoveryConfig
+  | SocialRecoveryConfig
+  | DeviceEscrowRecoveryConfig
+  | ThresholdRecoveryConfig
+  | ProviderRecoveryConfig;
+
+interface NoneRecoveryConfig {
+  // Empty - no configuration needed
+}
+
+interface SocialRecoveryConfig {
+  threshold: number;           // M-of-N threshold
+  trustees: TrusteeConfig[];   // N trustees
+  cooldownHours: number;       // Waiting period before execution
+}
+
 interface TrusteeConfig {
   iid: IdentityIdentifier;
-  displayName?: string;
-  addedAt: Timestamp;
+  label: string;               // Human-readable label (e.g., "Alice (sister)")
+}
+
+interface DeviceEscrowRecoveryConfig {
+  escrowDeviceDid: DeviceIdentifier;
+  escrowDeviceName: string;
+}
+
+interface ThresholdRecoveryConfig {
+  threshold: number;           // M-of-N threshold
+  totalShares: number;         // N
+  shareHolders: ShareHolderConfig[];
+}
+
+interface ShareHolderConfig {
+  iid?: IdentityIdentifier;    // Identity holding share (optional if offline)
+  label: string;
+}
+
+interface ProviderRecoveryConfig {
+  providerName: string;
+  providerEndpoint: string;
+  providerPublicKey: string;
 }
 
 // Network endpoint for identity
+// NOTE: This is the Admin API view. Canonical schema is in 02-identity-trust/identity-document-schema.md
+// Admin API maps the canonical endpoint to this simplified view for display.
 interface Endpoint {
-  type: 'quic' | 'relay' | 'https';
-  address: string;           // host:port or relay URL
+  type: 'direct' | 'relay' | 'mailbox';  // Maps from canonical transport+type
+  host: string;
+  port: number;
+  transport: 'quic' | 'https';
   priority: number;          // Lower = preferred
-  lastVerified?: Timestamp;
+  relayId?: string;          // For relay endpoints
+  lastVerified?: Timestamp;  // Admin-only field (not in identity doc)
 }
+
+// Mapping from canonical endpoint to Admin API view:
+// - Canonical { type: 'direct', host, port, transport } → { type: 'direct', host, port, transport }
+// - Canonical { type: 'relay', relay_id, host, port } → { type: 'relay', host, port, transport: 'quic', relayId }
+// - Canonical { type: 'mailbox', host, port, transport } → { type: 'mailbox', host, port, transport }
 
 // Message types for Admin UI
 interface MessageSummary {

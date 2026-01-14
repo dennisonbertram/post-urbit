@@ -674,14 +674,16 @@ interface InitialHeaderExtension {
 interface SenderKeyState {
   keyId: string;
   chainKey: Uint8Array;
-  signatureKeyPair: KeyPair;
+  // NOTE: No separate signature key. Group message signatures use the sender's
+  // identity signing key via the PUSE envelope signature. See group-messaging.md.
   iteration: number;
 }
 
 interface SenderKeyShare {
   keyId: string;
   chainKey: Uint8Array;
-  signaturePublicKey: Uint8Array;
+  // NOTE: No signaturePublicKey. Verify sender via PUSE envelope signature
+  // against sender's identity document signing key.
   iteration: number;
 }
 
