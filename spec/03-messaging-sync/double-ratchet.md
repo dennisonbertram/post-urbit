@@ -1,0 +1,415 @@
+# Double Ratchet Protocol
+
+## Overview
+
+The Double Ratchet protocol provides forward secrecy and break-in recovery for ongoing conversations. Based on Signal Protocol's design.
+
+## Goals
+
+| Property | Description |
+|----------|-------------|
+| **Forward secrecy** | Compromising current keys doesn't reveal past messages |
+| **Break-in recovery** | Compromising current keys doesn't reveal future messages after ratchet |
+| **Message ordering** | Handle out-of-order message delivery |
+| **Asynchronous** | Work when recipient is offline |
+
+## Key Concepts
+
+### Root Chain
+
+A KDF chain that advances with each DH ratchet step. Provides key material for new sending/receiving chains.
+
+### Sending Chain
+
+A KDF chain for encrypting outgoing messages. Advances with each message sent.
+
+### Receiving Chain
+
+A KDF chain for decrypting incoming messages. Advances with each message received.
+
+### DH Ratchet
+
+Periodic Diffie-Hellman key exchange that provides break-in recovery.
+
+## Key Derivation Functions
+
+All KDFs use HMAC-SHA256 for simplicity and compatibility with Signal Protocol's well-audited design.
+
+### KDF Chain Step (Message Key Derivation)
+
+```
+def kdf_chain_step(chain_key: bytes) -> tuple[bytes, bytes]:
+    """
+    Advance a chain, returning (new_chain_key, message_key).
+    Uses HMAC with single-byte constants for domain separation.
+    """
+    # Message key derivation (constant 0x01)
+    message_key = HMAC-SHA256(key=chain_key, data=b"\x01")
+
+    # Chain key derivation (constant 0x02)
+    new_chain_key = HMAC-SHA256(key=chain_key, data=b"\x02")
+
+    return new_chain_key, message_key
+```
+
+### Root Chain KDF
+
+```
+def kdf_root(root_key: bytes, dh_output: bytes) -> tuple[bytes, bytes]:
+    """
+    Advance root chain with DH output.
+    Returns (new_root_key, new_chain_key).
+    Uses HKDF-SHA256 with proper domain separation.
+    """
+    # HKDF-Extract: derive PRK from salt and IKM
+    prk = HKDF-Extract(salt=root_key, ikm=dh_output)
+
+    # HKDF-Expand: derive 64 bytes with domain separation
+    derived = HKDF-Expand(
+        prk=prk,
+        info=b"post-urbit-ratchet-v1",
+        length=64
+    )
+
+    return derived[0:32], derived[32:64]
+```
+
+### Initial Key Derivation (X3DH)
+
+```
+def kdf_initial(dh1: bytes, dh2: bytes, iid_a: bytes, iid_b: bytes) -> tuple[bytes, bytes]:
+    """
+    Derive initial root key and sending chain from X3DH outputs.
+    Domain separation includes both IIDs for binding.
+    """
+    # Concatenate DH outputs
+    ikm = dh1 + dh2
+
+    # Salt includes sorted IIDs (consistent regardless of who initiates)
+    if iid_a < iid_b:
+        salt = iid_a + iid_b
+    else:
+        salt = iid_b + iid_a
+
+    prk = HKDF-Extract(salt=salt, ikm=ikm)
+
+    derived = HKDF-Expand(
+        prk=prk,
+        info=b"post-urbit-x3dh-v1",
+        length=64
+    )
+
+    return derived[0:32], derived[32:64]  # root_key, initial_chain_key
+```
+
+### Group Sender Key KDF
+
+```
+def kdf_sender_key(chain_key: bytes, group_id: bytes, sender_iid: bytes, key_id: bytes) -> tuple[bytes, bytes]:
+    """
+    Advance sender key chain for group messaging.
+    Domain separation binds to group and sender.
+    """
+    # Construct domain-separated info
+    info = b"post-urbit-sender-key-v1:" + group_id + b":" + sender_iid + b":" + key_id
+
+    message_key = HMAC-SHA256(key=chain_key, data=b"\x01" + info)
+    new_chain_key = HMAC-SHA256(key=chain_key, data=b"\x02" + info)
+
+    return new_chain_key, message_key
+```
+
+## Session Initialization
+
+### X3DH (Extended Triple Diffie-Hellman)
+
+For initial key agreement when recipient may be offline:
+
+```
+Alice wants to message Bob:
+
+1. Alice retrieves Bob's identity document:
+   - IK_B: Bob's long-term X25519 key (from keys.encryption.current)
+
+2. Alice generates ephemeral key:
+   - EK_A: Alice's ephemeral X25519 key pair
+
+3. Alice computes:
+   DH1 = X25519(IK_A_private, IK_B)      # Alice identity × Bob identity
+   DH2 = X25519(EK_A_private, IK_B)      # Alice ephemeral × Bob identity
+
+   # Note: We skip signed prekey for simplicity (Signal has SPK)
+   # Our identity layer already provides key rotation
+
+4. Master secret:
+   master_secret = KDF(DH1 || DH2, "post-urbit x3dh")
+
+5. Derive initial keys:
+   root_key = master_secret[:32]
+   alice_sending_chain = master_secret[32:64]
+```
+
+### Initial Message
+
+Alice sends initial message containing:
+- Alice's ephemeral public key (EK_A_public)
+- Alice's IID (for identity lookup)
+- Encrypted message using alice_sending_chain
+
+### Bob Processes Initial Message
+
+```
+1. Bob looks up Alice's identity document:
+   - IK_A: Alice's X25519 key
+
+2. Bob computes:
+   DH1 = X25519(IK_B_private, IK_A)      # Same as Alice
+   DH2 = X25519(IK_B_private, EK_A)      # Using ephemeral from message
+
+3. Derive same master_secret and initial keys
+
+4. Decrypt message using alice_sending_chain as receiving_chain
+```
+
+## Ratchet Operation
+
+### State
+
+```typescript
+interface RatchetState {
+  // DH ratchet keys
+  dhSendingKey: KeyPair | null;      // Our current DH key pair
+  dhReceivingKey: PublicKey | null;  // Their current DH public key
+
+  // Root chain
+  rootKey: Uint8Array;
+
+  // Sending chain
+  sendingChainKey: Uint8Array | null;
+  sendingChainIndex: number;
+
+  // Receiving chain (may have multiple for out-of-order messages)
+  receivingChains: Map<PublicKey, {
+    chainKey: Uint8Array;
+    chainIndex: number;
+  }>;
+
+  // Skipped message keys (for out-of-order delivery)
+  skippedKeys: Map<string, Uint8Array>;  // key: "pubkey:index"
+  maxSkip: number;  // Maximum messages to skip (default: 100)
+}
+```
+
+### Sending a Message
+
+```
+def send_message(state: RatchetState, plaintext: bytes) -> tuple[bytes, bytes]:
+    # If no sending chain, perform DH ratchet
+    if state.sending_chain_key is None:
+        state.dh_sending_key = generate_x25519_keypair()
+        dh_output = x25519(state.dh_sending_key.private, state.dh_receiving_key)
+        state.root_key, state.sending_chain_key = kdf_root(state.root_key, dh_output)
+        state.sending_chain_index = 0
+
+    # Get message key
+    state.sending_chain_key, message_key = kdf_chain_step(state.sending_chain_key)
+    state.sending_chain_index += 1
+
+    # Encrypt
+    ciphertext = chacha20_poly1305_encrypt(message_key, nonce, plaintext)
+
+    # Header
+    header = encode_header(
+        dh_public=state.dh_sending_key.public,
+        chain_index=state.sending_chain_index,
+        previous_chain_length=...
+    )
+
+    return header, ciphertext
+```
+
+### Receiving a Message
+
+```
+def receive_message(state: RatchetState, header: Header, ciphertext: bytes) -> bytes:
+    # Check for skipped message key
+    skip_key = f"{header.dh_public}:{header.chain_index}"
+    if skip_key in state.skipped_keys:
+        message_key = state.skipped_keys.pop(skip_key)
+        return chacha20_poly1305_decrypt(message_key, nonce, ciphertext)
+
+    # If new DH key, perform DH ratchet
+    if header.dh_public != state.dh_receiving_key:
+        # Store skipped keys from current receiving chain
+        skip_message_keys(state, header.previous_chain_length)
+
+        # DH ratchet step
+        state.dh_receiving_key = header.dh_public
+        dh_output = x25519(state.dh_sending_key.private, state.dh_receiving_key)
+        state.root_key, receiving_chain_key = kdf_root(state.root_key, dh_output)
+
+        # Clear sending chain (will ratchet on next send)
+        state.sending_chain_key = None
+
+        # Store new receiving chain
+        state.receiving_chains[header.dh_public] = {
+            chain_key: receiving_chain_key,
+            chain_index: 0
+        }
+
+    # Get receiving chain
+    chain = state.receiving_chains[header.dh_public]
+
+    # Skip ahead if needed
+    while chain.chain_index < header.chain_index:
+        if len(state.skipped_keys) > state.max_skip:
+            raise TooManySkippedMessages()
+        chain.chain_key, skipped_key = kdf_chain_step(chain.chain_key)
+        state.skipped_keys[f"{header.dh_public}:{chain.chain_index}"] = skipped_key
+        chain.chain_index += 1
+
+    # Get message key
+    chain.chain_key, message_key = kdf_chain_step(chain.chain_key)
+    chain.chain_index += 1
+
+    return chacha20_poly1305_decrypt(message_key, nonce, ciphertext)
+```
+
+## Header Format
+
+```
+Ratchet Header:
+┌────────────────────────────────────────┐
+│ DH Public Key                          │ 32 bytes
+├────────────────────────────────────────┤
+│ Previous Chain Length (big-endian)     │ 4 bytes
+├────────────────────────────────────────┤
+│ Chain Index (big-endian)               │ 4 bytes
+└────────────────────────────────────────┘
+
+Total: 40 bytes
+```
+
+This header is included in the secure envelope's plaintext:
+
+```json
+{
+  "type": "text",
+  "ratchet": {
+    "dh_public": "<base64-32-bytes>",
+    "previous_chain_length": 5,
+    "chain_index": 3
+  },
+  "content": {
+    "text": "Hello!"
+  }
+}
+```
+
+## State Persistence
+
+### What to Store
+
+```typescript
+interface PersistedRatchetState {
+  peerId: IdentityIdentifier;
+
+  // DH keys
+  dhSendingKeyPrivate: Uint8Array;
+  dhSendingKeyPublic: Uint8Array;
+  dhReceivingKey: Uint8Array | null;
+
+  // Chains (encrypted at rest)
+  rootKey: Uint8Array;
+  sendingChainKey: Uint8Array | null;
+  sendingChainIndex: number;
+  receivingChains: Array<{
+    dhPublic: Uint8Array;
+    chainKey: Uint8Array;
+    chainIndex: number;
+  }>;
+
+  // Skipped keys
+  skippedKeys: Array<{
+    dhPublic: Uint8Array;
+    index: number;
+    messageKey: Uint8Array;
+    expiresAt: Timestamp;
+  }>;
+}
+```
+
+### Storage Security
+
+- Encrypt ratchet state at rest using device key
+- Delete old skipped keys after TTL (7 days)
+- Securely wipe keys from memory after use
+
+## Session Management
+
+### Session Reset
+
+When a session becomes corrupted or desync'd:
+
+1. Generate new ephemeral key pair
+2. Send session reset message (unencrypted metadata, no content)
+3. Wait for acknowledgment
+4. Reinitialize from X3DH
+
+### Session Reset Message
+
+```json
+{
+  "type": "session_reset",
+  "content": {
+    "reason": "desync|key_rotation|manual",
+    "new_ephemeral_public": "<base64>"
+  }
+}
+```
+
+This message is sent using a fresh secure envelope (not the broken ratchet).
+
+## Key Rotation Integration
+
+When a peer rotates their identity encryption key:
+
+1. Receive identity update notification
+2. Store new encryption key
+3. Continue using current ratchet until break-in recovery naturally occurs
+4. New DH ratchets will use the updated key
+
+No explicit action needed - the ratchet is resilient to key changes.
+
+## Security Considerations
+
+### Forward Secrecy Window
+
+Forward secrecy is achieved after:
+- One round trip (both parties have sent a message since compromise)
+- DH ratchet has occurred
+
+Messages before the ratchet remain vulnerable if keys are compromised.
+
+### Skipped Message Key Limits
+
+- `max_skip = 100`: Limits memory usage
+- TTL on skipped keys: 7 days
+- If exceeded, session needs reset
+
+### Denial of Service
+
+Attacker with message key could:
+- Force excessive key skipping
+- Exhaust memory
+
+Mitigation: Limit skipped keys, rate limit incoming messages.
+
+## Test Scenarios
+
+1. **Normal conversation**: Messages flow in both directions
+2. **Offline recipient**: Sender sends multiple messages before recipient comes online
+3. **Out-of-order**: Messages arrive in different order than sent
+4. **Key rotation**: Peer rotates identity key mid-conversation
+5. **Session reset**: Recover from corrupted session state
+6. **Multiple devices**: Same identity on multiple devices (separate sessions per device)
