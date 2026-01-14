@@ -355,9 +355,7 @@ The following fields are required:
 - `capabilities.required` (may be empty array)
 - `dependencies.api_version`
 - `files` (must include at least entry point)
-- `signature.algorithm`
-- `signature.public_key`
-- `signature.signature`
+_(signature is in SIGNATURE file, not manifest.json)_
 
 ### Validation Rules
 
@@ -604,17 +602,17 @@ package_id = "sha256:" + hex(package_hash)
 
 ### Package Signing
 
-The package signature binds author identity to package contents. Two related signatures exist:
+The package signature binds author identity to package contents.
 
-1. **SIGNATURE file** (in package root): Author's signature over manifest hash with timestamp
-   - See `05-ux-packaging/app-distribution.md` for signing/verification process
-   - Payload: `"postapp-signature-v1:" || manifest_hash || ":" || timestamp`
+**SIGNATURE file** (in package root): Author's signature over manifest hash with timestamp
+- See `05-ux-packaging/app-distribution.md` for signing/verification process
+- Payload: `"postapp-signature-v1:" || HEX(manifest_hash) || ":" || timestamp`
+- `manifest_hash` is SHA-256 of JCS-canonical manifest.json, hex-encoded in payload
+- `timestamp` is RFC3339 UTC (e.g., `2025-01-15T12:00:00Z`)
 
-2. **manifest.signature** (in manifest.json): Signature over canonical manifest (optional, for self-contained verification)
-   - Payload: Canonical manifest JSON (without signature field)
-   - Same author key as SIGNATURE file
+**manifest.json does NOT contain a signature field.** All signature verification uses the SIGNATURE file exclusively.
 
-**Primary verification uses SIGNATURE file.** The embedded manifest signature is provided for compatibility with systems that only receive the manifest.
+**Rationale**: A single authoritative signature location avoids ambiguity. The manifest remains content-only; signing is handled by the package wrapper.
 
 ### Package Verification
 

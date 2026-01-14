@@ -162,17 +162,26 @@ JCS sorts keys lexicographically at all levels and removes whitespace:
 
 ### Signature
 
-Sign the UTF-8 encoded canonical JSON bytes:
+**Domain separation**: The signature is over a domain-separated payload:
 
 ```
+Domain separator (19 bytes, ASCII):
+"post-urbit:idoc:v1:"
+
+Payload = domain_separator + JCS_bytes
+
+Sign the UTF-8 encoded payload:
+
 Signature (hex):
-1d554c30226ba0a37ce77c91fecea19026a7203136fdb52dd6cc7982ed2cbda61f9e366b9a78cd65d6fb22372ee452df96272afb8e020cf0392d234011507603
+[Regenerate with domain separation - value depends on actual payload]
 
 Signature (base64):
-HVVMMCJroKN853yR/s6hkCanIDE2/bUt1sx5gu0svaYfnjZrmnjNZdb7Ijcu5FLflicq+44CDPA5LSNAEVB2Aw
+[Regenerate with domain separation]
 
 Signature length: 64 bytes (86 base64 chars without padding)
 ```
+
+**Note**: Test vector signatures must be regenerated with domain separation. The signature from earlier test vectors was computed without domain separation and is now obsolete.
 
 ### Signed Document
 

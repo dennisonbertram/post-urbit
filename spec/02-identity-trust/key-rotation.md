@@ -62,8 +62,9 @@ Identity Document v(N):
 3. **Sign with BOTH keys**
    ```
    canonical = JCS(doc_without_signatures)
-   sig_current = Ed25519_Sign(K_sign_new_private, canonical)
-   sig_previous = Ed25519_Sign(K_sign_old_private, canonical)
+   payload = b"post-urbit:idoc:v1:" + canonical  # Domain separation
+   sig_current = Ed25519_Sign(K_sign_new_private, payload)
+   sig_previous = Ed25519_Sign(K_sign_old_private, payload)
    ```
 
 4. **Publish new document**
@@ -92,16 +93,17 @@ function verify_rotation(old_doc, new_doc):
     assert new_doc.iid == old_doc.iid
 
     # 2. Sequence must increase
-    assert new_doc.sequence > old_doc.sequence
+    assert int(new_doc.sequence) > int(old_doc.sequence)
 
-    # 3. Current signature must be valid
+    # 3. Current signature must be valid (with domain separation)
     canonical = JCS(new_doc without signatures)
-    assert Ed25519_Verify(new_doc.keys.signing.current, canonical, new_doc.signatures.current)
+    payload = b"post-urbit:idoc:v1:" + canonical
+    assert Ed25519_Verify(new_doc.keys.signing.current, payload, new_doc.signatures.current)
 
     # 4. If signing key changed, previous signature required
     if new_doc.keys.signing.current != old_doc.keys.signing.current:
         assert new_doc.signatures.previous != null
-        assert Ed25519_Verify(old_doc.keys.signing.current, canonical, new_doc.signatures.previous)
+        assert Ed25519_Verify(old_doc.keys.signing.current, payload, new_doc.signatures.previous)
 
     return VALID
 ```

@@ -355,14 +355,25 @@ Each device publishes a Device Document, signed by the identity:
 3. Verify `signature_by_identity` using identity's current signing key
 4. Check `expires_at` if present
 
-### Multi-Device Implications
+### Multi-Device Implications (v1: Identity-Level Sessions)
 
-| Component | Without DID | With DID |
-|-----------|-------------|----------|
-| Transport connection | Per (peer_iid) | Per (peer_iid, peer_did) |
-| Ratchet session | Per peer IID | Per (peer_iid, peer_did) |
-| Group sender keys | Distributed to IIDs | Distributed to (iid, did) pairs |
-| Connection dedup | Lower IID initiates | Lower (iid, did) initiates |
+In v1, **messaging sessions are identity-level** (per IID pair), not per-device:
+
+| Component | Behavior |
+|-----------|----------|
+| Transport connection | Per (peer_iid, peer_did) - devices connect separately |
+| Ratchet session | **Per (sender_iid, recipient_iid)** - shared across devices |
+| Group sender keys | Distributed to IIDs |
+| Connection dedup | Lower IID initiates |
+| Device fanout | Recipient's node handles internal device delivery |
+
+**Rationale**: Identity-level sessions are simpler and avoid ratchet state synchronization complexity. Messages are addressed to an identity; the recipient's node(s) handle device fanout internally.
+
+**Device-specific considerations**:
+- Each device has its own transport connection
+- Device handshake proves DID ownership
+- Ratchet state is synced between devices belonging to the same identity (implementation-defined)
+- Sender does NOT need to maintain separate ratchets per recipient device
 
 ### Device Registration
 
@@ -391,17 +402,21 @@ Peers MUST check for revocation before accepting connections from a device.
 
 ## Canonical Serialization
 
-For signing, the document MUST be serialized canonically:
+For signing, the document MUST be serialized canonically with domain separation:
 
 1. **JSON Canonicalization Scheme (JCS)** per RFC 8785
 2. Remove `signatures` field before signing
 3. UTF-8 encode the result
-4. Sign the bytes
+4. **Prepend domain separator**: `b"post-urbit:idoc:v1:" || jcs_bytes`
+5. Sign the resulting bytes
 
 ```
 canonical_bytes = JCS(document_without_signatures)
-signature = Ed25519_Sign(signing_private_key, canonical_bytes)
+payload = b"post-urbit:idoc:v1:" + canonical_bytes
+signature = Ed25519_Sign(signing_private_key, payload)
 ```
+
+**Domain separation** prevents cross-context signature replay. All signatures in the Post-Urbit system use a domain separator prefix.
 
 ## Signature Verification
 

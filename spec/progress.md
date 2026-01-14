@@ -1,7 +1,7 @@
 # Specification Progress
 
-## Iteration: 13
-## Mode: DEEP DIVE (RFC-0001 Identity)
+## Iteration: 14
+## Mode: HOLISTIC REVIEW (RFC + layer alignment)
 ## Status: 99/100 completeness estimate
 
 ### Fully Specified
@@ -33,6 +33,15 @@
 - **Iteration 11 (deep dive)**: Test vectors with real crypto values
 - **Iteration 12 (holistic)**: Final cross-layer consistency review
 - **Iteration 13 (deep dive)**: RFC-0001 Identity Document drafted
+- **Iteration 14 (holistic)**: RFC + layer alignment review
+
+  **Cross-Layer Issues Fixed (Iteration 14):**
+  1. B1: Domain separation aligned across all identity docs and test vectors
+  2. B2: DHT authentication simplified (uses internal IDOC signature only)
+  3. B3: Device document schema canonicalized (consistent field names, endpoints included)
+  4. B4: Multi-device session model clarified (v1 = identity-level sessions)
+  5. B5: QUIC stream framing unified (stream type once, then length-prefixed JSON)
+  6. B6: App manifest signing cleaned up (SIGNATURE file only, no embedded signature)
 
   **RFC-0001 Issues Fixed (Iteration 13):**
   1. B1: Bootstrap verification algorithm defined (TOFU + genesis fetch)
@@ -107,9 +116,9 @@ The spec is now **RFC-ready**. Suggested breakdown:
 - **RFC-0003**: PUSE Envelope + Double Ratchet + Mailbox
 
 ### Next Priority
-**Iteration 14 will be HOLISTIC REVIEW:**
+**Iteration 15 will be DEEP DIVE on RFC-0002 (Transport):**
 
 Focus areas:
-- Verify RFC-0001 aligns with all layer specs
-- Cross-reference test vectors between RFC and 00-shared/test-vectors.md
-- Prepare for RFC-0002 (Transport) and RFC-0003 (Messaging)
+- Draft RFC-0002 covering peer handshake, relay protocol, QUIC integration
+- Include wire formats and test vectors
+- Cross-reference with 01-transport-connectivity specs

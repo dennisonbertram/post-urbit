@@ -37,18 +37,25 @@ interface DiscoveryService {
 What gets stored in the DHT:
 
 ```
-DHT Key:   SHA256("post-urbit:identity:" || iid)
+DHT Key:   SHA256("post-urbit:identity:" || iid)  # UTF-8/ASCII encoding
 DHT Value: IDOC binary envelope (see identity-document-schema.md)
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| Key | 32 bytes | SHA256 of prefixed IID |
-| Value | bytes | IDOC envelope (magic + version + length + JSON) |
+| Key | 32 bytes | SHA256 of prefixed IID (UTF-8/ASCII) |
+| Value | bytes | IDOC envelope (magic + version + length + JCS-canonical JSON) |
 | TTL | uint32 | Time-to-live in seconds (default: 86400 = 24 hours) |
-| Signature | 64 bytes | Ed25519 signature by document's signing key |
 
-**Verification**: DHT nodes MUST verify the identity document signature before storing. This prevents arbitrary data storage and ensures only identity owners can update their records.
+**No separate DHT signature required.** The IDOC envelope contains `signatures.current` which is validated using the embedded `keys.signing.current`. This internal signature provides authentication.
+
+**Verification**: DHT nodes MUST verify the identity document's internal signature before storing:
+1. Parse IDOC envelope
+2. Verify `iid == derive_iid(keys.signing.genesis)`
+3. Verify `signatures.current` using `keys.signing.current` (with domain separation)
+4. Only store if all checks pass
+
+This prevents arbitrary data storage and ensures only identity owners can update their records.
 
 ### Transport API Bridge
 
@@ -121,22 +128,29 @@ DHT Value: Device document (JSON, signed by identity's signing key)
 
 **Signature authority:** The device document is signed by the **identity's signing key** (NOT the device key). This proves the identity owner authorized this device.
 
-**Device Document Structure:**
+**Device Document Structure (canonical):**
 ```json
 {
+  "version": 1,
   "did": "<device-identifier>",
   "iid": "<owner-identity-identifier>",
-  "name": "My Phone",
+  "device_name": "My Phone",
   "device_signing_key": "<base64-ed25519-public>",
-  "device_transport_key": "<base64-x25519-public>",
   "endpoints": [
     { "type": "direct", "host": "...", "port": 4433, "transport": "quic" }
   ],
   "created_at": "<RFC3339>",
-  "last_seen": "<RFC3339>",
-  "signature": "<base64-signature-by-identity-signing-key>"
+  "expires_at": "<RFC3339-optional>",
+  "capabilities": ["messaging", "sync"],
+  "signature_by_identity": "<base64-signature-by-identity-signing-key>"
 }
 ```
+
+**Note**: This is the canonical Device Document format. Field names MUST match exactly:
+- `device_name` (not `name`)
+- `signature_by_identity` (not `signature`)
+- `endpoints` included for device-specific network presence
+- `device_transport_key` removed in v1 (unused; handshake uses device signing key)
 
 **Why identity signature (not device signature)?**
 - Device keys are subordinate to identity keys
@@ -205,35 +219,45 @@ Identity updates use the `identity` stream type (0x02) on authenticated QUIC con
 
 ### Message Format
 
-**Stream type is written ONCE at stream start**, then message frames follow:
+**QUIC Stream Framing (Normative, All Stream Types):**
 
 ```
-Identity Update Stream:
-
 Stream Header (first byte of stream, written once):
 ┌────────────────────────────────────────┐
-│ Stream Type: 0x02 (identity)           │ 1 byte
+│ Stream Type                            │ 1 byte
 └────────────────────────────────────────┘
 
 Each Message Frame (repeated):
 ┌────────────────────────────────────────┐
-│ Message Type                           │ 1 byte
-├────────────────────────────────────────┤
 │ Length (big-endian)                    │ 4 bytes
 ├────────────────────────────────────────┤
-│ Payload                                │ <length> bytes
+│ JSON Payload (UTF-8)                   │ <length> bytes
 └────────────────────────────────────────┘
 ```
 
-**Message Types:**
-| Code | Name | Description |
-|------|------|-------------|
-| 0x01 | IDENTITY_UPDATE | Push new identity document |
-| 0x02 | IDENTITY_REQUEST | Request peer's current identity |
-| 0x03 | IDENTITY_RESPONSE | Response with identity document |
-| 0x04 | IDENTITY_ACK | Acknowledge receipt of update |
+**Key points:**
+- Stream type written ONCE at stream start
+- No per-message type byte (message type is in JSON `type` field)
+- 4-byte length prefix for each message
+- JSON payload contains a `type` field to distinguish message kinds
 
-**Note:** This pattern (stream type once, then length-prefixed frames) is consistent across all QUIC stream types. See `01-transport-connectivity/quic-integration.md` and `01-transport-connectivity/peer-handshake.md` for the normative framing specification.
+**Stream Types:**
+| Code | Name | Purpose |
+|------|------|---------|
+| 0x01 | Control | Handshake, connection management |
+| 0x02 | Identity | Identity document updates |
+| 0x03 | Messaging | PUSE envelopes |
+| 0x04 | Sync | CRDT sync operations |
+
+**Identity Update Message Types (JSON `type` field):**
+| Type | Description |
+|------|-------------|
+| `identity_update` | Push new identity document |
+| `identity_request` | Request peer's current identity |
+| `identity_response` | Response with identity document |
+| `identity_ack` | Acknowledge receipt of update |
+
+This framing pattern is consistent across all QUIC stream types. See `01-transport-connectivity/peer-handshake.md` for the normative specification.
 
 ### Update Push Flow
 
