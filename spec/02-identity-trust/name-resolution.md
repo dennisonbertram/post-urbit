@@ -37,13 +37,13 @@ User-defined mappings stored locally on each node.
 {
   "aliases": {
     "alice": {
-      "iid": "k5xq7z8m9n2p3r4s5t6u7v8w9x0y1z2a",
+      "iid": "k5xq7z8m9n2p3r4s5t6v7v8w9x0y1z2a",
       "display_name": "Alice (work)",
       "added_at": "2025-01-13T12:00:00Z",
       "verified_via": "in_person|qr_code|trusted_intro"
     },
     "bob": {
-      "iid": "m3n4o5p6q7r8s9t0u1v2w3x4y5z6a7b8",
+      "iid": "m3n405p6q7r8s9t0v1v2w3x4y5z6a7b8",
       "display_name": "Bob",
       "added_at": "2025-01-10T08:00:00Z",
       "verified_via": "trusted_intro"
@@ -55,7 +55,7 @@ User-defined mappings stored locally on each node.
 ### Resolution
 
 ```
-resolve("alice") → "k5xq7z8m9n2p3r4s5t6u7v8w9x0y1z2a"
+resolve("alice") → "k5xq7z8m9n2p3r4s5t6v7v8w9x0y1z2a"
 ```
 
 ### Collision Handling
@@ -71,7 +71,7 @@ Use DNS TXT records to map domain names to IIDs.
 ### DNS Record Format
 
 ```
-_identity.alice.example.com. TXT "post-urbit=1 iid=k5xq7z8m9n2p3r4s5t6u7v8w9x0y1z2a"
+_identity.alice.example.com. TXT "post-urbit=1 iid=k5xq7z8m9n2p3r4s5t6v7v8w9x0y1z2a"
 ```
 
 ### Record Fields

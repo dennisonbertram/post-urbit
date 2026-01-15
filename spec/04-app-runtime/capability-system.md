@@ -335,7 +335,7 @@ const CAPABILITY_MAP: Record<string, CapabilityRequirement> = {
 
   // Contacts
   'contacts.list': 'contacts:read',
-  'contacts.get': 'contacts:read',
+  // Note: contacts.get is reserved for future use; not in v1 (returns NOT_IMPLEMENTED)
   'contacts.list_app_users': 'contacts:read:limited',
 
   // Sync

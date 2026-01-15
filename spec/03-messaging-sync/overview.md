@@ -104,7 +104,7 @@ This layer uses these QUIC stream types (defined in 01-transport-connectivity):
 |-------------|-----|-------|
 | Message | 0x03 | 1:1 and group messages |
 | Sync | 0x04 | Data synchronization |
-| Bulk | 0x05 | Large file transfers |
+| Bulk | 0x05 | Large file transfers (Reserved for v2 - MUST NOT be used in v1) |
 
 ## Security Model
 

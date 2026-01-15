@@ -147,11 +147,52 @@ PUSE Envelope:
 | Message ID | 46 | 16 |
 | Header Extension Length | 62 | 2 |
 
+**UUID Serialization (Normative):** The 16-byte `Message ID` field MUST use RFC 4122 network byte order (big-endian). See `spec/00-shared/layer-integration.md` "UUID Serialization (Normative)" for the authoritative byte-order specification and test vectors. The canonical string format (used in mailbox APIs) is lowercase hexadecimal with hyphens: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+
 **Size constraints:**
-- Minimum envelope size: 160 bytes (empty extension, 16-byte ciphertext)
+- Minimum envelope size: `160 + ext_len` bytes (16-byte ciphertext minimum for empty plaintext with ChaCha20-Poly1305 tag)
+  - Group extension (21 bytes): min = 181 bytes
+  - Initial/Ephemeral extension (33 bytes): min = 193 bytes
+  - Ratchet extension (41 bytes): min = 201 bytes
 - Maximum envelope size: 1,048,576 bytes (1 MB)
 - Maximum header extension: 1024 bytes
-- Maximum ciphertext: 1,048,352 bytes
+- Maximum ciphertext: `MAX_ENVELOPE - (64 + ext_len + 12 + 4 + 64)` bytes
+  - With 21-byte extension: max ciphertext = 1,048,411 bytes
+  - With 1024-byte extension: max ciphertext = 1,047,408 bytes
+
+**Maximum Envelope Size (Normative):**
+
+The 1,048,576 byte (1 MB) limit applies to the **total PUSE envelope size** as transmitted on the wire. This is the sum of all bytes from the magic field through the signature field, inclusive.
+
+Implementations MUST reject envelopes exceeding this limit at the earliest possible point (ideally during length-prefix parsing in stream framing, before allocating buffers for the full envelope).
+
+**Derived Maximum Plaintext Size:**
+
+Given the envelope structure, the maximum plaintext size is:
+
+```
+max_plaintext = MAX_ENVELOPE - fixed_overhead - ext_len - poly1305_tag
+              = 1,048,576 - 144 - ext_len - 16
+              = 1,048,416 - ext_len bytes
+```
+
+Where `fixed_overhead` = 64 (header) + 12 (nonce) + 4 (ciphertext_length) + 64 (signature) = 144 bytes.
+
+| Extension Type | ext_len | Max Plaintext |
+|----------------|---------|---------------|
+| Group (0x02) | 21 | 1,048,395 bytes |
+| Initial (0x00) | 33 | 1,048,383 bytes |
+| Ratchet (0x01) | 41 | 1,048,375 bytes |
+| Max extension | 1024 | 1,047,392 bytes |
+
+**Note:** The ciphertext field contains `plaintext + 16-byte Poly1305 tag`, hence the tag is subtracted from the maximum plaintext calculation.
+
+**Header extension sizes by type:**
+- Group (0x02): 21 bytes (1 type + 16 sender_key_id + 4 iteration)
+- Initial/Ephemeral (0x00): 33 bytes (1 type + 32 ephemeral_key)
+- Ratchet (0x01): 41 bytes (1 type + 32 dh_public + 4 pn + 4 n)
+
+**Note:** Exactly one header extension is REQUIRED (see §3.4). Reject envelopes with `ext_len == 0`.
 
 ### 3.3 Flags Byte
 
@@ -176,6 +217,19 @@ Flags (1 byte):
 | 0x01 | Group message (recipient is group ID) |
 | 0x02 | Broadcast (reserved for future use) |
 | 0x03 | Reserved |
+
+**Recipient Type ↔ Extension Type Linkage (Normative):**
+
+The `recipient_type` (flags bits 0-1) and header extension type MUST be consistent:
+
+| Recipient Type | Allowed Extension Types |
+|----------------|------------------------|
+| 0x00 (1:1) | 0x00 (Initial) or 0x01 (Ratchet) |
+| 0x01 (Group) | 0x02 (Group) |
+| 0x02 (Broadcast) | Reserved (reject) |
+| 0x03 (Reserved) | Reserved (reject) |
+
+Implementations MUST reject envelopes where the recipient type and extension type are inconsistent. This ensures routing logic and encryption mode are always aligned.
 
 ### 3.4 Header Extensions
 
@@ -204,6 +258,51 @@ Initial Header Extension:
 └────────────────────────────────────────┘
 Total: 33 bytes
 ```
+
+**Initial Message Key Derivation (Normative):**
+
+The sender MUST derive the message key for the initial (0x00) message using `kdf_chain_step`:
+
+```python
+new_chain_key, message_key = kdf_chain_step(initial_chain_key)
+```
+
+After encrypting the initial message:
+- Sender stores `new_chain_key` as `sendingChainKey` with `sendingChainIndex = 1`
+- Only ONE message per session MAY use extension type 0x00
+- All subsequent messages MUST use extension type 0x01 (Ratchet)
+
+**AAD Definition (Normative):** The ChaCha20-Poly1305 AAD for initial messages MUST be the exact 33-byte PUSE header extension bytes:
+```
+initial_extension_bytes = 0x00 || ephemeral_public_key(32)
+```
+
+**Receiver Processing for Initial (0x00) Message (Normative):**
+
+When receiving an initial (0x00) message, the recipient MUST:
+
+1. Derive `initial_chain_key` from the 2DH exchange using the ephemeral key from the header extension
+2. Compute `new_chain_key, message_key = kdf_chain_step(initial_chain_key)`
+3. Decrypt the ciphertext using `message_key`
+4. Store `new_chain_key` as the receiving chain key for the sender's DH public key
+5. Set the receiving chain index to `1` (because message N=0 was just consumed)
+
+This ensures the receiver's state is synchronized for subsequent 0x01 messages from the same sender, which will have `n >= 1`.
+
+**Transition to Ratchet Messages (0x00 → 0x01) (Normative):**
+
+After the initial (0x00) message, subsequent messages from the **same sender** use extension type 0x01 with the following constraints:
+
+1. **DH public key**: Reuse the same ephemeral public key from the 0x00 message until a DH ratchet occurs
+2. **Message number N**: Start at 1 (because the 0x00 message is effectively N=0 of that sending chain)
+3. **Previous chain length PN**: 0 (no previous sending chain exists at session start)
+
+The sender's second message (first 0x01 message) will have:
+- `dh_public`: Same as the ephemeral key sent in the 0x00 header
+- `pn`: 0
+- `n`: 1
+
+A DH ratchet step occurs when the sender receives a message from the recipient (which includes the recipient's new DH public key).
 
 #### 3.4.3 Ratchet Extension (Type 0x01)
 
@@ -242,6 +341,12 @@ Group Header Extension:
 └────────────────────────────────────────┘
 Total: 21 bytes
 ```
+
+**Iteration Counter (Normative):**
+- Sender Key Iteration is **1-indexed**: the first message encrypted with a new sender key has `iteration = 1`
+- Value 0 is invalid; implementations MUST reject group envelopes with `iteration = 0`
+- Each message increments the iteration counter; receivers use this to derive the correct message key
+- Maximum value: 2^32 - 1; after this, rotate the sender key
 
 ### 3.5 Nonce Generation
 
@@ -282,7 +387,7 @@ ciphertext || tag = ChaCha20-Poly1305(
 )
 ```
 
-The 16-byte Poly1305 tag is included in the ciphertext.
+The 16-byte Poly1305 tag is included in the ciphertext. Thus, `ciphertext_length` (the 4-byte field in §3.2) MUST equal `len(plaintext) + 16` (the Poly1305 tag size).
 
 ### 3.7 Signature
 
@@ -306,10 +411,38 @@ Receivers MUST parse in this order for streaming support:
 4. Read ciphertext_length (4 bytes)
 5. Read ciphertext (length from step 4)
 6. Read signature (64 bytes)
-7. Verify signature over bytes from steps 1-5
-8. Verify sender identity (fetch identity document for sender IID)
+7. Fetch sender identity document (from cache or DHT, using sender IID from header)
+8. Verify signature over bytes from steps 1-5 using sender's signing keys
 9. Derive message key based on extension type
 10. Decrypt ciphertext
+
+**Trailing Bytes Rule (Normative):** Parsers MUST reject PUSE envelopes where the total byte count does not exactly match the computed envelope size: `64 + ext_len + 12 + 4 + ct_len + 64`. Trailing bytes MUST NOT be silently ignored.
+
+**Signature Verification Key Selection (Normative):**
+
+Verifiers MUST attempt signature verification using keys in order:
+1. `keys.signing.current`
+2. `keys.signing.previous` (if present)
+3. ALL `keys.signing.history[]` entries (regardless of `expires_at`)
+
+Accept the envelope if ANY key successfully verifies the signature. This handles mailbox-delayed messages where the sender may have rotated keys after sending.
+
+The `expires_at` field is metadata for UI warnings and audit trails; it MUST NOT be used to reject signatures during verification.
+
+**`expires_at` Usage (Informative):**
+
+| Context | Usage | Notes |
+|---------|-------|-------|
+| UI display | MAY show warning for expired keys | "Verified with expired key" indicator |
+| Audit logs | SHOULD record which key verified | Include `expires_at` status in logs |
+| Signature verification | MUST NOT reject based on `expires_at` | Always try all keys |
+
+For PUSE message verification, the recommended behavior is:
+- Accept if ANY key verifies (current → previous → all history)
+- Log a warning if the verifying key's `expires_at` has passed
+- Application MAY present a UI indicator for "verified with expired key"
+
+**Note:** Steps 7-8 require the sender's identity document before signature verification can proceed. Implementations MAY cache identity documents to avoid repeated fetches.
 
 ---
 
@@ -380,6 +513,13 @@ def kdf_initial(dh1: bytes, dh2: bytes, iid_a: bytes, iid_b: bytes) -> tuple[byt
 
 **Domain separator:** `post-urbit-x3dh-v1` (18 ASCII bytes)
 
+**IID Sorting (Normative):** The comparison `iid_a < iid_b` MUST be performed as **bytewise lexicographic comparison of the raw 20-byte IID values**:
+- Compare byte-by-byte from index 0 to 19
+- The first differing byte determines the ordering (lower byte value = smaller IID)
+- If all 20 bytes are equal, the IIDs are equal
+
+Implementations MUST NOT sort by Base32 string representation, as Base32 ordering differs from raw byte ordering for some IID pairs. This rule applies to all places in this specification where IIDs are sorted or compared (including `kdf_initial`, sender key derivation, and any future extensions).
+
 ### 4.3 Ratchet State
 
 Each peer maintains ratchet state per conversation:
@@ -401,6 +541,7 @@ interface RatchetState {
 
   // Sending chain
   sendingChainKey: Uint8Array | null; // 32 bytes
+  previousSendingChainLength: number; // PN for current sending chain (persists until next DH ratchet)
   sendingChainIndex: number;        // uint32
 
   // Receiving chains (may have multiple for out-of-order)
@@ -431,14 +572,13 @@ def ratchet_encrypt(state: RatchetState, plaintext: bytes) -> tuple[Header, byte
     Counter semantics:
     - N is 0-indexed: first message in a chain has N=0
     - PN is the count of messages sent in the PREVIOUS sending chain
+    - PN is stored in state and used for ALL messages in the current chain
     """
-    # Track previous chain length for PN
-    previous_chain_length = 0
-
     # If no sending chain, perform DH ratchet step
     if state.sending_chain_key is None:
-        # Record previous chain length before ratcheting
-        previous_chain_length = state.sending_chain_index
+        # Record previous chain length (PN) BEFORE ratcheting
+        # This value persists for all messages sent with the new DH key
+        state.previous_sending_chain_length = state.sending_chain_index
 
         state.dh_sending_key = generate_x25519_keypair()
         dh_output = x25519(state.dh_sending_key.private, state.dh_receiving_key)
@@ -453,19 +593,21 @@ def ratchet_encrypt(state: RatchetState, plaintext: bytes) -> tuple[Header, byte
     state.sending_chain_index += 1
 
     # Build ratchet header
-    # PN = messages sent in previous chain; N = current message number (0-indexed)
+    # PN = messages sent in previous chain (stored in state); N = current message number (0-indexed)
     header = RatchetHeader(
         dh_public=state.dh_sending_key.public,
-        pn=previous_chain_length,
+        pn=state.previous_sending_chain_length,
         n=n
     )
 
     # Encrypt (nonce generated per §3.5)
+    # AAD is the 41-byte ratchet extension: 0x01 || dh_public(32) || PN(u32-be) || N(u32-be)
     nonce = generate_nonce()
+    ratchet_extension_bytes = header.encode()  # MUST return exact PUSE header extension bytes
     ciphertext = chacha20_poly1305_encrypt(
         key=message_key,
         nonce=nonce,
-        aad=header.encode(),
+        aad=ratchet_extension_bytes,
         plaintext=plaintext
     )
 
@@ -476,6 +618,12 @@ def ratchet_encrypt(state: RatchetState, plaintext: bytes) -> tuple[Header, byte
 ```
 
 **Message Key Derivation:** The message key for message number N is derived by applying `kdf_chain_step` once to the chain key. After derivation, the chain key advances to enable the next message. This means message N=0 uses the first `kdf_chain_step` output from the initial chain key.
+
+**AAD Definition (Normative):** The ChaCha20-Poly1305 AAD for ratchet messages MUST be the exact 41-byte PUSE header extension bytes:
+```
+ratchet_extension_bytes = 0x01 || dh_public(32) || PN(u32-be) || N(u32-be)
+```
+Both sender and receiver MUST use this exact byte sequence. The `header.encode()` method MUST return these 41 bytes verbatim.
 
 ### 4.5 Receiving a Message
 
@@ -490,6 +638,9 @@ def ratchet_decrypt(state: RatchetState, header: RatchetHeader,
     - chainIndex tracks the next expected message number
     - Skipped keys are stored for indices [chainIndex, header.n)
     """
+    # AAD is the parsed 41-byte header extension (see §4.4 AAD Definition)
+    ratchet_extension_bytes = header.encode()
+
     # Check for skipped message key
     skip_key = f"{header.dh_public.hex()}:{header.n}"
     if skip_key in state.skipped_keys:
@@ -497,7 +648,7 @@ def ratchet_decrypt(state: RatchetState, header: RatchetHeader,
         plaintext = chacha20_poly1305_decrypt(
             key=entry.message_key,
             nonce=nonce,
-            aad=header.encode(),
+            aad=ratchet_extension_bytes,
             ciphertext=ciphertext
         )
         secure_zero(entry.message_key)
@@ -540,11 +691,11 @@ def ratchet_decrypt(state: RatchetState, header: RatchetHeader,
     chain["chainKey"], message_key = kdf_chain_step(chain["chainKey"])
     chain["chainIndex"] += 1
 
-    # Decrypt
+    # Decrypt (AAD was extracted at function start)
     plaintext = chacha20_poly1305_decrypt(
         key=message_key,
         nonce=nonce,
-        aad=header.encode(),
+        aad=ratchet_extension_bytes,
         ciphertext=ciphertext
     )
 
@@ -611,16 +762,28 @@ The initiator generates:
 **Bob receives initial message:**
 
 1. Bob retrieves Alice's identity document
-2. Bob extracts Alice's identity key: `IK_A = alice.keys.encryption.current`
-3. Bob extracts Alice's ephemeral key from header extension: `EK_A_public`
-4. Bob computes same DH outputs:
+2. Bob extracts Alice's ephemeral key from header extension: `EK_A_public`
+3. Bob tries Alice's encryption keys in order until decryption succeeds:
+   - `keys.encryption.current` (most common case)
+   - `keys.encryption.previous[]` entries whose `expires_at` has not passed
+4. For each candidate `IK_A`:
    ```
-   DH1 = X25519(IK_B_private, IK_A)    // Same as Alice's DH1
+   DH1 = X25519(IK_B_private, IK_A)    // Bob identity × Alice identity
    DH2 = X25519(IK_B_private, EK_A)    // Bob identity × Alice ephemeral
+   root_key, initial_chain_key = kdf_initial(DH1, DH2, alice_iid, bob_iid)
+   message_key = kdf_chain_step(initial_chain_key)[1]
    ```
-5. Bob derives same initial keys
-6. Bob initializes ratchet state
-7. Bob decrypts message
+5. Attempt AEAD decryption with `message_key`
+6. If decryption fails, try next candidate key; if all fail, reject envelope
+7. Bob initializes ratchet state with successful keys
+
+**Encryption Key Trial Order (Normative):**
+
+For 2DH initial message decryption, receivers MUST try sender encryption keys in this order:
+1. `keys.encryption.current`
+2. `keys.encryption.previous[]` entries (newest first) whose `expires_at` has not passed
+
+This handles mailbox-delayed messages where the sender may have rotated encryption keys after sending. The trial decryption approach is necessary because the initial message header carries no sender key identifier.
 
 ### 5.4 Security Properties
 
@@ -641,7 +804,8 @@ def initialize_ratchet_initiator(
     root_key: bytes,           # 32 bytes from kdf_initial
     initial_chain_key: bytes,  # 32 bytes from kdf_initial
     bob_identity_key: bytes,   # 32 bytes, Bob's IK public
-    bob_iid: bytes             # 20 bytes, Bob's IID
+    bob_iid: bytes,            # 20 bytes, Bob's IID
+    alice_ephemeral_keypair: tuple  # (private, public) from 2DH setup
 ) -> RatchetState:
     state = RatchetState()
     state.peerIid = bob_iid
@@ -649,8 +813,12 @@ def initialize_ratchet_initiator(
     # Alice sets Bob's identity key as receiving key
     state.dhReceivingKey = bob_identity_key
 
-    # Alice has NO sending key yet (will generate on first send)
-    state.dhSendingKey = None
+    # Alice keeps her ephemeral key as sending key
+    # (needed to DH-ratchet when Bob replies with his new key)
+    state.dhSendingKey = {
+        "private": alice_ephemeral_keypair[0],
+        "public": alice_ephemeral_keypair[1]
+    }
 
     # Root key from 2DH
     state.rootKey = root_key
@@ -659,6 +827,7 @@ def initialize_ratchet_initiator(
     # (she sends first, Bob receives)
     state.sendingChainKey = initial_chain_key
     state.sendingChainIndex = 0
+    state.previousSendingChainLength = 0  # No previous chain at session start
 
     # Alice has no receiving chains yet
     state.receivingChains = {}
@@ -694,6 +863,7 @@ def initialize_ratchet_responder(
     # (Alice sends first, Bob receives)
     state.sendingChainKey = None
     state.sendingChainIndex = 0
+    state.previousSendingChainLength = 0  # No previous chain at session start
 
     state.receivingChains = {
         alice_ephemeral_key.hex(): {
@@ -755,7 +925,7 @@ def kdf_sender_key(chain_key: bytes, group_id: bytes, sender_iid: bytes,
     return new_chain_key, message_key
 ```
 
-**Domain separator:** `post-urbit-sender-key-v1:` (24 ASCII bytes) + binding data
+**Domain separator:** `post-urbit-sender-key-v1:` (25 ASCII bytes) + binding data
 
 ### 6.4 Key Distribution
 
@@ -765,14 +935,16 @@ Sender keys are distributed via 1:1 ratchet messages:
 {
   "type": "sender_key_share",
   "content": {
-    "group_id": "<20-bytes-base64>",
-    "sender_iid": "<20-bytes-base64>",
+    "group_id": "<32-char-base32-group-id>",
+    "sender_iid": "<32-char-base32-iid>",
     "key_id": "<16-bytes-base64>",
     "chain_key": "<32-bytes-base64>",
     "iteration": 0
   }
 }
 ```
+
+**Encoding note:** Identifiers (group_id, sender_iid) use Crockford Base32 consistent with all other identifier fields. Cryptographic material (key_id, chain_key) uses Base64 standard encoding.
 
 **Distribution triggers:**
 - Group creation: Creator shares with all initial members
@@ -809,11 +981,13 @@ def group_encrypt(sender_key: SenderKey, plaintext: bytes) -> tuple[GroupHeader,
     )
 
     # Encrypt
+    # AAD is the 21-byte group extension: 0x02 || sender_key_id(16) || iteration(u32-be)
     nonce = generate_nonce()
+    group_extension_bytes = header.encode()  # MUST return exact PUSE header extension bytes
     ciphertext = chacha20_poly1305_encrypt(
         key=message_key,
         nonce=nonce,
-        aad=header.encode(),
+        aad=group_extension_bytes,
         plaintext=plaintext
     )
 
@@ -823,6 +997,12 @@ def group_encrypt(sender_key: SenderKey, plaintext: bytes) -> tuple[GroupHeader,
 
 ### 6.7 Group Decryption Flow
 
+**Group AAD Definition (Normative):** The ChaCha20-Poly1305 AAD for group messages MUST be the exact 21-byte PUSE header extension bytes:
+```
+group_extension_bytes = 0x02 || sender_key_id(16) || iteration(u32-be)
+```
+Both sender and receiver MUST use this exact byte sequence. The `header.encode()` method MUST return these 21 bytes verbatim.
+
 ```python
 def group_decrypt(sender_iid: bytes, group_id: bytes, header: GroupHeader,
                   nonce: bytes, ciphertext: bytes,
@@ -830,6 +1010,9 @@ def group_decrypt(sender_iid: bytes, group_id: bytes, header: GroupHeader,
     """
     Decrypt a group message.
     """
+    # AAD is the parsed 21-byte header extension (see Group AAD Definition)
+    group_extension_bytes = header.encode()
+
     # Look up sender key
     key_lookup = f"{sender_iid.hex()}:{header.sender_key_id.hex()}"
     if key_lookup not in sender_keys:
@@ -841,8 +1024,10 @@ def group_decrypt(sender_iid: bytes, group_id: bytes, header: GroupHeader,
     if header.iteration <= sender_key.last_seen_iteration:
         raise ReplayDetectedError()
 
-    # Advance chain to match iteration
-    while sender_key.local_iteration < header.iteration:
+    # Skip ahead to iteration - 1 (discard skipped keys)
+    # Note: header.iteration is 1-indexed (first message has iteration=1)
+    # local_iteration tracks how many keys we've derived (0 = none yet)
+    while sender_key.local_iteration < header.iteration - 1:
         sender_key.chain_key, _ = kdf_sender_key(
             sender_key.chain_key,
             group_id,
@@ -851,7 +1036,7 @@ def group_decrypt(sender_iid: bytes, group_id: bytes, header: GroupHeader,
         )
         sender_key.local_iteration += 1
 
-    # Derive message key
+    # Derive the actual message key for this iteration
     sender_key.chain_key, message_key = kdf_sender_key(
         sender_key.chain_key,
         group_id,
@@ -865,7 +1050,7 @@ def group_decrypt(sender_iid: bytes, group_id: bytes, header: GroupHeader,
     plaintext = chacha20_poly1305_decrypt(
         key=message_key,
         nonce=nonce,
-        aad=header.encode(),
+        aad=group_extension_bytes,
         ciphertext=ciphertext
     )
 
@@ -883,15 +1068,17 @@ Mailboxes provide store-and-forward delivery for offline recipients. They are un
 
 ### 7.2 Mailbox Discovery
 
-Each identity MAY publish mailbox endpoints in their identity document:
+Each identity MAY publish mailbox endpoints in their identity document using the standard endpoint schema (see RFC-0001 §4):
 
 ```json
 {
   "endpoints": [
     {
       "type": "mailbox",
-      "url": "https://mailbox.example.com",
-      "priority": 1
+      "host": "mailbox.example.com",
+      "port": 443,
+      "transport": "https",
+      "priority": 30
     }
   ]
 }
@@ -911,12 +1098,135 @@ Clients authenticate to mailboxes using bearer tokens signed by their identity:
 }
 ```
 
+**URL Canonicalization (Normative):**
+
+Before signing, `mailbox_url` MUST be canonicalized:
+
+1. **Scheme:** Lowercase (`https` not `HTTPS`)
+2. **Host:** Lowercase ASCII only; MUST be ASCII-compatible encoding (punycode A-label); non-ASCII Unicode hosts MUST be rejected. No trailing dot. IPv6 literals MUST be bracketed and lowercase (e.g., `[2001:db8::1]`)
+3. **Port:** Omit default port (`:443` for https, `:80` for http)
+4. **Path:** Normalize empty path to `/`. Then, if the path is not exactly `/`, remove **all** trailing `/` bytes (not just one). Path is case-sensitive. Internal `//` sequences are preserved (no path segment normalization). Dot-segments (`.` and `..`) are NOT normalized (they are preserved as-is).
+5. **Percent-encoding:** Normalize to uppercase hex (e.g., `%2f` → `%2F`). Unreserved characters (A-Z, a-z, 0-9, `-._~`) MUST NOT be percent-encoded. Already-decoded unreserved characters MUST be kept decoded. **Invalid percent-escapes** (a `%` not followed by exactly two hex digits, e.g., `%`, `%G0`, `%0`) MUST cause rejection—do not attempt to preserve or normalize them.
+6. **No query or fragment:** Mailbox URLs MUST NOT contain query strings or fragments; implementations MUST reject (not silently strip) URLs with `?` or `#`
+7. **Scheme required:** Mailbox URLs MUST use `https` scheme; implementations MUST reject `http` or other schemes
+8. **No userinfo:** Mailbox URLs MUST NOT contain userinfo (`user@` or `user:pass@`); implementations MUST reject URLs with userinfo
+9. **Host required:** Mailbox URLs MUST contain a valid host; implementations MUST reject URLs without a host
+10. **Verifiers MUST:** Reject tokens where `mailbox_url` is not already in canonical form. Canonicalize before computing signature input for verification.
+
+Examples:
+- `HTTPS://Mailbox.Example.COM:443/` → `https://mailbox.example.com/`
+- `https://relay.net:8443/api/` → `https://relay.net:8443/api`
+- `https://box.org` → `https://box.org/`
+- `https://[2001:DB8::1]:443/` → `https://[2001:db8::1]/`
+- `https://example.com/Path%2fWith%2fSlashes` → `https://example.com/Path%2FWith%2FSlashes` (uppercase hex)
+- `https://müller.example/` → **REJECT** (non-ASCII host; use punycode `xn--mller-kva.example` instead)
+- `http://example.com/` → **REJECT** (wrong scheme)
+- `https://user@example.com/` → **REJECT** (has userinfo)
+
+**v1 Path Restriction (Normative):**
+
+For v1, the mailbox endpoint schema (RFC-0001 §4.6) does not include a `path` field. Implementations MUST derive mailbox URLs with root path `/` only. Non-root paths (e.g., `/api`) are shown in the examples above to illustrate canonicalization rules, but v1 deployments MUST use root-only mailbox URLs. Specifically:
+- v1 implementations MUST reject tokens where `mailbox_url` has a non-root path
+- v1 implementations MUST NOT generate tokens with non-root `mailbox_url`
+
+See `spec/00-shared/layer-integration.md` "Mailbox Base URL Derivation" for the normative URL construction from endpoint schema.
+
+**Reference Implementation (Illustrative):**
+
+The following pseudocode is illustrative. Implementations MUST follow all normative rules above, including percent-encoding normalization. Test vectors at the end of this section are authoritative.
+
+```python
+import re
+from urllib.parse import urlparse, urlunparse
+
+UNRESERVED = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~')
+
+def normalize_percent_encoding(s: str) -> str:
+    """Normalize percent-encoding: uppercase hex digits, decode unreserved characters."""
+    result = []
+    i = 0
+    while i < len(s):
+        if s[i] == '%':
+            # MUST have exactly 2 hex digits following
+            if i + 2 >= len(s):
+                raise ValueError("Truncated percent-escape at end of string")
+            hex_chars = s[i+1:i+3]
+            if not all(c in '0123456789ABCDEFabcdef' for c in hex_chars):
+                raise ValueError(f"Invalid percent-escape: %{hex_chars}")
+            byte_val = int(hex_chars, 16)
+            char = chr(byte_val)
+            if char in UNRESERVED:
+                # Decode unreserved characters to literal form
+                result.append(char)
+            else:
+                # Keep as percent-encoded, uppercase hex
+                result.append('%' + hex_chars.upper())
+            i += 3
+        else:
+            result.append(s[i])
+            i += 1
+    return ''.join(result)
+
+def canonicalize_mailbox_url(url: str) -> str:
+    p = urlparse(url)
+    # Reject invalid URLs
+    if p.query or p.fragment:
+        raise ValueError("Mailbox URLs MUST NOT contain query or fragment")
+    if p.scheme.lower() != 'https':
+        raise ValueError("Mailbox URLs MUST use https scheme")
+    if p.username or p.password:
+        raise ValueError("Mailbox URLs MUST NOT contain userinfo")
+    if not p.hostname:
+        raise ValueError("Mailbox URLs MUST contain a host")
+    # Check for non-ASCII in host (reject, require punycode)
+    if any(ord(c) > 127 for c in p.hostname):
+        raise ValueError("Non-ASCII hosts MUST be punycode-encoded")
+    # Lowercase scheme
+    scheme = p.scheme.lower()
+    # Handle host (lowercase, preserve IPv6 brackets)
+    host = p.hostname.lower().rstrip('.')
+    if ':' in host:  # IPv6 literal
+        host = f'[{host}]'
+    port = p.port
+    # Omit default port
+    if port == 443:
+        port = None
+    # Normalize path with percent-encoding normalization
+    path = normalize_percent_encoding(p.path) or '/'
+    if len(path) > 1 and path.endswith('/'):
+        path = path.rstrip('/')
+    netloc = host + (f':{port}' if port else '')
+    return urlunparse((scheme, netloc, path, '', '', ''))
+```
+
+**Canonicalization Test Vectors (Normative):**
+
+| Input | Output |
+|-------|--------|
+| `HTTPS://Mailbox.Example.COM:443/` | `https://mailbox.example.com/` |
+| `https://relay.net:8443/api/` | `https://relay.net:8443/api` |
+| `https://box.org` | `https://box.org/` |
+| `https://[2001:DB8::1]:443/` | `https://[2001:db8::1]/` |
+| `https://example.com/path%2fslash` | `https://example.com/path%2Fslash` |
+| `https://example.com/%41%42%43` | `https://example.com/ABC` |
+| `https://example.com/a%20b` | `https://example.com/a%20b` |
+| `https://example.com/api///` | `https://example.com/api` |
+| `https://example.com//double//slash` | `https://example.com//double//slash` |
+| `https://example.com/./dotpath/../keep` | `https://example.com/./dotpath/../keep` |
+| `https://müller.example/` | **REJECT** |
+| `http://example.com/` | **REJECT** |
+| `https://user@example.com/` | **REJECT** |
+| `https://example.com/?query` | **REJECT** |
+
 **Signature construction:**
+
+**Ed25519 Signing API (Normative):** Mailbox token signatures use **standard Ed25519** (RFC 8032 PureEdDSA), NOT Ed25519ph or Ed25519ctx. When the code shows `ed25519_sign(key, sha256(data))`, the 32-byte SHA256 digest is the message input to the standard Ed25519 signing function.
 
 **Domain separator:** `post-urbit-mailbox-token-v1` (27 ASCII bytes)
 
 ```python
 def create_mailbox_token(iid: str, mailbox_url: str, signing_key: bytes) -> str:
+    mailbox_url = canonicalize_mailbox_url(mailbox_url)  # MUST canonicalize
     expires_at = now() + timedelta(hours=24)
     nonce = generate_random(16)
 
@@ -941,17 +1251,55 @@ def create_mailbox_token(iid: str, mailbox_url: str, signing_key: bytes) -> str:
     return base64url_encode(jcs_canonicalize(token))
 ```
 
+**Bearer Token Wire Format (Normative):**
+
+The `Authorization: Bearer <token>` header value MUST be constructed as:
+
+1. **JSON object:** Construct the token JSON with fields: `iid`, `mailbox_url`, `expires_at`, `nonce`, `signature`
+2. **JCS canonicalization:** Apply JSON Canonicalization Scheme (RFC 8785) to produce deterministic UTF-8 bytes
+3. **Base64url encoding:** Encode the JCS output using Base64url alphabet (RFC 4648 §5), **no padding**
+
+The resulting string is the `<token>` value in `Authorization: Bearer <token>`.
+
+**Field encodings within the JSON:**
+- `iid`: Crockford Base32, lowercase, 32 characters
+- `mailbox_url`: Canonicalized URL string (per rules above)
+- `expires_at`: RFC 3339 timestamp, canonical form `YYYY-MM-DDTHH:MM:SSZ`
+- `nonce`: Base64url-encoded, no padding, 22 characters (16 bytes raw)
+- `signature`: Base64 standard alphabet, no padding, 86 characters (64 bytes raw)
+
+**Verification:** Servers MUST reject tokens where any field encoding differs from these rules.
+
+**Token Expiration Validation (Normative):**
+
+Mailbox servers MUST validate the `expires_at` field:
+
+1. **Past expiration:** Mailbox servers MUST reject tokens where `expires_at` is in the past (allowing ±5 minutes clock skew)
+2. **Excessive lifetime:** Mailbox servers MUST reject tokens where `expires_at` exceeds now + 24 hours
+3. **Client guidance:** Clients SHOULD use token lifetimes of 1-24 hours
+
+**Rationale:** Short-lived tokens limit the damage from token theft. The 5-minute clock skew tolerance accommodates minor time synchronization differences. The 24-hour maximum prevents long-lived tokens that could be abused if stolen.
+
 ### 7.4 Mailbox API
+
+**Message ID Semantics (Normative):**
+- Mailbox `message_id` MUST equal the PUSE header `message_id` (UUID v4)
+- The mailbox extracts this from the stored envelope's header (bytes 46-61, 0-indexed)
+- All `message_id` values in store/retrieve/delete APIs use RFC 4122 canonical lowercase string format
+- Mailbox MUST treat duplicate stores of the same `message_id` for the same recipient as idempotent (return success, do not store twice)
 
 #### 7.4.1 Store Message
 
 ```
-POST /messages
+POST /messages/{inbox_owner_iid}
 Authorization: Bearer <token>
 Content-Type: application/octet-stream
 
 <PUSE envelope bytes>
 ```
+
+**Path parameters:**
+- `inbox_owner_iid`: The IID of the inbox owner (32-char Crockford Base32), i.e., the identity whose mailbox should receive this message
 
 Response:
 ```json
@@ -962,12 +1310,83 @@ Response:
 }
 ```
 
+Note: `message_id` in response equals the PUSE header `message_id` from the stored envelope.
+
+**HTTP Response Codes (Normative):**
+- `201 Created`: Message stored successfully (body as shown)
+- `400 Bad Request`: Malformed envelope, invalid JSON, missing fields
+- `401 Unauthorized`: Invalid or expired token
+- `403 Forbidden`: Sender IID mismatch (token.iid != envelope.sender_iid)
+- `413 Payload Too Large`: Envelope exceeds 1 MB
+- `429 Too Many Requests`: Rate limit exceeded
+- `507 Insufficient Storage`: Recipient quota exceeded
+
+**Storage Keying and Routing (Normative):**
+
+Mailbox servers MUST route and store messages by the **explicit inbox owner IID** from the URL path (not by parsing the PUSE envelope recipient field):
+
+1. Extract `inbox_owner_iid` from the URL path parameter
+2. Decode it from Crockford Base32 to raw 20 bytes
+3. Store the PUSE envelope as-is in the inbox keyed by this `inbox_owner_iid`
+4. Treat `(inbox_owner_iid, message_id)` as the idempotency key for duplicate detection
+
+**Why explicit inbox owner (not envelope recipient)?**
+
+The PUSE envelope's `recipient` field (bytes 26-45) contains:
+- For 1:1 messages (recipient_type=0x00): The recipient's IID
+- For group messages (recipient_type=0x01): The **group_id** (not a member's IID)
+
+For group messages, the sender fans out to each member's mailbox individually. Each store request targets a specific member's inbox via `inbox_owner_iid`, while the PUSE envelope (containing the group_id as recipient) is stored unchanged. This allows:
+- Group messages to be delivered to offline members via their individual mailboxes
+- Recipients to retrieve messages using their own IID
+- The PUSE envelope to remain unmodified (preserving the group_id for decryption context)
+
+**Sender Fanout for Group Messages (Normative):**
+
+When sending a group message to offline members, the sender MUST:
+1. Encrypt the message once using the sender key (PUSE recipient = group_id)
+2. For each offline member:
+   a. Look up the member's mailbox endpoint from their identity document
+   b. POST the same PUSE envelope to `POST /messages/{member_iid}` on that mailbox
+3. Each mailbox stores the envelope under the respective member's IID
+
+**Sender IID Binding (Normative):**
+Mailbox servers MUST validate that the sender IID in the PUSE envelope header matches the IID in the authenticated bearer token:
+1. Parse the PUSE envelope header to extract `sender_iid` (bytes 6-25, raw 20 bytes)
+2. Decode the `token.iid` from Base32 to raw 20 bytes
+3. Compare the two 20-byte values using **constant-time byte comparison**
+4. If the 20-byte values differ, reject with HTTP 403 Forbidden
+
+**Note:** The Base32 decode of the token IID MUST use the same Crockford alphabet as RFC-0002 §2.1. Comparison MUST be on raw bytes, not on Base32 strings (to avoid case normalization issues).
+
+This prevents authenticated senders from spoofing messages as other identities. Recipients MAY still verify the full PUSE signature, but mailbox-level validation provides defense-in-depth.
+
+**Mailbox URL Binding (Normative):**
+
+Mailbox servers MUST validate that `token.mailbox_url` matches the server's own canonical URL:
+
+1. Server computes its canonical mailbox URL using:
+   - Scheme: MUST be `https`
+   - Host: Server's configured public hostname (NOT from request headers)
+   - Port: Server's configured public port (omit if 443)
+   - Path: Server's configured base path (default: empty)
+
+2. Server MUST reject tokens where the canonicalized `token.mailbox_url` does not exactly match the server's canonical URL
+
+3. For deployments behind reverse proxies, the public host/port MUST be determined from server configuration, NOT from `Host` or `X-Forwarded-*` headers (which can be spoofed)
+
+This prevents token reuse attacks where a token generated for one mailbox could be used at another.
+
 #### 7.4.2 Retrieve Messages
 
 ```
-GET /messages?since=<timestamp>&limit=100
+GET /messages?cursor=<opaque-cursor>&limit=100
 Authorization: Bearer <token>
 ```
+
+**Query parameters:**
+- `cursor` (optional): Opaque cursor string from previous response; omit for initial request
+- `limit` (optional): Maximum messages to return (1-1000, default 100)
 
 Response:
 ```json
@@ -981,9 +1400,42 @@ Response:
       "envelope": "<base64-puse-envelope>"
     }
   ],
+  "next_cursor": "<opaque-cursor-or-null>",
   "has_more": false
 }
 ```
+
+**Retrieval Filtering (Normative):**
+
+Mailbox servers MUST return only messages stored in the authenticated identity's inbox:
+
+1. Decode `token.iid` from Base32 to raw 20 bytes - this is the **inbox owner**
+2. Return all envelopes that were stored under this `inbox_owner_iid` (via the store endpoint path parameter)
+3. The PUSE envelope's `recipient` field is NOT used for retrieval filtering
+
+**Note on PUSE recipient field:** The returned envelopes may have different values in their PUSE `recipient` field (bytes 26-45):
+- 1:1 messages: `recipient` equals the inbox owner's IID
+- Group messages: `recipient` contains the group_id
+
+The client determines message type by examining the PUSE flags (recipient_type bits 0-1) and processes accordingly. The mailbox treats all envelopes as opaque blobs indexed by inbox owner.
+
+**Pagination Semantics (Normative):**
+- Messages MUST be ordered by `stored_at` ascending, then `message_id` ascending (for tie-breaking)
+- `next_cursor` is an opaque string that, when used in subsequent requests, returns the next page
+- `has_more` is true if more messages exist after this page
+- `next_cursor` MUST be `null` when `has_more` is false
+- Cursor format is implementation-defined; clients MUST treat it as opaque
+- Cursors MAY expire after a reasonable time (recommended: 1 hour); expired cursors return HTTP 400
+
+**Envelope Encoding (Normative):**
+- The `envelope` field MUST be encoded using Base64 standard alphabet (RFC 4648 §4), **no padding**
+- Line breaks MUST NOT be included
+- Implementations MUST reject envelopes containing padding characters (`=`) or invalid Base64 characters
+
+**HTTP Response Codes (Normative):**
+- `200 OK`: Success (body as shown)
+- `400 Bad Request`: Invalid cursor format
+- `401 Unauthorized`: Invalid or expired token
 
 #### 7.4.3 Delete Messages
 
@@ -996,6 +1448,27 @@ Content-Type: application/json
   "message_ids": ["<uuid>", "<uuid>"]
 }
 ```
+
+**HTTP Response Codes (Normative):**
+- `200 OK`: Deletion processed (JSON body: `{"deleted": <count>}`)
+- `400 Bad Request`: Malformed request body
+- `401 Unauthorized`: Invalid or expired token
+
+**Error Response Schema (Normative):**
+```json
+{"error": "<code>", "message": "<human-readable>"}
+```
+
+**Delete Authorization (Normative):**
+
+Mailbox servers MUST only delete messages stored in the authenticated identity's inbox:
+
+1. Decode `token.iid` from Base32 to raw 20 bytes - this is the **inbox owner**
+2. For each `message_id`, verify the message was stored under this `inbox_owner_iid`
+3. If any `message_id` refers to a message not in `token.iid`'s inbox, skip that message (do not delete, do not error)
+4. Return success if all owned messages were deleted; silently ignore non-owned or non-existent IDs
+
+**Note:** The PUSE envelope's `recipient` field is NOT used for delete authorization. Authorization is based on which inbox the message was stored in (the `inbox_owner_iid` from the original store request).
 
 ### 7.5 Mailbox Retention
 
@@ -1032,22 +1505,161 @@ The encrypted payload is UTF-8 JSON:
 }
 ```
 
+**Sequence Number Constraints (Normative):**
+- `sequence` MUST be a decimal string in range [0, 2^64-1]
+- MUST be canonical: no leading zeros except for the value `"0"` itself
+- MUST NOT be encoded as a JSON number (to preserve precision for values > 2^53)
+- Valid examples: `"0"`, `"1"`, `"42"`, `"18446744073709551615"`
+- Invalid examples: `"01"`, `"+1"`, `" 1"`, `1`, `0x10`
+- Comparison MUST be numeric (not lexicographic)
+- Receivers MUST reject messages with non-canonical or out-of-range sequence values
+
+This matches RFC-0001 §6.4 sequence number constraints for consistency across the protocol.
+
 **Note:** `message_id` is in the envelope header, not the plaintext.
 
 ### 8.2 Type Registry
 
-| Type | Description | Content Schema |
-|------|-------------|----------------|
+| Type | Description | Content Schema (wire: snake_case) |
+|------|-------------|-----------------------------------|
 | `text` | Plain text message | `{ "text": string, "mentions": Mention[] }` |
-| `rich` | Rich text (markdown) | `{ "markdown": string, "mentions": Mention[] }` |
+| `rich` | Rich text | `{ "format": "markdown"\|"html", "text": string, "mentions": Mention[] }` |
 | `media` | Media reference | `{ "media_type": string, "url": string, "key": string, ... }` |
-| `reaction` | Emoji reaction | `{ "emoji": string, "message_id": string }` |
-| `receipt` | Delivery/read receipt | `{ "receipt_type": string, "message_ids": string[] }` |
-| `typing` | Typing indicator | `{ "typing": boolean }` |
+| `reaction` | Emoji reaction | `{ "target_message_id": uuid, "emoji": string, "action": "add"\|"remove" }` |
+| `receipt` | Delivery/read receipt | `{ "receipt_type": "delivered"\|"read", "message_ids": uuid[] }` |
+| `typing` | Typing indicator | `{ "is_typing": boolean }` |
 | `key_update` | Ratchet key update | `{ "new_ephemeral_public": string }` |
 | `sender_key_share` | Group key distribution | See §6.4 |
-| `group_event` | Group membership change | `{ "event": string, ... }` |
+| `group_state_update` | Group membership change | See §8.6 below |
+| `sync_op` | Sync operation (mailbox fallback) | See note below |
 | `app` | Application-specific | `{ "app_id": string, "data": any }` |
+
+**Wire format note:** On-wire JSON uses snake_case field names; TypeScript interfaces use camelCase. See `spec/03-messaging-sync/interfaces.md` for the wire/TS mapping convention.
+
+**Note on `sync_op`:** Sync operations normally flow over the dedicated sync stream (stream type 0x04), which is NOT PUSE-wrapped. However, when sync data must be delivered via mailbox (e.g., recipient offline for extended periods), it MAY be encapsulated in PUSE with type `sync_op`. Recipients MUST validate both the PUSE envelope signature AND the sync operation's internal `signature` field.
+
+**`sync_op` Plaintext Schema (Normative):**
+
+When a sync operation is encapsulated in PUSE for mailbox delivery, the plaintext MUST use this schema:
+
+```json
+{
+  "type": "sync_op",
+  "timestamp": "<RFC3339>",
+  "sequence": "<uint64-string>",
+  "content": {
+    "sync_type": <uint8>,
+    "cbor": "<base64-std-no-pad>"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sync_type` | uint8 | Sync message type code: 0x01=SYNC_REQUEST, 0x02=SYNC_OFFER, 0x03=SYNC_ACCEPT, 0x04=SYNC_OPERATIONS, 0x05=SYNC_ACK, 0x06=SYNC_SUBSCRIBE, 0x07=SYNC_UNSUBSCRIBE; see `sync-protocol.md` §3 Message Types |
+| `cbor` | string | Base64 standard encoding (no padding) of the complete CBOR-encoded sync operation bytes. `content.cbor` MUST contain **only** the CBOR Data portion (the bytes that follow the 1-byte sync Message Type on stream 0x04). It MUST NOT include the 1-byte `sync_type` prefix. |
+
+**Processing rules:**
+1. Decode `content.cbor` from Base64 to raw bytes
+2. Parse the CBOR structure per `sync-protocol.md` schema for the given `sync_type`
+3. Verify the internal `signature` field within the CBOR structure
+4. Apply the sync operation to local state
+
+**Example:**
+```json
+{
+  "type": "sync_op",
+  "timestamp": "2026-01-14T12:00:00Z",
+  "sequence": "100",
+  "content": {
+    "sync_type": 1,
+    "cbor": "pWR0eXBlAWd2ZXJzaW9ueDIwMjYtMDEtMTRUMTI6MDA6MDBaLjEuYjFhbmFzcjVoZGVwc4BnY2hhbmdlc4GjYm9wY3NldGRwYXRoai9wcm9maWxlL3hldmFsdWVkVGVzdGlzaWduYXR1cmV4WC4uLg"
+  }
+}
+```
+
+**Host API to PUSE Plaintext Mapping (Normative):**
+
+The Host API `messaging.send` (see `spec/04-app-runtime/api-surface.md`) uses:
+- `message_type: string` - Application-defined type identifier
+- `content: Uint8Array` - CBOR-encoded content
+
+The host runtime MUST map these to PUSE plaintext as follows:
+
+1. **System types** (`text`, `rich`, `media`, `reaction`, `receipt`, `typing`):
+   - The host runtime generates the PUSE plaintext directly
+   - Apps should use dedicated Host API methods (if available) or the generic API
+   - `message_type` in Host API corresponds to PUSE `type` field
+
+2. **App-defined types** (any `message_type` not in the system registry):
+   - PUSE `type` field MUST be `"app"`
+   - PUSE `content` MUST be: `{ "app_id": "<message_type>", "data": <CBOR-decoded-content> }`
+   - The Host API `content: Uint8Array` (CBOR) MUST be decoded to JSON for the `data` field
+
+**Example mapping:**
+
+```typescript
+// Host API call
+messaging.send({
+  recipient: "abc123...",
+  message_type: "com.example.chess.move",
+  content: cbor_encode({ from: "e2", to: "e4" })
+})
+
+// Results in PUSE plaintext:
+{
+  "type": "app",
+  "timestamp": "2026-01-14T12:00:00Z",
+  "sequence": "42",
+  "content": {
+    "app_id": "com.example.chess.move",
+    "data": { "from": "e2", "to": "e4" }
+  }
+}
+```
+
+**Message subscription dispatch:**
+- Recipients subscribe via `messaging.subscribe` with `message_types` filter
+- For app messages, the filter matches against the `app_id` within `content`, NOT the literal `"app"` type
+- Pattern matching applies (e.g., `"com.example.*"` matches `"com.example.chess.move"`)
+
+**CBOR↔JSON Conversion (Normative):**
+
+The Host runtime MUST decode CBOR to JSON-compatible values. This mapping is deterministic and reversible for supported types.
+
+| CBOR Type | JSON Representation | Notes |
+|-----------|---------------------|-------|
+| unsigned int (0..2^53-1) | number | Direct mapping |
+| unsigned int (≥2^53) | `"~i<decimal>"` | String prefix preserves precision |
+| negative int (-2^53..−1) | number | Direct mapping |
+| negative int (≤−2^53) | `"~i<decimal>"` | String prefix preserves precision |
+| byte string | `"~b<base64-std-no-pad>"` | e.g., `"~bYWJj"` for `[0x61, 0x62, 0x63]` |
+| text string | string | Direct mapping (UTF-8) |
+| array | array | Recursive conversion |
+| map (string keys) | object | Recursive conversion |
+| map (non-string keys) | `"~m<base64-cbor>"` | Entire map re-encoded as CBOR, then Base64 |
+| tag | `{ "~t": <uint>, "v": <value> }` | Recursive conversion of tagged value |
+| false/true | boolean | Direct mapping |
+| null | null | Direct mapping |
+| undefined | `"~u"` | Literal string |
+| float (finite) | number | Direct mapping |
+| float (NaN) | `"~fNaN"` | Literal string |
+| float (+Infinity) | `"~f+Inf"` | Literal string |
+| float (-Infinity) | `"~f-Inf"` | Literal string |
+| simple value (other) | `"~s<uint>"` | e.g., `"~s255"` for simple(255) |
+
+**Processing rules:**
+1. **Prefixes are reserved:** Any JSON string starting with `~` followed by a lowercase letter is reserved for CBOR encoding. Apps MUST NOT use such strings as literal values.
+2. **Reversibility:** Recipients can reverse the mapping to reconstruct original CBOR types using the prefix as a discriminator.
+3. **Precision:** Integer values ≥2^53 or ≤−2^53 MUST use the `~i` prefix to avoid JavaScript/JSON precision loss.
+
+**Example conversions:**
+```
+CBOR: h'deadbeef' → JSON: "~b3q2+7w"
+CBOR: 9007199254740993 → JSON: "~i9007199254740993"
+CBOR: {1: "one", 2: "two"} → JSON: "~m..." (CBOR-encoded map as Base64)
+CBOR: tag(1, 1234567890) → JSON: {"~t": 1, "v": 1234567890}
+```
 
 ### 8.3 Text Message
 
@@ -1112,6 +1724,82 @@ Receipt types: `delivered`, `read`
 
 ---
 
+### 8.6 Group State Update
+
+Group membership changes are signaled via `group_state_update` messages:
+
+```json
+{
+  "type": "group_state_update",
+  "timestamp": "2025-01-15T12:00:00Z",
+  "sequence": "100",
+  "content": {
+    "action": "add_member",
+    "group_id": "<32-char-base32>",
+    "target_iid": "<32-char-base32>",
+    "version": "5.b1anasr5"
+  }
+}
+```
+
+**Content Schema (wire format):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `action` | string | One of: `add_member`, `remove_member`, `promote_admin`, `demote_admin`, `update_info`, `rotate_sender_key` |
+| `group_id` | string | 32-char Crockford Base32 group identifier (20 raw bytes encoded) |
+| `target_iid` | string | (For member actions) IID of affected member |
+| `version` | string | Format: `"<logical_clock>.<actor_suffix>"` where actor_suffix is first 8 chars of actor's IID |
+
+**Authentication:** Group state updates are authenticated via the **PUSE envelope signature**. There is no separate content-level signature field. The sender's identity (from PUSE) is verified against the group's admin list.
+
+**Version Ordering and Conflict Resolution (Normative):**
+
+Group state changes MUST be ordered deterministically to ensure all members converge to the same state. The total ordering is:
+
+1. **Parse version:** Extract `logical_clock` (integer) and `actor_suffix` (string) from `"<logical_clock>.<actor_suffix>"`
+2. **Compare `logical_clock`:** As unsigned integers (NOT lexicographically). Higher clock = later version.
+3. **If same `logical_clock`:** Compare `actor_suffix` lexicographically (case-sensitive, bytewise). Smaller suffix = earlier version.
+4. **If same `version` string** (possible from retries/duplicates): Compare full `actor_iid` (from PUSE sender) lexicographically. Smaller IID = earlier version.
+5. **If same `actor_iid`:** Compare `action` type lexicographically. Smaller action string = earlier version.
+
+**Note:** This provides a total ordering even when `actor_suffix` (8 chars) collides, which is possible since it's truncated from the 32-char IID.
+
+**Example:** Version `"10.a1b2c3d4"` > `"2.z9y8x7w6"` because `10 > 2` numerically (not string comparison).
+
+**Authorization:** Authorized roles may send `group_state_update` messages per the action table:
+
+| Action | Required Role |
+|--------|---------------|
+| `add_member` | owner, admin, or moderator |
+| `remove_member` | owner or admin (or self-removal) |
+| `promote_admin` | owner only |
+| `demote_admin` | owner only |
+| `update_info` | owner or admin |
+| `rotate_sender_key` | owner or admin |
+
+Recipients MUST verify the PUSE sender has the required role before applying the update.
+
+See `spec/03-messaging-sync/group-messaging.md` for detailed action semantics.
+
+---
+
+### 8.7 Group ID Binding Validation (Normative)
+
+For all group-addressed messages (where PUSE header `flags.recipient_type = 0x01`):
+
+1. Extract `recipient_raw` (20 bytes) from PUSE header bytes 26-45
+2. Compute `header_group_id = CrockfordBase32Lower(recipient_raw)`
+3. If the decrypted plaintext contains a `content.group_id` field:
+   - Receivers MUST verify `content.group_id == header_group_id`
+   - If mismatch: reject with error `INVALID_GROUP_ID_MISMATCH`
+
+This applies to message types: `group_state_update`, `sender_key_share`, `group_invite`, and any future group-scoped types.
+
+**Rationale:** Prevents routing confusion from buggy senders or corrupted envelopes.
+
+---
+
 ## 9. Error Handling
 
 ### 9.1 Envelope Errors
@@ -1142,6 +1830,7 @@ Receipt types: `delivered`, `read`
 | `ITERATION_REPLAY` | 0x321 | Iteration <= last seen | Reject message |
 | `NOT_A_MEMBER` | 0x322 | Sender not in group | Reject message |
 | `INSUFFICIENT_ROLE` | 0x323 | Action requires higher role | Reject action |
+| `INVALID_GROUP_ID_MISMATCH` | 0x324 | content.group_id != header recipient | Reject message |
 
 ### 9.4 Mailbox Errors
 
@@ -1244,46 +1933,32 @@ Visible to network observers and mailboxes:
 
 ## 11. Test Vectors
 
-### 11.1 PUSE Envelope Construction
+**Authoritative test vectors are defined in `spec/00-shared/test-vectors.md`.** The examples below illustrate wire format structure; implementers MUST validate against the shared test vectors.
 
-**Inputs:**
-```
-sender_iid_raw (20 bytes, hex): 586a763f2c82b31a0c5de9dcaef01e0261e0785b
-recipient_iid_raw (20 bytes, hex): a1b2c3d4e5f60718293a4b5c6d7e8f9001020304
-message_id (16 bytes, hex): 550e8400e29b41d4a716446655440000
-message_key (32 bytes, hex): 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
-nonce (12 bytes, hex): 00000000aabbccdd11223344
-plaintext: {"type":"text","content":{"text":"Hello"}}
-signing_key_seed (32 bytes, hex): 0000000000000000000000000000000000000000000000000000000000000000
-```
+### 11.1 PUSE Envelope Wire Format
 
-**Ratchet Header Extension (type 0x01):**
+**Wire format structure (see §3.2 for byte-level specification):**
 ```
-dh_public (32 bytes, hex): 0000000000000000000000000000000000000000000000000000000000000001
-pn (4 bytes, hex): 00000000
-n (4 bytes, hex): 00000001
-```
+PUSE Header:
+  magic (4 bytes):          "PUSE" (0x50555345)
+  version (1 byte):         0x01
+  flags (1 byte):           0x00 (no compression, single recipient)
+  sender_iid (20 bytes):    Truncated SHA256 of sender's genesis key
+  recipient_iid (20 bytes): Truncated SHA256 of recipient's genesis key
+  message_id (16 bytes):    UUID v4 bytes
+  extension_length (2 bytes): Big-endian uint16
+  header_extension (variable): Ratchet header for Double Ratchet
 
-**Header Extension (41 bytes, hex):**
-```
-01                                                              // type
-0000000000000000000000000000000000000000000000000000000000000001  // dh_public
-00000000                                                        // pn
-00000001                                                        // n
+Encrypted Payload:
+  nonce (12 bytes):         ChaCha20-Poly1305 nonce
+  ciphertext_length (4 bytes): Big-endian uint32
+  ciphertext (variable):    AEAD-encrypted JSON payload
+
+Trailer:
+  signature (64 bytes):     Ed25519 signature over header + payload
 ```
 
-**Expected envelope (before signature):**
-```
-5055534501 00                               // magic + version + flags
-586a763f2c82b31a0c5de9dcaef01e0261e0785b    // sender_iid
-a1b2c3d4e5f60718293a4b5c6d7e8f9001020304    // recipient_iid
-550e8400e29b41d4a716446655440000            // message_id
-0029                                        // extension_length (41)
-01...01 00000000 00000001                   // header_extension
-00000000aabbccdd11223344                    // nonce
-<ciphertext_length>                         // 4 bytes
-<ciphertext>                                // encrypted payload
-```
+**Note:** Implementers should construct test cases using keys from `spec/00-shared/test-vectors.md` (Alice/Bob identities) and validate encryption/decryption round-trips match.
 
 ### 11.2 Chain Step KDF
 
@@ -1302,23 +1977,19 @@ Implementers should compute these values using their HMAC-SHA256 implementation 
 
 ### 11.3 2DH Initial Derivation
 
-**Inputs:**
-```
-dh1 (32 bytes, hex): [X25519 output 1]
-dh2 (32 bytes, hex): [X25519 output 2]
-iid_a (20 bytes, hex): 586a763f2c82b31a0c5de9dcaef01e0261e0785b
-iid_b (20 bytes, hex): a1b2c3d4e5f60718293a4b5c6d7e8f9001020304
-```
+See `spec/00-shared/test-vectors.md` Test Vector 6 (X3DH Key Agreement) for authoritative pre-computed values.
 
-**Process:**
+**Process Overview:**
 ```
-ikm = dh1 || dh2  (64 bytes)
+ikm = dh1 || dh2  (64 bytes, X25519 outputs)
 salt = sorted(iid_a, iid_b) concatenated (40 bytes)
 prk = HKDF-Extract(salt, ikm)
 derived = HKDF-Expand(prk, "post-urbit-x3dh-v1", 64)
 root_key = derived[0:32]
 initial_chain_key = derived[32:64]
 ```
+
+Implementers MUST validate against the pre-computed test vectors to ensure correct implementation.
 
 ---
 
@@ -1385,7 +2056,7 @@ All domain separators used in this RFC:
 |---------|------------------|--------|
 | Root chain KDF | `post-urbit-ratchet-v1` | 21 bytes |
 | 2DH initial | `post-urbit-x3dh-v1` | 18 bytes |
-| Sender key KDF | `post-urbit-sender-key-v1:` | 24 bytes + binding |
+| Sender key KDF | `post-urbit-sender-key-v1:` | 25 bytes + binding |
 | Mailbox token | `post-urbit-mailbox-token-v1` | 27 bytes |
 
 ---

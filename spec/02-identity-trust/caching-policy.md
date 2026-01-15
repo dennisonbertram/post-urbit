@@ -85,7 +85,7 @@ interface CachePolicy {
 When first encountering an IID:
 
 1. Fetch identity document from any source
-2. Verify `iid == Base32Lower(SHA256(keys.signing.genesis))`
+2. Verify `iid == Base32Lower(SHA256(Base64Decode(keys.signing.genesis))[0:20])` (decode Base64 key to raw 32 bytes, then hash)
 3. Verify `signatures.current` with `keys.signing.current`
 4. Record `firstSeenAt` and the genesis public key
 5. **TOFU anchor**: This genesis key is now associated with this IID forever
@@ -255,8 +255,9 @@ interface IdentityTransport {
   // DHT operations (see layer-integration.md for full format)
   // Note: No separate signature parameter. The IDOC envelope contains signatures.current
   // which DHT nodes use for verification before storing.
-  dhtPut(key: string, value: Uint8Array, options: { ttl: number }): Promise<void>;
-  dhtGet(key: string): Promise<DhtResult[]>;  // May return multiple values
+  // Keys are 32 raw bytes (SHA256 output), not encoded strings.
+  dhtPut(key: Uint8Array, value: Uint8Array, options: { ttl: number }): Promise<void>;
+  dhtGet(key: Uint8Array): Promise<DhtResult[]>;  // May return multiple values
 
   // DhtResult includes value and metadata
   // DHT nodes verify IDOC's internal signature before storing (prevents spam)

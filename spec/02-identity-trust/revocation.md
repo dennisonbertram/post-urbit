@@ -159,6 +159,36 @@ Revocations must propagate quickly to prevent attackers from impersonating.
 3. **Relay notification** to stop forwarding to old keys
 4. **Gossip protocol** for network-wide propagation
 
+### DHT Storage (Normative)
+
+Revocations MUST be stored in DHT for later discovery by nodes that were offline during propagation.
+
+**DHT Key for Revocations:**
+```
+Key = SHA256("post-urbit:revocation:" || iid)  # iid is 32-char Crockford Base32 string, UTF-8 encoded
+```
+
+**DHT Value:**
+- For `key_revocation`: Store the full `key_revocation` document (JCS-canonical JSON), which includes the `replacement_document` and `signatures` fields
+- For `identity_revocation`: Store the `identity_revocation` document (JCS-canonical JSON)
+
+See RFC-0001 §10 for the exact document schemas and signature construction.
+
+**Storage Rules:**
+- DHT nodes MUST verify revocation signatures before storing:
+  - For `key_revocation`: Verify `signatures.by_current_signing_key` and/or `signatures.by_new_signing_key` per RFC-0001 §10.1
+  - For `identity_revocation`: Verify `signature` field per RFC-0001 §10.2
+- TTL: 365 days (revocations are long-lived)
+- Multiple revocations for same IID: keep **earliest** `effective_at` timestamp (security-conservative, per RFC-0001 §12.7)
+
+**Lookup Behavior:**
+When verifying an identity document, implementations SHOULD:
+1. Fetch identity from `SHA256("post-urbit:identity:" || iid)`
+2. Also fetch any revocation from `SHA256("post-urbit:revocation:" || iid)`
+3. If revocation exists and is valid, treat identity as revoked
+
+This ensures nodes that come online later can discover revocations even if they missed the gossip propagation.
+
 ### Revocation Envelope
 
 ```json
@@ -208,9 +238,9 @@ function verifyKeyRevocation(revocation: KeyRevocation): VerificationResult {
     return { valid: false, error: 'IID_MISMATCH' };
   }
 
-  // Verify sequence increased
+  // Verify sequence increased (use BigInt for numeric comparison of decimal strings)
   const oldDoc = getStoredIdentity(iid);
-  if (replacement_document.sequence <= oldDoc.sequence) {
+  if (BigInt(replacement_document.sequence) <= BigInt(oldDoc.sequence)) {
     return { valid: false, error: 'SEQUENCE_REGRESSION' };
   }
 
@@ -246,7 +276,8 @@ function verifyKeyRevocation(revocation: KeyRevocation): VerificationResult {
     }
 
     if (hasNewKeyAuth && hasRecoveryAuth) {
-      return { valid: true, path: 'recovery', cooldown: recovery_proof.status === 'pending' };
+      // NOTE: recovery_proof.status is informational; cooldown is determined solely by cooldown_expires_at
+      return { valid: true, path: 'recovery', cooldown: Date.now() < new Date(recovery_proof.cooldown_expires_at).getTime() };
     }
 
   } else if (revoked_key_type === 'encryption') {
@@ -266,7 +297,7 @@ function verifyKeyRevocation(revocation: KeyRevocation): VerificationResult {
       verify(replacement_document.keys.signing.current, revocation, signatures.by_new_signing_key);
 
     if (hasNewKeyAuth && hasRecoveryAuth) {
-      return { valid: true, path: 'recovery', cooldown: recovery_proof.status === 'pending' };
+      return { valid: true, path: 'recovery', cooldown: Date.now() < new Date(recovery_proof.cooldown_expires_at).getTime() };
     }
   }
 

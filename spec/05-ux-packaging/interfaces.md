@@ -355,6 +355,7 @@ interface LogOptions {
   since?: Timestamp;
   until?: Timestamp;
   limit?: number;
+  cursor?: string;   // For pagination (from LogsResponse.cursor)
   search?: string;
 }
 ```
@@ -435,8 +436,8 @@ interface AdminApiClient {
 
   // System
   getStatus(): Promise<NodeStatus>;
-  getLogs(options?: LogOptions): Promise<LogEntry[]>;
-  createBackup(): Promise<BackupResult>;
+  getLogs(options?: LogOptions): Promise<LogsResponse>;
+  createBackup(options?: { type?: 'full' | 'identity' | 'data' }): Promise<BackupResult>;
   listBackups(): Promise<BackupListEntry[]>;
   restoreBackup(backupId: string, password?: string): Promise<RestoreResult>;
   restart(): Promise<void>;
@@ -451,81 +452,85 @@ interface AdminApiClient {
 
 ## Event Types (WebSocket)
 
+All WebSocket messages use a consistent wrapper format (see `node-daemon.md` for details).
+
 ```typescript
-// WebSocket event stream
+// WebSocket message wrapper - all events use this format on the wire
+interface WebSocketMessage {
+  id: string;            // Monotonic event ID for replay
+  type: AdminEventType;  // Event type discriminator
+  timestamp: Timestamp;  // When event occurred
+  data: unknown;         // Event-specific payload (see below)
+}
+
+// Event type discriminator
+type AdminEventType =
+  | 'status_change'
+  | 'contact_online'
+  | 'message_received'
+  | 'app_installed'
+  | 'app_updated'
+  | 'app_error'
+  | 'sync_progress'
+  | 'error';
+
+// Event payload types - these go in the `data` field of WebSocketMessage
+// The `type` field in the wrapper determines which payload type is used.
+
+interface StatusChangeData {
+  status: NodeStatus;
+}
+
+interface ContactOnlineData {
+  iid: IdentityIdentifier;
+  online: boolean;
+  lastSeen?: Timestamp;
+}
+
+interface MessageReceivedData {
+  messageId: string;
+  senderIid: IdentityIdentifier;
+  preview: string;
+  receivedAt: Timestamp;
+}
+
+interface AppInstalledData {
+  app: InstalledApp;
+}
+
+interface AppUpdatedData {
+  app: InstalledApp;
+  previousVersion: AppVersion;
+}
+
+interface AppErrorData {
+  appId: AppId;
+  error: string;
+  timestamp: Timestamp;
+}
+
+interface SyncProgressData {
+  documentId: string;
+  progress: number;  // 0-100
+  status: 'syncing' | 'complete' | 'error';
+}
+
+interface ErrorData {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+// Type-safe event union (for client-side parsing)
 type AdminEvent =
-  | StatusChangeEvent
-  | ContactOnlineEvent
-  | MessageReceivedEvent
-  | AppInstalledEvent
-  | AppUpdatedEvent
-  | AppErrorEvent
-  | SyncProgressEvent
-  | ErrorEvent;
-
-interface StatusChangeEvent {
-  type: 'status_change';
-  data: NodeStatus;
-}
-
-interface ContactOnlineEvent {
-  type: 'contact_online';
-  data: {
-    iid: IdentityIdentifier;
-    online: boolean;
-    lastSeen?: Timestamp;
-  };
-}
-
-interface MessageReceivedEvent {
-  type: 'message_received';
-  data: {
-    messageId: string;
-    senderIid: IdentityIdentifier;
-    preview: string;
-    receivedAt: Timestamp;
-  };
-}
-
-interface AppInstalledEvent {
-  type: 'app_installed';
-  data: InstalledApp;
-}
-
-interface AppUpdatedEvent {
-  type: 'app_updated';
-  data: {
-    app: InstalledApp;
-    previousVersion: AppVersion;
-  };
-}
-
-interface AppErrorEvent {
-  type: 'app_error';
-  data: {
-    appId: AppId;
-    error: string;
-    timestamp: Timestamp;
-  };
-}
-
-interface SyncProgressEvent {
-  type: 'sync_progress';
-  data: {
-    documentId: string;
-    progress: number;  // 0-100
-    status: 'syncing' | 'complete' | 'error';
-  };
-}
-
-interface ErrorEvent {
-  type: 'error';
-  data: {
-    code: string;
-    message: string;
-    details?: Record<string, unknown>;
-  };
-}
+  | { type: 'status_change'; data: StatusChangeData }
+  | { type: 'contact_online'; data: ContactOnlineData }
+  | { type: 'message_received'; data: MessageReceivedData }
+  | { type: 'app_installed'; data: AppInstalledData }
+  | { type: 'app_updated'; data: AppUpdatedData }
+  | { type: 'app_error'; data: AppErrorData }
+  | { type: 'sync_progress'; data: SyncProgressData }
+  | { type: 'error'; data: ErrorData };
 ```
 
 ## Common Types
@@ -595,26 +600,26 @@ interface TrusteeConfig {
   label: string;               // Human-readable label (e.g., "Alice (sister)")
 }
 
+// Canonical schema from 02-identity-trust/interfaces.md - MUST match exactly
 interface DeviceEscrowRecoveryConfig {
-  escrowDeviceDid: DeviceIdentifier;
-  escrowDeviceName: string;
+  escrowKeyHash: string;       // SHA256 of escrow public key (hex)
+  deviceLabel: string;         // Human-readable device description
 }
 
+// Canonical schema from 02-identity-trust/interfaces.md - MUST match exactly
 interface ThresholdRecoveryConfig {
   threshold: number;           // M-of-N threshold
   totalShares: number;         // N
-  shareHolders: ShareHolderConfig[];
+  shareCommitments: string[];  // SHA256 hash of each share (hex)
+  recoveryKeyHash: string;     // SHA256 of reconstructed key (hex)
 }
 
-interface ShareHolderConfig {
-  iid?: IdentityIdentifier;    // Identity holding share (optional if offline)
-  label: string;
-}
-
+// Canonical schema from 02-identity-trust/interfaces.md - MUST match exactly
 interface ProviderRecoveryConfig {
-  providerName: string;
-  providerEndpoint: string;
-  providerPublicKey: string;
+  providerIid: IdentityIdentifier;  // Recovery provider's IID
+  providerEndpoint: string;         // HTTPS URL for recovery API
+  policy: string;                   // Verification method: 'kyc' | 'email' | 'phone'
+  cooldownHours: number;            // Waiting period (typically longer, e.g., 168)
 }
 
 // Network endpoint for identity

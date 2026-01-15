@@ -27,7 +27,7 @@ QUIC (RFC 9000) is the foundation transport protocol. It provides:
 | Parameter | Value |
 |-----------|-------|
 | **TLS version** | 1.3 only |
-| **Cipher suites** | TLS_CHACHA20_POLY1305_SHA256, TLS_AES_256_GCM_SHA384 |
+| **Cipher suites** | TLS_CHACHA20_POLY1305_SHA256 (mandatory), TLS_AES_128_GCM_SHA256 (mandatory), TLS_AES_256_GCM_SHA384 (optional) |
 | **Key exchange** | X25519 |
 | **Signature** | Ed25519 (for identity binding) |
 | **Certificate type** | Self-signed, ephemeral (identity proven via handshake, NOT certificate) |
@@ -71,7 +71,7 @@ QUIC supports multiple concurrent streams. We define:
 | **Identity** | Bidirectional | Identity document exchange and updates |
 | **Message** | Bidirectional | Application messages (chat, notifications) |
 | **Sync** | Bidirectional | Data synchronization |
-| **Bulk** | Unidirectional | Large data transfers (files, backups) |
+| **Bulk** | Unidirectional | Large data transfers (files, backups) **(Reserved for v2)** |
 
 ### Stream Multiplexing
 
@@ -86,25 +86,32 @@ QUIC supports multiple concurrent streams. We define:
 
 ### Stream Opening
 
-Streams are opened on-demand with a type identifier:
+Streams are opened on-demand with a type identifier, followed by length-prefixed messages:
 
 ```
-Stream Header (first bytes):
+Stream Format (per RFC-0002 §6.3):
 ┌──────────────────────────────────────┐
-│ Stream Type (1 byte)                 │
+│ Stream Type (1 byte)                 │  Written ONCE at stream start
 ├──────────────────────────────────────┤
-│ Payload...                           │
-└──────────────────────────────────────┘
+│ Message Length (4 bytes, big-endian) │  ┐
+├──────────────────────────────────────┤  │ Repeated for
+│ Message Payload (variable)           │  │ each message
+└──────────────────────────────────────┘  ┘
 
-Stream Types:
+Stream Types (see RFC-0002 §6.2 for authoritative registry):
   0x00 = Reserved
-  0x01 = Control
-  0x02 = Identity
-  0x03 = Message
-  0x04 = Sync
-  0x05 = Bulk
+  0x01 = Control (handshake, JSON messages)
+  0x02 = Identity (identity document exchange)
+  0x03 = Message (PUSE envelopes)
+  0x04 = Sync (CRDT sync protocol)
+  0x05 = Bulk (Reserved for v2 - MUST NOT be used in v1)
   0x06-0xFF = Reserved for future use
 ```
+
+**Framing Rules:**
+- Stream type is written ONCE at stream open (1 byte)
+- Each subsequent message is prefixed with 4-byte big-endian length
+- Maximum message size per stream type defined in layer-integration.md
 
 ## Connection Lifecycle
 
@@ -148,27 +155,7 @@ Stream Types:
 
 ## 0-RTT Resumption
 
-For previously connected peers:
-
-1. **Store session ticket** after successful connection
-2. **On reconnect**: Send 0-RTT data with session ticket
-3. **Server verifies**: Accept if ticket valid, reject replay
-
-### 0-RTT Security Considerations
-
-- 0-RTT data can be replayed by network attackers
-- Only use for idempotent operations (identity fetch, presence)
-- Non-idempotent operations (messages) must wait for 1-RTT confirmation
-
-```typescript
-interface ZeroRttPolicy {
-  // Operations safe for 0-RTT (can be replayed)
-  SAFE_FOR_0RTT: ['identity_request', 'ping', 'presence'];
-
-  // Operations requiring 1-RTT (replay-sensitive)
-  REQUIRE_1RTT: ['message_send', 'sync_write', 'key_rotation'];
-}
-```
+**0-RTT Usage (Normative):** Per RFC-0002 §8.3, Post-Urbit v1 implementations MUST NOT send application-layer data in QUIC 0-RTT early data. QUIC 0-RTT MAY be used for transport-level connection resumption, but all Post-Urbit protocol bytes (control messages, identity handshake, stream data) MUST wait until `tls_binding` is available after TLS 1.3 handshake completion. See RFC-0002 §8.3 for the authoritative specification.
 
 ## Connection Migration
 
@@ -230,6 +217,12 @@ Use QUIC's default congestion control (Cubic or BBR):
 | `0x102` | STREAM_TYPE_UNKNOWN | Unknown stream type |
 | `0x103` | MESSAGE_TOO_LARGE | Message exceeds limit |
 | `0x104` | RATE_LIMITED | Too many requests |
+| `0x105` | DUPLICATE_CONNECTION | Connection already exists (glare resolution) |
+| `0x106` | REVOKED_IDENTITY | Peer's identity is revoked |
+| `0x107` | REVOKED_KEY | Peer's signing key is revoked |
+| `0x108-0x1FF` | Reserved | Transport layer |
+
+See RFC-0002 §9 for the authoritative error code registry.
 
 ## Performance Targets
 

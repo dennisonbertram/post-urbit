@@ -72,26 +72,33 @@ Beyond the fields in `04-app-runtime/manifest-schema.md`, distribution adds:
 
 Every `.postapp` must be signed by the author's identity signing key.
 
+**SIGNATURE File Format (JSON):**
+```json
+{
+  "author_iid": "k5xq7z4m2n3p5r6s7t2v3v4w5x2y3z7a",
+  "timestamp": "2025-01-15T12:00:00Z",
+  "signature": "<base64-ed25519-signature-64-bytes>",
+  "signed_manifest_hash": "sha256:<hex-hash-of-canonical-manifest>"
+}
 ```
-SIGNATURE File Format (UTF-8 text):
-┌─────────────────────────────────────────────────────────────────┐
-│ author_iid: k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a                    │
-│ timestamp: 2025-01-15T12:00:00Z                                 │
-│ signature: <base64-ed25519-signature-64-bytes>                  │
-│ signed_manifest_hash: sha256:<hex-hash-of-canonical-manifest>   │
-└─────────────────────────────────────────────────────────────────┘
-```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `author_iid` | string | Author's Identity Identifier (Crockford Base32) |
+| `timestamp` | string | RFC3339 UTC timestamp when signed |
+| `signature` | string | Base64-encoded Ed25519 signature (RFC 4648 standard alphabet, NO padding; verifiers MUST reject strings ending with `=`) |
+| `signed_manifest_hash` | string | `"sha256:" + hex(SHA256(JCS(manifest.json)))` |
 
 ### Signing Process
 
 ```
 1. Create manifest.json with all file hashes in files.hashes
 2. Canonicalize manifest.json (JCS - JSON Canonicalization Scheme)
-3. Compute: manifest_hash = SHA256(canonical_manifest_bytes)
-4. Create signing payload:
-   payload = "postapp-signature-v1:" || manifest_hash || ":" || timestamp
-5. Sign: signature = Ed25519_Sign(author_signing_key, payload)
-6. Write SIGNATURE file
+3. Compute: manifest_hash_hex = hex(SHA256(canonical_manifest_bytes))
+4. Create signing payload (UTF-8 string):
+   payload = "postapp-signature-v1:" || manifest_hash_hex || ":" || timestamp
+5. Sign: signature = Ed25519_Sign(author_signing_key, utf8_encode(payload))
+6. Write SIGNATURE file as JSON
 7. Package all files into ZIP archive
 ```
 
@@ -103,22 +110,87 @@ SIGNATURE File Format (UTF-8 text):
 3. Validate timestamp:
    - NOT in future (with 5 minute clock skew tolerance)
    - NOT before author's identity genesis (sanity check)
-   - NOTE: Old signatures are valid if key was valid at signing time
+   - NOTE: Old signatures are valid if key was not revoked at signing time
 4. Extract and parse manifest.json
-5. Canonicalize manifest.json
-6. Compute manifest_hash = SHA256(canonical_manifest_bytes)
-7. Verify: manifest_hash == signed_manifest_hash
+5. Canonicalize manifest.json (JCS)
+6. Compute manifest_hash_hex = hex(SHA256(canonical_manifest_bytes))
+7. Verify: "sha256:" + manifest_hash_hex == signed_manifest_hash
 8. Fetch author's identity document (from DHT or local cache)
-9. Check author's signing key at timestamp was valid:
-   - Lookup key that was active at timestamp in identity document
-   - Verify key was not revoked before timestamp
-10. Reconstruct payload = "postapp-signature-v1:" || manifest_hash || ":" || timestamp
-11. Verify Ed25519_Verify(author_signing_key, payload, signature)
+9. Verify signature using the Signature Key Selection algorithm:
+   - Try current → previous → all history[], accept if any verifies
+   - Check no applicable revocation for that key before signature timestamp (see Revocation Check Algorithm below)
+10. Reconstruct payload = "postapp-signature-v1:" || manifest_hash_hex || ":" || timestamp
+11. Verify Ed25519_Verify(author_signing_key, utf8_encode(payload), signature)
 12. For each file in package:
     - Compute hash
     - Verify hash matches manifest.files.hashes[filename]
 13. Check author_iid is not blocklisted
 ```
+
+**Signature Key Selection (Normative):**
+
+Verifiers MUST attempt signature verification using the publisher's signing keys in the following order:
+1. `keys.signing.current`
+2. `keys.signing.previous` (if present and non-null)
+3. `keys.signing.history[]` entries (in order, regardless of `expires_at`)
+
+Accept the signature if ANY key successfully verifies. This algorithm ensures:
+- Cached packages remain verifiable after key rotation
+- No dependency on historical IDOC version availability
+- Consistent behavior with PUSE signature verification (RFC-0003 §3.8)
+
+**`expires_at` Handling:** For package signatures, `expires_at` on historical keys is NOT a rejection criterion. This aligns with real-time message verification (RFC-0003 §3.8) which also treats `expires_at` as UI metadata only. Package signatures represent a point-in-time assertion that must remain verifiable indefinitely. Implementations SHOULD display a warning if the signing key's `expires_at` has passed, but MUST NOT reject the package solely for this reason.
+
+### Revocation Check Algorithm (Normative)
+
+When verifying a package signature, implementations MUST check for applicable revocations:
+
+```
+1. Query DHT key SHA256("post-urbit:revocation:" || author_iid) for revocation records
+
+2. For each revocation record found:
+   a. Verify revocation record signature using the identity's signing key
+   b. Parse revocation.effective_at timestamp
+   c. Compare revocation.effective_at with package signature timestamp (SIGNATURE.timestamp)
+   d. If revocation.effective_at <= SIGNATURE.timestamp AND revocation affects the signing key:
+      → REJECT the package
+   e. Continue checking all revocation records
+
+3. Revocation types that invalidate package signatures:
+   - identity_revocation: The entire identity was revoked; all signatures invalid
+   - key_revocation: A specific signing key was revoked; signatures by that key are invalid
+     if the revoked key matches the key that verified the package signature
+
+4. Network failure handling:
+   - If DHT query fails (timeout, network error, no peers available):
+     - Implementations SHOULD warn the user about the verification gap
+     - Implementations MAY proceed with installation (fail-open for availability)
+     - Implementations MUST log the failed revocation check
+   - The fail-open policy prioritizes availability; high-security deployments
+     MAY configure fail-closed behavior via enterprise policy
+```
+
+**Rationale:** Fail-open for revocation checks balances security with availability. Users in offline or network-constrained environments can still install packages, with appropriate warnings. Enterprise deployments can enforce stricter policies.
+
+### Package Signature Longevity
+
+Package signatures reference a specific signing key by its public key bytes. The spec requires signatures to be "verifiable indefinitely" but key history is normally limited to 2 years (per identity-document-schema.md). To support long-term verification:
+
+1. **Extended key retention (RECOMMENDED):** Signing keys used for package signatures SHOULD be retained in `keys.signing.history` beyond the normal 2-year retention limit. Authors who publish packages SHOULD configure extended retention for keys used in active package signatures.
+
+2. **Embedded signing key (ALTERNATIVE):** Package manifests MAY embed the full signing key used for signing in the `distribution` section:
+   ```json
+   {
+     "distribution": {
+       "signing_key": "<base64-ed25519-public-key-32-bytes>"
+     }
+   }
+   ```
+   When present, verifiers MAY use this embedded key for self-contained verification, after confirming the key was valid for the author at some point (by checking if it matches genesis, current, previous, or any history[] entry).
+
+3. **Installation-time caching (ALTERNATIVE):** Implementations MAY cache the author's identity document at package installation time. This cached document can be used for offline verification and provides a snapshot of valid keys at installation time.
+
+**Recommendation:** Authors publishing long-lived packages (>2 years expected lifetime) SHOULD use approach (1) or (2) to ensure continued verifiability.
 
 ### Timestamp Semantics
 
@@ -129,7 +201,7 @@ The package signature timestamp has the following semantics:
 | Future timestamp | Reject (>5 min ahead) | Prevent pre-dated signatures |
 | Old timestamp (packages) | **Accept** | Allow installing older versions, cached/archived packages |
 | Old timestamp (update manifests) | Warn if >7 days | Freshness hint for update checks only |
-| Key validity at timestamp | Verify | Ensure key wasn't compromised before signing |
+| Key not revoked before timestamp | Verify | Ensure key wasn't revoked before signing |
 
 **Why old package signatures are allowed:**
 - Users may install from offline storage or backups
@@ -144,8 +216,8 @@ When installing from a direct URL (not cached/local file), the UI may display:
 ### Key Rotation Handling
 
 If author rotated keys since signing:
-- Verify signature against key that was current at `timestamp`
-- Use `keys.signing.history` from author's identity document
+- Use Signature Key Selection algorithm: try current → previous → history[]
+- Accept signature if ANY key verifies (do not require key active at timestamp)
 - Keys older than history retention (default: 2 years) cannot be verified
 - Key revocation with timestamp T invalidates all signatures after T
 
@@ -220,7 +292,11 @@ Repositories are curated collections of apps with additional metadata.
       ]
     }
   ],
-  "signature": "<repository-operator-signature>"
+  "signature": {
+    "operator_iid": "k5xq7z4m...",
+    "timestamp": "2025-01-15T12:00:00Z",
+    "sig": "<base64-ed25519-signature>"
+  }
 }
 ```
 
@@ -232,10 +308,10 @@ Repository manifests MUST be signed by the operator's identity signing key, foll
 Repository Signature Process:
 1. Create repository.json WITHOUT the "signature" field
 2. Canonicalize using JCS (JSON Canonicalization Scheme)
-3. Compute: manifest_hash = SHA256(canonical_json_bytes)
-4. Create payload:
-   payload = "postnode-repo-v1:" || manifest_hash || ":" || timestamp
-5. Sign: signature = Ed25519_Sign(operator_signing_key, payload)
+3. Compute: manifest_hash_hex = hex(SHA256(canonical_json_bytes))
+4. Create payload (UTF-8 string):
+   payload = "postnode-repo-v1:" || manifest_hash_hex || ":" || timestamp
+5. Sign: signature = Ed25519_Sign(operator_signing_key, utf8_encode(payload))
 6. Add signature field:
    "signature": {
      "operator_iid": "<operator_iid>",
@@ -244,9 +320,12 @@ Repository Signature Process:
    }
 ```
 
+All `sig` fields MUST use RFC 4648 Base64 standard alphabet with NO padding. Verifiers MUST reject padded input (strings ending with `=`).
+
 **Verification:**
 - Fetch operator's identity document from DHT
-- Verify operator's key was valid at signature timestamp
+- Verify signature using Key Selection algorithm (try current → previous → history[])
+- Check key not revoked before signature timestamp
 - Freshness check: warn if signature >7 days old (repository should be refreshed)
 - Cache repository manifest with TTL (default: 1 hour)
 
@@ -371,12 +450,14 @@ Update manifests MUST be signed by the app author (same `author_iid` as the inst
 Update Signature Process:
 1. Create updates.json WITHOUT the "signature" field
 2. Canonicalize using JCS
-3. Compute: manifest_hash = SHA256(canonical_json_bytes)
-4. Create payload:
-   payload = "postnode-update-v1:" || app_id || ":" || manifest_hash || ":" || timestamp
-5. Sign: signature = Ed25519_Sign(author_signing_key, payload)
+3. Compute: manifest_hash_hex = hex(SHA256(canonical_json_bytes))
+4. Create payload (UTF-8 string):
+   payload = "postnode-update-v1:" || app_id || ":" || manifest_hash_hex || ":" || timestamp
+5. Sign: signature = Ed25519_Sign(author_signing_key, utf8_encode(payload))
 6. Add signature object (see above)
 ```
+
+All `sig` fields MUST use RFC 4648 Base64 standard alphabet with NO padding. Verifiers MUST reject padded input (strings ending with `=`).
 
 **Update Verification:**
 - `author_iid` MUST match installed app's author (prevents takeover)

@@ -85,18 +85,36 @@ IID length: 32 characters
 
 ```python
 import hashlib
-import base64
+
+# Crockford Base32 alphabet (excludes i, l, o, u)
+CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
+
+def crockford_encode(data: bytes) -> str:
+    """Encode bytes to Crockford Base32 lowercase string."""
+    # Convert bytes to big integer
+    value = int.from_bytes(data, 'big')
+    bits = len(data) * 8
+    result = []
+    # Process 5 bits at a time from most significant
+    for i in range((bits + 4) // 5):
+        shift = bits - (i + 1) * 5
+        if shift < 0:
+            # Last chunk may need padding
+            idx = (value << -shift) & 0x1f
+        else:
+            idx = (value >> shift) & 0x1f
+        result.append(CROCKFORD_ALPHABET[idx])
+    return ''.join(result)
 
 def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
     assert len(genesis_signing_public_key_raw) == 32, "Must be raw 32-byte Ed25519 pubkey"
     hash_bytes = hashlib.sha256(genesis_signing_public_key_raw).digest()
     truncated = hash_bytes[:20]
-    base32_upper = base64.b32encode(truncated).decode('ascii').rstrip('=')
-    return base32_upper.lower()
+    return crockford_encode(truncated)
 
 # Verify
 pubkey = bytes.fromhex('e3c7a72049df8c4623a2d4b61db1d76a6c3ea2efaae7b87e9d46acfb8f519bb4')
-assert derive_iid(pubkey) == 'lbvhmpzmqkzrudc55hok54a6ajq6a6c3'
+assert derive_iid(pubkey) == 'b1anasr5h0bj3832xqexwy0f0987e1xb'
 ```
 
 ---
@@ -125,79 +143,25 @@ Encryption public key (base64):
 jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc
 
 IID:
-lbvhmpzmqkzrudc55hok54a6ajq6a6c3
+b1anasr5h0bj3832xqexwy0f0987e1xb
 ```
 
 ### Document (before signatures)
 
+Per RFC-0001 §6.6, all required fields MUST be present in the wire encoding:
+
 ```json
 {
   "version": 1,
-  "iid": "lbvhmpzmqkzrudc55hok54a6ajq6a6c3",
+  "iid": "b1anasr5h0bj3832xqexwy0f0987e1xb",
   "sequence": "0",
   "timestamp": "2025-01-15T00:00:00Z",
   "keys": {
     "signing": {
       "genesis": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
       "current": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
-      "previous": null
-    },
-    "encryption": {
-      "current": "jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc",
-      "previous": []
-    }
-  },
-  "endpoints": [],
-  "recovery": {"method": "none", "config": {}},
-  "claims": {"name": "Alice"},
-  "extensions": {}
-}
-```
-
-### Canonical JSON (JCS - RFC 8785)
-
-JCS sorts keys lexicographically at all levels and removes whitespace:
-
-```
-{"claims":{"name":"Alice"},"endpoints":[],"extensions":{},"iid":"lbvhmpzmqkzrudc55hok54a6ajq6a6c3","keys":{"encryption":{"current":"jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc","previous":[]},"signing":{"current":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","genesis":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","previous":null}},"recovery":{"config":{},"method":"none"},"sequence":"0","timestamp":"2025-01-15T00:00:00Z","version":1}
-```
-
-### Signature
-
-**Domain separation**: The signature is over a domain-separated payload:
-
-```
-Domain separator (19 bytes, ASCII):
-"post-urbit:idoc:v1:"
-
-Payload = domain_separator + JCS_bytes
-
-Sign the UTF-8 encoded payload:
-
-Signature (hex):
-[Regenerate with domain separation - value depends on actual payload]
-
-Signature (base64):
-[Regenerate with domain separation]
-
-Signature length: 64 bytes (86 base64 chars without padding)
-```
-
-**Note**: Test vector signatures must be regenerated with domain separation. The signature from earlier test vectors was computed without domain separation and is now obsolete.
-
-### Signed Document
-
-```json
-{
-  "version": 1,
-  "iid": "lbvhmpzmqkzrudc55hok54a6ajq6a6c3",
-  "sequence": "0",
-  "timestamp": "2025-01-15T00:00:00Z",
-  "keys": {
-    "signing": {
-      "genesis": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
-      "current": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
-      "previous": null
+      "previous": null,
+      "history": []
     },
     "encryption": {
       "current": "jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc",
@@ -208,12 +172,137 @@ Signature length: 64 bytes (86 base64 chars without padding)
   "recovery": {"method": "none", "config": {}},
   "claims": {"name": "Alice"},
   "extensions": {},
+  "recovery_proof": null
+}
+```
+
+### Canonical JSON (JCS - RFC 8785)
+
+JCS sorts keys lexicographically at all levels and removes whitespace. Per RFC-0001 §6.6, all required fields must be present:
+
+```
+{"claims":{"name":"Alice"},"endpoints":[],"extensions":{},"iid":"b1anasr5h0bj3832xqexwy0f0987e1xb","keys":{"encryption":{"current":"jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc","previous":[]},"signing":{"current":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","genesis":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","history":[],"previous":null}},"recovery":{"config":{},"method":"none"},"recovery_proof":null,"sequence":"0","timestamp":"2025-01-15T00:00:00Z","version":1}
+```
+
+### Signature Computation Instructions
+
+**Domain separation**: The signature is computed over a domain-separated payload.
+
+Implementations MUST compute the signature as follows:
+
+1. **Construct the canonical JSON** using JCS (RFC 8785) as shown above
+2. **Apply the domain separator** (19 bytes, ASCII): `"post-urbit:idoc:v1:"`
+3. **Concatenate**: `payload = domain_separator + JCS_bytes` (UTF-8 encoded)
+4. **Sign**: `signature = Ed25519Sign(private_key, payload)`
+5. **Verify**: The resulting 64-byte signature should verify against the public key `48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q`
+
+```
+Domain separator (19 bytes, ASCII):
+"post-urbit:idoc:v1:"
+
+Private key for signing (derived from seed in Test Vector 1):
+Seed (hex): 033cb5927062653e49646945878c1a40c6c9ee4694c93c10886d45d320028f40
+
+Signature length: 64 bytes (86 base64 chars without padding)
+```
+
+**Implementation verification**: To verify your implementation is correct:
+1. Derive the Ed25519 keypair from the seed above
+2. Confirm the public key matches: `e3c7a72049df8c4623a2d4b61db1d76a6c3ea2efaae7b87e9d46acfb8f519bb4` (hex)
+3. Construct the JCS canonical form exactly as shown (byte-for-byte match)
+4. Sign with domain separation as described
+5. Verify the signature against the public key
+
+**Expected Signature (Normative):**
+
+The following signature is the normative expected output for Test Vector 2. Ed25519 is deterministic: given the same private key and message, all conformant implementations MUST produce this exact 64-byte signature.
+
+```
+signatures.current (hex):
+9927183e267c35331793e4e73a1ffa810a61f8c02657d9d49d7e868abcc308cd
+a456a1666380c2b9301874c7ccdcc874e37a107cfbfb57bb6f127942e3250d09
+
+signatures.current (base64, no padding):
+mScYPiZ8NTMXk+TnOh/6gQph+MAmV9nUnX6GirzDCM2kVqFmY4DCuTAYdMfM3Mh043oQfPv7V7tvEnlC4yUNCQ
+```
+
+This signature was computed using:
+1. Ed25519 seed: `033cb5927062653e49646945878c1a40c6c9ee4694c93c10886d45d320028f40` (hex)
+2. Public key: `e3c7a72049df8c4623a2d4b61db1d76a6c3ea2efaae7b87e9d46acfb8f519bb4` (hex)
+3. Signing input: domain separator (19 bytes) || JCS bytes (471 bytes) = 490 bytes total
+4. Algorithm: Ed25519Sign(private_key, signing_input)
+
+Implementations that produce a different signature have a canonicalization or signing bug.
+
+**Signing Input Bytes (Normative):**
+
+The exact byte sequence being signed is the concatenation of domain separator and JCS bytes:
+```
+domain_separator (19 bytes, hex):
+706f73742d75726269743a69646f633a76313a
+
+JCS canonical JSON (471 bytes, hex):
+7b22636c61696d73223a7b226e616d65223a22416c696365227d2c22656e64706f696e7473223a5b5d2c
+22657874656e73696f6e73223a7b7d2c22696964223a226231616e617372356830626a333833327871
+6578777930663039383765317862222c226b657973223a7b22656e6372797074696f6e223a7b226375
+7272656e74223a226a646d493552326a5a4f6862664a7958616b77394d41315972564579454f586f6b
+2b562b79697178797a63222c2270726576696f7573223a5b5d7d2c227369676e696e67223a7b226375
+7272656e74223a223438656e49456e666a45596a6f74533248624858616d772b6f752b713537682b6e
+5561732b3439526d3751222c2267656e65736973223a223438656e49456e666a45596a6f7453324862
+4858616d772b6f752b713537682b6e5561732b3439526d3751222c22686973746f7279223a5b5d2c22
+70726576696f7573223a6e756c6c7d7d2c227265636f76657279223a7b22636f6e666967223a7b7d2c
+226d6574686f64223a226e6f6e65227d2c227265636f766572795f70726f6f66223a6e756c6c2c2273
+657175656e6365223a2230222c2274696d657374616d70223a22323032352d30312d31355430303a30
+303a30305a222c2276657273696f6e223a317d
+
+signing_input (490 bytes) = domain_separator || JCS_bytes
+```
+
+**Cross-Implementation Verification:**
+
+To verify your implementation is correct:
+1. Derive the Ed25519 keypair from seed `033cb5927062653e49646945878c1a40c6c9ee4694c93c10886d45d320028f40` (hex)
+2. Verify public key equals `e3c7a72049df8c4623a2d4b61db1d76a6c3ea2efaae7b87e9d46acfb8f519bb4` (hex)
+3. Construct the signing_input (490 bytes) exactly as specified above
+4. Sign with Ed25519: `signature = Ed25519Sign(private_key, signing_input)`
+5. Verify: your signature MUST match the expected signature in the "Expected Signature (Normative)" section above
+6. If signatures differ, you have a canonicalization or signing bug
+
+### Signed Document
+
+Per RFC-0001 §6.6, all required fields MUST be present in the wire encoding:
+
+```json
+{
+  "version": 1,
+  "iid": "b1anasr5h0bj3832xqexwy0f0987e1xb",
+  "sequence": "0",
+  "timestamp": "2025-01-15T00:00:00Z",
+  "keys": {
+    "signing": {
+      "genesis": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
+      "current": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
+      "previous": null,
+      "history": []
+    },
+    "encryption": {
+      "current": "jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc",
+      "previous": []
+    }
+  },
+  "endpoints": [],
+  "recovery": {"method": "none", "config": {}},
+  "claims": {"name": "Alice"},
+  "extensions": {},
+  "recovery_proof": null,
   "signatures": {
-    "current": "HVVMMCJroKN853yR/s6hkCanIDE2/bUt1sx5gu0svaYfnjZrmnjNZdb7Ijcu5FLflicq+44CDPA5LSNAEVB2Aw",
+    "current": "mScYPiZ8NTMXk+TnOh/6gQph+MAmV9nUnX6GirzDCM2kVqFmY4DCuTAYdMfM3Mh043oQfPv7V7tvEnlC4yUNCQ",
     "previous": null
   }
 }
 ```
+
+**Note:** The `signatures.current` value is the normative expected output (see "Expected Signature (Normative)" section above). Ed25519 is deterministic: given the same seed, canonical JSON, and domain separator, all conformant implementations MUST produce the identical 64-byte signature. Implementations that produce a different signature have a bug.
 
 ---
 
@@ -243,7 +332,7 @@ Encryption public key (base64):
 5HOonEP4Dn83AsnueYQQSHlHSqU7crTkyOK3nQ94qE4
 
 IID:
-2fofcybfpmka5vf7ge737exo7crgnxsw
+2f0fcybfpmka5vf7ge737ex07crgnxsw
 ```
 
 ---
@@ -318,9 +407,9 @@ new_chain_key (hex):
 
 ---
 
-## Test Vector 6: X3DH Key Agreement
+## Test Vector 6: 2DH Key Agreement
 
-Initial key agreement between Alice and Bob.
+Initial key agreement between Alice and Bob using 2DH (Two Diffie-Hellman operations). Despite the historical "x3dh" string in the domain separator, Post-Urbit v1 uses 2DH, not Signal's X3DH.
 
 ### Alice's Keys
 
@@ -445,26 +534,266 @@ Base64: Kw5TkpX4qIMh17HWywkvPn5tmzl3P/lMzwNDRpQpOgQA0j9nM7l2oznJv0JfPAEJiDjAX5R6
 
 Same algorithm as IID, applied to device signing key.
 
-### Input
+### Derivation Method
 
 ```
 Label: "alice-phone"
 Purpose: "ed25519"
 
-Device signing seed (hex):
-[derive using derive_key_material("alice-phone", "ed25519", 32)]
-
-Device signing public key (hex):
-[computed from seed]
+1. Derive device signing seed: derive_key_material("alice-phone", "ed25519", 32)
+2. Generate Ed25519 keypair from seed
+3. Take public key (32 bytes, raw Ed25519, NOT DER/SPKI)
+4. Hash: SHA256(device_signing_public_key)
+5. Truncate to first 20 bytes (160 bits)
+6. Encode as Crockford Base32 lowercase (32 chars)
 ```
 
-### Derivation
+### Algorithm (identical to IID)
 
 ```
 DID = CrockfordBase32Lower(SHA256(device_signing_public_key)[0:20])
 ```
 
-(Same steps as IID derivation in Test Vector 1, using Crockford Base32)
+**Note:** DID derivation uses the exact same algorithm as IID derivation (Test Vector 1), just applied to the device's signing key instead of the identity's genesis key. Implementers should verify their DID derivation produces the same output as IID derivation when given the same key input.
+
+### Concrete Values
+
+```
+Device signing seed (hex):
+a5eb457d5b8af39124ddada0d29509014140b56e1da10ea92f50a3de8e82e509
+
+Device signing public key (hex):
+ea0757f2720fa3459633c30eb2e0ab737656321c4803d849aa7f614239c28652
+
+Device signing public key (base64):
+6gdX8nIPo0WWM8MOsuCrc3ZWMhxIA9hJqn9hQjnChlI
+
+SHA256(public_key) (hex):
+20a6bfdc5af29691a554f2da732e889bedf855257edfb1d65fc503ea923d0519
+
+First 20 bytes (hex):
+20a6bfdc5af29691a554f2da732e889bedf85525
+
+DID (first 20 bytes, Base32):
+42kbzq2tyab939amybd76bm8kfpzgn95
+```
+
+---
+
+## Test Vector 9: Sync Operation Signature
+
+### Operation Data
+
+```
+Document ID (UUID): 550e8400-e29b-41d4-a716-446655440000
+Document ID (RFC 4122 binary, 16 bytes, hex):
+550e8400e29b41d4a716446655440000
+
+Document ID (32-byte padded for Sync CBOR, hex):
+550e8400e29b41d4a71644665544000000000000000000000000000000000000
+
+Origin (Alice IID):
+Base32: b1anasr5h0bj3832xqexwy0f0987e1xb
+Raw bytes (hex): 586a763f2c82b31a0c5de9dcaef01e0261e0785b
+
+Timestamp (HLC):
+physical_ms: 1700000000000
+logical: 7
+origin_hash (SHA256(origin_raw)[0:8]): f97b7cc4577dffa2
+timestamp_bytes (hex, 20 bytes):
+0000018bcfe5680000000007f97b7cc4577dffa2
+
+CRDT Operation: lww_set with value "Alice Smith"
+CRDT Operation (CBOR, integer keys per sync-protocol.md):
+{0: 0, 1: "Alice Smith"}
+CBOR hex: A2 00 00 01 6B 41 6C 69 63 65 20 53 6D 69 74 68
+
+Dependencies: empty list
+dependencies_bytes: (empty, length = 0)
+```
+
+### Signature Construction
+
+```
+operation_id = SHA256(origin || timestamp_bytes || operation_bytes || dependencies_bytes)
+
+signature_input = concat(
+  "post-urbit:sync-op:v1:",    // domain separator (22 bytes)
+  operation_id_bytes,          // 32 bytes
+  document_id,                 // 32 bytes
+  timestamp_bytes,             // 20 bytes (8 physical + 4 logical + 8 origin_hash)
+  operation_bytes,             // CBOR-encoded operation
+  dependencies_bytes           // sorted, concatenated operation_ids
+)
+
+signature = Ed25519Sign(origin_signing_key, signature_input)
+```
+
+### Computed Values
+
+```
+operation_bytes (hex):
+a20000016b416c69636520536d697468
+
+operation_id (hex):
+27bff0b3171025eef73c81edb1c88bf61f902b30eef342b0e65ce847d65c2314
+
+signature_input (hex):
+706f73742d75726269743a73796e632d6f703a76313a27bff0b3171025eef73c81edb1c88bf61f902b30eef342b0e65ce847d65c2314550e8400e29b41d4a716446655440000000000000000000000000000000000000000018bcfe5680000000007f97b7cc4577dffa2a20000016b416c69636520536d697468
+
+signature (Ed25519, Alice signing key from Test Vector 1):
+Hex: abfe6b073f8fafb4a216f5099f6feaec7b2a257309e29bdb31cd647b1409aaab4c0819e0a5bc4122ea3501bd90a9937417c6d0e61d179d4bb9b01ca352033f0b
+Base64: q/5rBz+Pr7SiFvUJn2/q7HsqJXMJ4pvbMc1kexQJqqtMCBngpbxBIuo1Ab2QqZN0F8bQ5h0XnUu5sByjUgM/Cw
+```
+
+---
+
+## Test Vector 10: PUSE Envelope (1:1 Initial Message)
+
+This vector follows RFC-0003 §3 (PUSE wire format) and §5 (2DH initial message). Signature is raw Ed25519 over the envelope bytes before the signature (no prehash).
+
+### Inputs
+
+```
+Sender IID (Alice, base32): b1anasr5h0bj3832xqexwy0f0987e1xb
+Sender IID (raw hex): 586a763f2c82b31a0c5de9dcaef01e0261e0785b
+
+Recipient IID (Bob, base32): 2f0fcybfpmka5vf7ge737ex07crgnxsw
+Recipient IID (raw hex): d15c5160257b140ed4bf313fbf92eef8a266de56
+
+Flags: 0x00 (recipient type 00=1:1, all other bits 0)
+
+Message ID (UUID): 550e8400-e29b-41d4-a716-446655440000
+Message ID (16 bytes, hex): 550e8400e29b41d4a716446655440000
+
+Header Extension (Initial, type 0x00):
+Extension length: 33 (0x0021)
+Extension bytes (hex):
+0089fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be627904522217
+AAD bytes (hex): same as extension
+
+Nonce (12 bytes, hex): 6560a3c00102030405060708
+  timestamp seconds = 1700000000 (0x6560a3c0)
+  random = 0102030405060708
+
+Plaintext (UTF-8): "hello"
+```
+
+### Message Key Derivation
+
+```
+initial_chain_key (from Test Vector 6):
+47920ff7fbbdca074b8abebfc125e456909b36635c9177a8afee8a1e6314d86e
+
+kdf_chain_step(initial_chain_key) ->
+message_key_0 (hex):
+6d7fa890fbfc8f49a691773407d79a5c1745daa14a8a87a990cb58fb1894aeec
+
+new_chain_key_1 (hex):
+4e75e0384cbd36e42464b656a3a1f8078f4c72ac8a8eceba75e2eb21689cde91
+```
+
+### Encryption Output
+
+```
+ciphertext_length = 21 (0x00000015)  // plaintext + 16-byte Poly1305 tag
+ciphertext (hex):
+900c9a179c3e847fdf3660033e1dc73ad0a11a8db6
+```
+
+### Signature
+
+```
+signature (Ed25519, Alice signing key from Test Vector 1):
+Hex: fdc884da4019717b56265c8172c731a3ea577fad6e77fb736f765a93d1cabfe6c2ca99a96620c3d0b60cf6f3c1ccaddfd1dddf8df197ad4e7f480ee513fec70d
+Base64: /ciE2kAZcXtWJlyBcscxo+pXf61ud/tzb3Zak9HKv+bCypmpZiDD0LYM9vPBzK3f0d3fjfGXrU5/SA7lE/7HDQ
+```
+
+### Full Envelope
+
+```
+envelope (hex):
+505553450100586a763f2c82b31a0c5de9dcaef01e0261e0785bd15c5160257b140ed4bf313fbf92eef8a266de56550e8400e29b41d4a71644665544000000210089fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be6279045222176560a3c0010203040506070800000015900c9a179c3e847fdf3660033e1dc73ad0a11a8db6fdc884da4019717b56265c8172c731a3ea577fad6e77fb736f765a93d1cabfe6c2ca99a96620c3d0b60cf6f3c1ccaddfd1dddf8df197ad4e7f480ee513fec70d
+
+envelope (base64):
+UFVTRQEAWGp2PyyCsxoMXencrvAeAmHgeFvRXFFgJXsUDtS/MT+/ku74ombeVlUOhADim0HUpxZEZlVEAAAAIQCJ/oc0XRwk7V/BbfkIDu+TRagkzd83tf7EvmJ5BFIiF2Vgo8ABAgMEBQYHCAAAABWQDJoXnD6Ef982YAM+Hcc60KEajbb9yITaQBlxe1YmXIFyxzGj6ld/rW53+3NvdlqT0cq/5sLKmalmIMPQtgz288HMrd/R3d+N8ZetTn9IDuUT/scN
+```
+
+---
+
+## Test Vector 11: PUSE Ratchet Message (1:1, Same Session)
+
+This vector follows RFC-0003 §3.4.3 and §4.4. It uses the same session as Test Vector 10, with the ratchet header in the PUSE header extension (AAD).
+
+### Inputs
+
+```
+Sender IID (Alice, base32): b1anasr5h0bj3832xqexwy0f0987e1xb
+Sender IID (raw hex): 586a763f2c82b31a0c5de9dcaef01e0261e0785b
+
+Recipient IID (Bob, base32): 2f0fcybfpmka5vf7ge737ex07crgnxsw
+Recipient IID (raw hex): d15c5160257b140ed4bf313fbf92eef8a266de56
+
+Flags: 0x00 (recipient type 00=1:1, all other bits 0)
+
+Message ID (UUID): 550e8400-e29b-41d4-a716-446655440001
+Message ID (16 bytes, hex): 550e8400e29b41d4a716446655440001
+
+Header Extension (Ratchet, type 0x01):
+Extension length: 41 (0x0029)
+DH public key: 89fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be627904522217
+PN: 0 (0x00000000)
+N: 1 (0x00000001)
+Extension bytes (hex):
+0189fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be6279045222170000000000000001
+AAD bytes (hex): same as extension
+
+Nonce (12 bytes, hex): 6560a3c11112131415161718
+  timestamp seconds = 1700000001 (0x6560a3c1)
+  random = 1112131415161718
+
+Plaintext (UTF-8): "hello again"
+```
+
+### Message Key Derivation
+
+```
+chain_key_1 (from Test Vector 10):
+4e75e0384cbd36e42464b656a3a1f8078f4c72ac8a8eceba75e2eb21689cde91
+
+kdf_chain_step(chain_key_1) ->
+message_key_1 (hex):
+862e4ed4478747555509513b555ce09f35ab4731c03107461c77c8f7cec361d7
+
+new_chain_key_2 (hex):
+53c2f15079523be63e6d6b3bc984be16f2ea4931e023b434ed507ffc5b0c2782
+```
+
+### Encryption Output
+
+```
+ciphertext_length = 27 (0x0000001b)  // plaintext + 16-byte Poly1305 tag
+ciphertext (hex):
+32c8241cd1dd0baff3719c390843c0b056443cc1c0686b5f3c0126
+```
+
+### Signature
+
+```
+signature (Ed25519, Alice signing key from Test Vector 1):
+Hex: 094b4d9c3ca5e0229d6f40a94b13492ff290bf812fbc203dcae818912457fc4befc0af1e857baab75d0ca434de46205b2f64262d1fed5f5963d33f43cb54c60c
+Base64: CUtNnDyl4CKdb0CpSxNJL/KQv4EvvCA9yugYkSRX/EvvwK8ehXuqt10MpDTeRiBbL2QmLR/tX1lj0z9Dy1TGDA
+```
+
+### Full Envelope
+
+```
+envelope (hex):
+505553450100586a763f2c82b31a0c5de9dcaef01e0261e0785bd15c5160257b140ed4bf313fbf92eef8a266de56550e8400e29b41d4a71644665544000100290189fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be62790452221700000000000000016560a3c111121314151617180000001b32c8241cd1dd0baff3719c390843c0b056443cc1c0686b5f3c0126094b4d9c3ca5e0229d6f40a94b13492ff290bf812fbc203dcae818912457fc4befc0af1e857baab75d0ca434de46205b2f64262d1fed5f5963d33f43cb54c60c
+
+envelope (base64):
+UFVTRQEAWGp2PyyCsxoMXencrvAeAmHgeFvRXFFgJXsUDtS/MT+/ku74ombeVlUOhADim0HUpxZEZlVEAAEAKQGJ/oc0XRwk7V/BbfkIDu+TRagkzd83tf7EvmJ5BFIiFwAAAAAAAAABZWCjwRESExQVFhcYAAAAGzLIJBzR3Quv83GcOQhDwLBWRDzBwGhrXzwBJglLTZw8peAinW9AqUsTSS/ykL+BL7wgPcroGJEkV/xL78CvHoV7qrddDKQ03kYgWy9kJi0f7V9ZY9M/Q8tUxgw
+```
 
 ---
 
@@ -472,6 +801,7 @@ DID = CrockfordBase32Lower(SHA256(device_signing_public_key)[0:20])
 
 Implementers should verify:
 
+**Reproducible Vectors (1-11):**
 1. [ ] IID derivation matches Test Vector 1
 2. [ ] JCS canonicalization produces exact byte sequence
 3. [ ] Signature verification passes for Test Vector 2
@@ -479,6 +809,10 @@ Implementers should verify:
 5. [ ] Root chain KDF matches Test Vector 5
 6. [ ] X3DH key agreement matches Test Vector 6
 7. [ ] Handshake challenge matches Test Vector 7
+8. [ ] DID derivation matches Test Vector 8
+9. [ ] Sync operation signature matches Test Vector 9
+10. [ ] PUSE initial envelope round-trip matches Test Vector 10
+11. [ ] PUSE ratchet envelope round-trip matches Test Vector 11
 
 ---
 
@@ -522,15 +856,28 @@ def derive_key_material(label, purpose, length):
     prk = hkdf_extract(b'', ikm)
     return hkdf_expand(prk, purpose.encode('utf-8'), length)
 
-def base32_encode(data):
-    return base64.b32encode(data).decode('ascii').rstrip('=').lower()
+CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
+
+def crockford_encode(data):
+    """Encode bytes to Crockford Base32 (NOT RFC4648)."""
+    value = int.from_bytes(data, 'big')
+    bits = len(data) * 8
+    result = []
+    for i in range((bits + 4) // 5):
+        shift = bits - (i + 1) * 5
+        if shift < 0:
+            idx = (value << -shift) & 0x1f
+        else:
+            idx = (value >> shift) & 0x1f
+        result.append(CROCKFORD_ALPHABET[idx])
+    return ''.join(result)
 
 def base64_encode(data):
     return base64.b64encode(data).decode('ascii').rstrip('=')
 
 def derive_iid(pubkey):
     h = hashlib.sha256(pubkey).digest()
-    return base32_encode(h[:20])
+    return crockford_encode(h[:20])
 
 # Usage: Run this script to regenerate all test vectors
 if __name__ == '__main__':

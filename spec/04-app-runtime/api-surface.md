@@ -16,11 +16,20 @@ Every API method requires a specific capability. Calls without required capabili
 
 ### Structured Data
 
-Data is passed as CBOR-encoded structures. JSON is used in documentation for readability.
+Data is passed as CBOR-encoded structures. JSON is used in documentation for readability. **See `abi.md` Section "CBOR Encoding" for the normative wire encoding rules** including type mappings, deterministic encoding requirements, and example encodings.
 
 ### Error Handling
 
 All methods return `Result<T, Error>` with typed error codes.
+
+### Method Implementation Status
+
+**See `abi.md` for the authoritative method registry.** Methods are categorized as:
+- **v1:** Fully specified below with complete CBOR schemas
+- **reserved:** Registered for future use; calling returns `{ ok: false, error: { code: "NOT_IMPLEMENTED" } }`
+
+Reserved methods (NOT specified in this document):
+`storage.shared.get`, `storage.shared.set`, `messaging.unsubscribe`, `messaging.list_groups`, `contacts.get`, `sync.get_document`, `sync.subscribe`, `sync.share`, `notifications.cancel`, `app.share`
 
 ## Host Call Convention
 
@@ -155,7 +164,7 @@ interface StorageListRequest {
 // Response
 interface StorageListResponse {
   keys: string[];
-  cursor?: string;          // null if no more results
+  cursor?: string;          // Omitted if no more results
   has_more: boolean;
 }
 
@@ -202,6 +211,25 @@ type MessagingSendError =
   | 'PERMISSION_DENIED';
 ```
 
+**IMPORTANT:** The mapping between CBOR request/response content and PUSE plaintext JSON is specified in RFC-0003 Section 8.2 "Host API to PUSE Plaintext Mapping (Normative)". Implementations MUST follow this mapping for interoperability.
+
+**Message Size Limit (Normative):**
+
+The Host runtime enforces the PUSE envelope limit of 1,048,576 bytes (1 MB) as follows:
+
+1. Apps provide plaintext content (JSON or CBOR)
+2. Host constructs the PUSE envelope (adds header, encrypts, signs)
+3. Host MUST verify the resulting envelope size ≤ 1,048,576 bytes
+4. If exceeded, Host MUST reject with error `MESSAGE_TOO_LARGE` before transmission
+
+**Derived Plaintext Limits:**
+
+Given PUSE overhead (~160-200 bytes depending on extension type), the maximum plaintext sizes are approximately:
+- Group messages (21-byte ext): ~1,048,375 bytes plaintext
+- Ratchet messages (41-byte ext): ~1,048,355 bytes plaintext
+
+Apps SHOULD stay well under these limits to account for JSON/CBOR encoding overhead.
+
 ### messaging.subscribe
 
 ```typescript
@@ -239,6 +267,8 @@ type MessagingSubscribeError =
   | 'TOO_MANY_SUBSCRIPTIONS'
   | 'PERMISSION_DENIED';
 ```
+
+**IMPORTANT:** The mapping between CBOR request/response content and PUSE plaintext JSON is specified in RFC-0003 Section 8.2 "Host API to PUSE Plaintext Mapping (Normative)". Implementations MUST follow this mapping for interoperability.
 
 ### Subscription Lifecycle
 
@@ -278,7 +308,7 @@ interface MessagingCreateGroupRequest {
 }
 
 interface GroupSettings {
-  join_rule: 'invite_only' | 'open';
+  join_rule: 'invite_only' | 'link' | 'open';
   history_visibility: 'joined' | 'invited' | 'shared' | 'none';
 }
 
@@ -303,7 +333,6 @@ type MessagingCreateGroupError =
 | Method | Capability | Description |
 |--------|------------|-------------|
 | `contacts.list` | `contacts:read` | List all contacts |
-| `contacts.get` | `contacts:read` | Get contact details |
 | `contacts.list_app_users` | `contacts:read:limited` | List contacts using this app |
 
 ### contacts.list

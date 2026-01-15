@@ -62,10 +62,11 @@ Make an asynchronous host API call.
 
 **Return values:**
 - `> 0`: Call ID for retrieving result via `get_result`
-- `-1`: Invalid method name
+- `-1`: Invalid method name bytes (not valid UTF-8 or exceeds 64 bytes)
 - `-2`: Invalid arguments (not valid CBOR)
 - `-3`: Too many outstanding calls (max: 16 per invocation)
-- `-4`: Permission denied (missing capability)
+
+**Error model (Normative):** `host.call` returns a positive call_id for ANY syntactically valid method name (valid UTF-8, ≤64 bytes) and valid CBOR arguments, regardless of whether the method exists or the app has permission to call it. All method-level errors (permission denied, method not found, not implemented, validation errors) are returned as CBOR envelopes with `ok: false` via `get_result`. Negative `host.call` values are reserved for ABI-level failures only (malformed input, resource exhaustion).
 
 ### host.get_result
 
@@ -80,11 +81,12 @@ Retrieve the result of a host call.
 ```
 
 **Return values:**
-- `> 0`: Bytes written (result complete)
+- `> 0`: Bytes written (result complete, buffer contains CBOR envelope)
 - `0`: Result not ready (call still pending)
 - `-1`: Invalid call_id
 - `-2`: Buffer too small (use `get_result_len` to query size)
-- `-3`: Call failed (result contains CBOR error)
+
+**Note:** Negative return values indicate transport-level errors only. Application-level call failures (e.g., permission denied, method not found) return `> 0` bytes containing a CBOR envelope with `ok: false`. See "Result Envelope Format" below.
 
 ### host.get_result_len
 
@@ -174,6 +176,14 @@ The return is a packed 64-bit value containing pointer and length:
 - Lower 32 bits: length of result
 
 If the app returns 0, no result is produced.
+
+**Return buffer ownership (Normative):**
+- Guest allocates and owns the result buffer
+- Guest MUST keep the buffer valid and unchanged until `handle` returns
+- Host MUST copy result bytes immediately upon `handle` return (host does NOT call `dealloc`)
+- Guest MAY reuse or free the buffer after `handle` returns
+- Host MUST validate `(ptr, len)`: if ptr is 0 and len > 0, or if `ptr + len` exceeds memory bounds, treat as trap
+- Maximum result size: 1 MB (1048576 bytes); larger results are truncated
 
 **Result format (CBOR):**
 ```typescript
@@ -268,15 +278,192 @@ Application-level errors are always returned inside the CBOR envelope with `ok: 
 
 ## CBOR Encoding
 
-All structured data uses CBOR (RFC 8949) with these constraints:
+All structured data exchanged via `host.call` arguments and results, as well as `handle` input and output, uses CBOR (RFC 8949). This section specifies the **normative encoding rules** that implementations MUST follow to ensure interoperability.
 
-| Constraint | Value |
-|------------|-------|
-| Maps | Definite-length only |
-| Arrays | Definite-length only |
-| Strings | UTF-8 only |
+### CBOR Wire Schema (Normative)
+
+The TypeScript interfaces in this document and `api-surface.md` define the **logical structure** of messages. The following rules specify the **exact CBOR encoding** for wire transmission:
+
+#### Type Mapping
+
+| TypeScript Type | CBOR Encoding | Notes |
+|-----------------|---------------|-------|
+| `string` | Text string (major type 3) | MUST be valid UTF-8 |
+| `number` (integer) | Unsigned/signed integer (major type 0/1) | Use smallest encoding that fits |
+| `number` (float) | Float64 (0xFB prefix) | Only when fractional; prefer integers |
+| `boolean` | `true` (0xF5) or `false` (0xF4) | Simple values |
+| `null` | `null` (0xF6) | Only for explicitly nullable fields |
+| `Uint8Array` / byte array | Byte string (major type 2) | NOT array of integers |
+| `Array<T>` | Array (major type 4) | Definite-length only |
+| `object` / struct | Map (major type 5) | Text string keys, definite-length |
+
+#### Struct Encoding Rules
+
+1. **Map keys:** Structs MUST be encoded as CBOR maps with **text string keys** (major type 3). Keys MUST use `snake_case` matching the field names in the TypeScript interfaces.
+
+2. **Required fields:** All required fields MUST be present in the map. Missing required fields MUST cause decoding to fail with error code `INVALID_ARGUMENT`.
+
+3. **Optional fields:** Optional fields (marked with `?` in TypeScript) MUST be **omitted entirely** when the value is absent. Do NOT encode absent optional fields as CBOR `null`. This reduces message size and distinguishes "not provided" from "explicitly null".
+
+4. **Nullable fields:** For fields that can hold an explicit `null` value (e.g., `value: T | null`), encode the null case as CBOR `null` (0xF6). These are distinct from optional fields.
+
+5. **Unknown fields:** Decoders MUST ignore unknown map keys (forward compatibility). Encoders MUST NOT add keys not defined in the schema.
+
+#### Integer Encoding
+
+1. **Smallest encoding:** Integers MUST use the smallest CBOR encoding that fits the value:
+   - 0-23: Single byte (major type 0 + value)
+   - 24-255: Two bytes (0x18 + uint8)
+   - 256-65535: Three bytes (0x19 + uint16)
+   - 65536-4294967295: Five bytes (0x1A + uint32)
+   - Larger: Nine bytes (0x1B + uint64)
+
+2. **Signed integers:** Negative integers use major type 1 with the same size rules.
+
+3. **64-bit range:** Implementations MUST handle unsigned integers up to 2^64-1 and signed integers in the range -(2^63) to 2^63-1.
+
+4. **JavaScript interop:** Values in the range 0 to 2^53-1 are safe for JavaScript `number`. Larger values MUST be handled as BigInt or similar in JavaScript environments. The `api-surface.md` schemas indicate which fields may exceed this range.
+
+#### Binary Data Encoding
+
+1. **Byte strings:** All binary data (`Uint8Array` in TypeScript) MUST be encoded as CBOR byte strings (major type 2), NOT as arrays of integers.
+
+2. **Definite length:** Byte strings MUST use definite-length encoding (length prefix), NOT indefinite-length streaming.
+
+3. **Example:** `Uint8Array([0xDE, 0xAD, 0xBE, 0xEF])` encodes as `44 DE AD BE EF` (byte string, length 4).
+
+#### String Encoding
+
+1. **UTF-8:** All text strings MUST be valid UTF-8. Invalid UTF-8 sequences MUST cause decoding to fail.
+
+2. **Definite length:** Text strings MUST use definite-length encoding.
+
+3. **No BOM:** Text strings MUST NOT include a UTF-8 BOM (0xEF 0xBB 0xBF).
+
+#### Structural Constraints
+
+| Constraint | Requirement |
+|------------|-------------|
+| Maps | Definite-length only (no 0xBF) |
+| Arrays | Definite-length only (no 0x9F) |
+| Strings | UTF-8 only, definite-length |
 | Integers | Up to 64-bit |
-| Tags | None required (may be ignored) |
+| Tags | MUST be ignored by decoders; encoders SHOULD NOT emit tags |
+| Floating-point | Float64 (0xFB) only; Float16/Float32 MUST NOT be used |
+| Special values | `undefined` (0xF7), `break` (0xFF) MUST NOT be used |
+
+### Deterministic CBOR (Normative)
+
+All CBOR encoding in the ABI MUST follow **deterministic encoding rules** per RFC 8949 Section 4.2. This ensures that:
+- Identical logical values produce identical byte sequences
+- Hashing and signing operations are reproducible
+- Test vectors can be precisely verified
+
+**Deterministic encoding requirements:**
+
+1. **Map key ordering:** Map keys MUST be sorted in bytewise lexicographic order of their encoded CBOR representation. For text string keys (as required by this spec), this means:
+   - Shorter keys sort before longer keys
+   - Keys of equal length sort by byte comparison
+
+2. **Preferred integer encoding:** Use the smallest integer encoding (as specified above).
+
+3. **No duplicate keys:** Maps MUST NOT contain duplicate keys.
+
+4. **Preferred float encoding:** Floating-point values that can be represented exactly as integers MUST be encoded as integers instead.
+
+5. **Preferred length encoding:** Use the smallest length prefix for strings, arrays, and maps.
+
+**Example key ordering:**
+```
+Keys: ["a", "ab", "b", "aa"]
+Sorted: ["a", "b", "aa", "ab"]  // length first, then byte comparison
+CBOR: 61 61, 61 62, 62 61 61, 62 61 62
+```
+
+**Consistency with sync protocol:** These rules are consistent with the CBOR canonicalization specified in `sync-protocol.md` Section "CBOR Canonicalization (Normative)". Both the ABI and sync protocol use RFC 8949 Section 4.2 deterministic encoding.
+
+### Example Encodings
+
+**HandleInput (user_action):**
+```typescript
+{
+  type: 'user_action',
+  action: 'submit_form',
+  data: Uint8Array([0x01, 0x02, 0x03])
+}
+```
+
+CBOR (hex, deterministic key order: "data" < "type" < "action" by length-first sorting):
+```
+A3                                      // map(3)
+  64 64 61 74 61                        // text(4) "data"
+  43 01 02 03                           // bytes(3)
+  64 74 79 70 65                        // text(4) "type"
+  6B 75 73 65 72 5F 61 63 74 69 6F 6E   // text(11) "user_action"
+  66 61 63 74 69 6F 6E                  // text(6) "action"
+  6B 73 75 62 6D 69 74 5F 66 6F 72 6D   // text(11) "submit_form"
+```
+
+**Result envelope (success):**
+```typescript
+{
+  ok: true,
+  value: { message_id: "abc123", sent_at: "2025-01-15T12:00:00Z" }
+}
+```
+
+CBOR (hex, deterministic key order: "ok" < "value"):
+```
+A2                                      // map(2)
+  62 6F 6B                              // text(2) "ok"
+  F5                                    // true
+  65 76 61 6C 75 65                     // text(5) "value"
+  A2                                    // map(2) - nested, keys: "sent_at" < "message_id"
+    67 73 65 6E 74 5F 61 74             // text(7) "sent_at"
+    74 32 30 32 35 2D 30 31 2D 31 35    // text(20) "2025-01-15T12:00:00Z"
+       54 31 32 3A 30 30 3A 30 30 5A
+    6A 6D 65 73 73 61 67 65 5F 69 64    // text(10) "message_id"
+    66 61 62 63 31 32 33                // text(6) "abc123"
+```
+
+**Result envelope (error):**
+```typescript
+{
+  ok: false,
+  error: { code: "PERMISSION_DENIED", message: "Missing capability" }
+}
+```
+
+CBOR (hex, deterministic key order: "ok" < "error"; nested: "code" < "message"):
+```
+A2                                      // map(2)
+  62 6F 6B                              // text(2) "ok"
+  F4                                    // false
+  65 65 72 72 6F 72                     // text(5) "error"
+  A2                                    // map(2)
+    64 63 6F 64 65                      // text(4) "code"
+    71 50 45 52 4D 49 53 53 49 4F 4E    // text(17) "PERMISSION_DENIED"
+       5F 44 45 4E 49 45 44
+    67 6D 65 73 73 61 67 65             // text(7) "message"
+    72 4D 69 73 73 69 6E 67 20 63 61    // text(18) "Missing capability"
+       70 61 62 69 6C 69 74 79
+```
+
+### CBOR Libraries and Implementation Notes
+
+Implementations SHOULD use well-tested CBOR libraries that support deterministic encoding:
+
+- **Rust:** `ciborium` with deterministic mode, or `minicbor`
+- **JavaScript/TypeScript:** `cbor-x` with `canonical: true`, or `cborg`
+- **Go:** `fxamacker/cbor/v2` with `CanonicalEncMode`
+- **C/C++:** `libcbor` or `tinycbor`
+
+**Validation:** Implementations SHOULD validate that decoded CBOR matches expected types. Type mismatches (e.g., integer where string expected) MUST cause decoding to fail with `INVALID_ARGUMENT`.
+
+### Reference
+
+- **RFC 8949:** CBOR (Concise Binary Object Representation) - https://www.rfc-editor.org/rfc/rfc8949
+- **RFC 8949 Section 4.2:** Deterministically Encoded CBOR
 
 ## Subscription Delivery
 
@@ -342,7 +529,7 @@ Apps that need multi-step transactions should use optimistic concurrency (storag
 | Method name length | 64 bytes |
 | Key length (storage) | 256 bytes |
 | Value size (storage) | 1 MB |
-| Message size | 64 KB |
+| Message size | 1 MB (1048576 bytes) |
 | Notification title | 100 characters |
 | Notification body | 500 characters |
 | Group name | 100 characters |
@@ -353,38 +540,41 @@ Apps that need multi-step transactions should use optimistic concurrency (storag
 
 ## Method String Format
 
-Host API method names use `snake_case`:
+Host API method names use `snake_case`. Methods are categorized as **v1** (fully specified in api-surface.md) or **reserved** (registered but schema TBD):
 
-```
-storage.get
-storage.set
-storage.delete
-storage.list
-storage.shared.get
-storage.shared.set
-messaging.send
-messaging.send_group
-messaging.subscribe
-messaging.unsubscribe
-messaging.create_group
-messaging.list_groups
-contacts.list
-contacts.get
-contacts.list_app_users
-sync.create_document
-sync.get_document
-sync.apply_operation
-sync.subscribe
-sync.share
-notifications.show
-notifications.set_badge
-notifications.cancel
-system.get_time
-system.get_random
-system.get_identity
-system.get_app_info
-app.invoke
-app.share
-```
+| Method | Status | Schema Location |
+|--------|--------|-----------------|
+| `storage.get` | v1 | api-surface.md |
+| `storage.set` | v1 | api-surface.md |
+| `storage.delete` | v1 | api-surface.md |
+| `storage.list` | v1 | api-surface.md |
+| `storage.shared.get` | reserved | — |
+| `storage.shared.set` | reserved | — |
+| `messaging.send` | v1 | api-surface.md |
+| `messaging.send_group` | v1 | api-surface.md |
+| `messaging.subscribe` | v1 | api-surface.md |
+| `messaging.unsubscribe` | reserved | — |
+| `messaging.create_group` | v1 | api-surface.md |
+| `messaging.list_groups` | reserved | — |
+| `contacts.list` | v1 | api-surface.md |
+| `contacts.get` | reserved | — |
+| `contacts.list_app_users` | v1 | api-surface.md |
+| `sync.create_document` | v1 | api-surface.md |
+| `sync.get_document` | reserved | — |
+| `sync.apply_operation` | v1 | api-surface.md |
+| `sync.subscribe` | reserved | — |
+| `sync.share` | reserved | — |
+| `notifications.show` | v1 | api-surface.md |
+| `notifications.set_badge` | v1 | api-surface.md |
+| `notifications.cancel` | reserved | — |
+| `system.get_time` | v1 | api-surface.md |
+| `system.get_random` | v1 | api-surface.md |
+| `system.get_deterministic_random` | v1 | api-surface.md |
+| `system.get_identity` | v1 | api-surface.md |
+| `system.get_app_info` | v1 | api-surface.md |
+| `app.invoke` | v1 | api-surface.md |
+| `app.share` | reserved | — |
+
+**Reserved methods:** Calling a reserved method returns `{ ok: false, error: { code: "NOT_IMPLEMENTED", message: "Method reserved for future use" }}`.
 
 Unknown methods return error envelope with code `METHOD_NOT_FOUND`.

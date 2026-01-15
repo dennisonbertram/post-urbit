@@ -16,6 +16,20 @@ Recovery mechanisms allow users to regain control of their identity after losing
 | `threshold` | M-of-N key shares | Distributed trust |
 | `provider` | Third-party recovery service | Trust in provider |
 
+### V1 Conformance Requirements
+
+For Post-Urbit v1 implementations:
+
+| Method | Status | Notes |
+|--------|--------|-------|
+| `none` | REQUIRED | All implementations MUST support `none` |
+| `social` | REQUIRED | All implementations MUST support `social` recovery |
+| `device-escrow` | OPTIONAL | MAY be implemented; signature scheme identical to `social` but with single "trustee" |
+| `threshold` | OPTIONAL | MAY be implemented; Shamir's Secret Sharing library required |
+| `provider` | OPTIONAL | MAY be implemented; requires trust in third-party |
+
+**Minimum v1 Conformance:** Implementations MUST support `none` and `social` recovery methods. Users SHOULD configure at least `social` recovery for any identity they care about retaining.
+
 ## Method: `none`
 
 No recovery configured. If keys are lost, identity is lost forever.
@@ -52,11 +66,11 @@ Trusted contacts can collectively authorize recovery of the identity.
         "label": "Bob (friend)"
       },
       {
-        "iid": "i9j0k1l2...",
+        "iid": "f9j0k1m2...",
         "label": "Carol (colleague)"
       },
       {
-        "iid": "m3n4o5p6...",
+        "iid": "m3n405p6...",
         "label": "Dave (lawyer)"
       }
     ],
@@ -94,25 +108,31 @@ Trusted contacts can collectively authorize recovery of the identity.
    {
      "version": 1,
      "iid": "<unchanged>",
-     "sequence": <previous + 1>,
+     "sequence": "<previous + 1>",
      "timestamp": "<now>",
      "keys": {
        "signing": {
+         "genesis": "<base64-genesis-key-PRESERVED>",
          "current": "<new-key>",
-         "previous": null
+         "previous": null,
+         "history": []
        },
        "encryption": {
          "current": "<new-key>",
-         "previous": null
+         "previous": []
        }
      },
+     "endpoints": [],
+     "recovery": {"method": "social", "config": {"threshold": 3, "trustees": [...], "cooldown_hours": 72}},
+     "claims": {},
+     "extensions": {},
      "recovery_proof": {
        "method": "social",
        "initiated_at": "<timestamp>",
        "cooldown_expires_at": "<timestamp + cooldown_hours>",
        "status": "pending",
        "proof_data": {
-         "attestations": [ <array of trustee attestations> ]
+         "attestations": [ "<array of trustee attestations>" ]
        }
      },
      "signatures": {
@@ -121,8 +141,25 @@ Trusted contacts can collectively authorize recovery of the identity.
      }
    }
    ```
-5. **Cooldown period**: Document is "pending" for `cooldown_hours`
-6. **Activation**: After cooldown, document becomes active
+
+   **Note:** `keys.signing.genesis` is ALWAYS preserved (never changes). This allows verifiers to confirm the IID derivation even after recovery. The `encryption.previous` array starts empty after recovery since old encryption keys are typically unrecoverable.
+5. **Cooldown period**: Document is published with `status: "pending"`
+6. **Activation**: After `cooldown_expires_at`, verifiers MUST treat the document as active
+
+**Recovery Status Semantics (Normative):**
+
+The `recovery_proof.status` field is **informational only**. Verifiers MUST NOT rely on the `status` value to determine validity. Instead:
+
+- Verifiers MUST check: `now() >= cooldown_expires_at`
+- If true: document is active (regardless of `status` field value)
+- If false: document is pending (reject or queue)
+
+**Rationale:** Identity documents are immutable once published (sequence is the ordering primitive). Requiring republication to flip `status` from "pending" to "active" would:
+- Require a sequence bump for no meaningful change
+- Create race conditions if the owner publishes other updates during cooldown
+- Complicate verification unnecessarily
+
+The `status` field exists for informational purposes (e.g., UI display, debugging) but has no normative effect on verification.
 
 ### Verification
 
@@ -154,11 +191,11 @@ function verify_social_recovery(old_doc, new_doc):
 
     assert valid_attestations >= config.threshold
 
-    # Verify cooldown status
-    if new_doc.recovery_proof.status == "pending":
-        cooldown_expires = parse_time(new_doc.recovery_proof.cooldown_expires_at)
-        if now() < cooldown_expires:
-            return PENDING_COOLDOWN
+    # Verify cooldown (ALWAYS check timestamp, ignore status field)
+    # CRITICAL: Do NOT trust the status field - it is informational only
+    cooldown_expires = parse_time(new_doc.recovery_proof.cooldown_expires_at)
+    if now() < cooldown_expires:
+        return PENDING_COOLDOWN
 
     return VALID
 ```
@@ -286,26 +323,31 @@ When recovery is used, the new Identity Document includes proof:
 {
   "version": 1,
   "iid": "<unchanged>",
-  "sequence": <N+1>,
+  "sequence": "<N+1>",
   "timestamp": "<now>",
   "keys": {
     "signing": {
+      "genesis": "<base64-genesis-key-PRESERVED>",
       "current": "<new-key>",
-      "previous": null
+      "previous": null,
+      "history": []
     },
     "encryption": {
       "current": "<new-key>",
-      "previous": null
+      "previous": []
     }
   },
+  "endpoints": [ "<preserved-or-updated-endpoints>" ],
+  "recovery": { "<new-recovery-config-for-future>" },
+  "claims": {},
+  "extensions": {},
   "recovery_proof": {
     "method": "social|device-escrow|threshold|provider",
     "initiated_at": "<timestamp>",
     "cooldown_expires_at": "<timestamp>",
     "status": "pending|active|contested",
-    "proof_data": { <method-specific-proof> }
+    "proof_data": { "<method-specific-proof>" }
   },
-  "recovery": { <new-recovery-config-for-future> },
   "signatures": {
     "current": "<sig-by-new-key>",
     "previous": null
@@ -313,7 +355,10 @@ When recovery is used, the new Identity Document includes proof:
 }
 ```
 
-**Note**: `signatures.previous` is null because old key is unavailable. The `recovery_proof` substitutes for it.
+**Notes:**
+- `signatures.previous` is null because old key is unavailable. The `recovery_proof` substitutes for it.
+- `keys.signing.genesis` MUST be preserved unchanged (IID is derived from it).
+- `keys.encryption.previous` is an array (empty after recovery; old keys unrecoverable).
 
 ## Cooldown and Contestation
 
@@ -324,18 +369,56 @@ When recovery is used, the new Identity Document includes proof:
 
 ### Contestation
 
-During cooldown, if the legitimate owner still has their keys:
+**Normative (RFC-0001 §9.6):** Contestation is performed by publishing a higher-sequence IDOC update signed with the original key during the cooldown period. If valid, this supersedes the recovery attempt.
 
+**Experimental (Non-Normative for v1):** The contest document mechanism below is a proposed extension for explicit contestation signaling. Implementations MUST NOT treat contest documents as affecting identity validity in v1. The authoritative contestation method is the RFC-0001 §9.6 approach (higher-sequence IDOC update).
+
+---
+
+**[EXPERIMENTAL] Contest Document Format:**
+
+During cooldown, if the legitimate owner still has their keys they can optionally publish a contest document (in addition to the required higher-sequence IDOC):
+
+**Contest Document Format:**
 ```json
 {
   "type": "recovery_contest",
-  "iid": "<identity>",
-  "contested_sequence": <N+1>,
+  "iid": "<identity-identifier>",
+  "contested_sequence": "<N+1>",
   "reason": "I still have access to my keys",
-  "timestamp": "<now>",
-  "signature": "<sig-by-current-valid-key>"
+  "timestamp": "<RFC3339-UTC>",
+  "signature": "<base64-sig-by-current-valid-key>"
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | MUST be `"recovery_contest"` |
+| `iid` | string | IID of identity being contested |
+| `contested_sequence` | string | Decimal string of recovery document's sequence number |
+| `reason` | string | Human-readable reason (max 256 chars) |
+| `timestamp` | string | RFC3339 UTC timestamp |
+| `signature` | string | Base64 Ed25519 signature |
+
+**Contest Signature Scheme:**
+```
+signature_input = concat(
+  "post-urbit:recovery-contest:v1:",  // domain separator (31 bytes)
+  JCS(contest_doc_without_signature)
+)
+signature = Ed25519_Sign(current_signing_key, signature_input)
+```
+
+**DHT Publication:**
+- DHT Key: `SHA256("post-urbit:contest:" || iid)` (19-byte prefix + IID)
+- DHT Value: JCS-canonicalized contest document (UTF-8 JSON)
+- TTL: 168 hours (matches typical cooldown period)
+
+**Contest Verification:**
+1. Fetch the current identity document (before recovery)
+2. Verify `signature` using the current document's `keys.signing.current`
+3. Verify `contested_sequence` matches the pending recovery document's sequence
+4. Verify `timestamp` is after the recovery's `initiated_at`
 
 If valid contest received:
 - Recovery is cancelled
@@ -343,53 +426,17 @@ If valid contest received:
 
 ## Interfaces
 
+**Note:** The authoritative interface definitions are in `spec/02-identity-trust/interfaces.md`. The summary below is provided for convenience but MUST match the canonical definitions.
+
 ```typescript
+// See interfaces.md for full type definitions including:
+// - RecoveryConfig, SocialRecoveryConfig, DeviceEscrowConfig, ThresholdConfig, ProviderConfig
+// - RecoveryService interface with all recovery operations
+// - PendingRecovery, RecoveryProof, RecoveryAttestation, RecoveryResult, ContestResult
+
 interface RecoveryConfig {
   method: 'none' | 'social' | 'device-escrow' | 'threshold' | 'provider';
-  config: SocialConfig | DeviceEscrowConfig | ThresholdConfig | ProviderConfig | {};
-}
-
-interface RecoveryManager {
-  // Configure recovery method
-  configureRecovery(
-    identity: IdentityDocument,
-    config: RecoveryConfig
-  ): IdentityDocument;
-
-  // Initiate recovery (creates pending recovery)
-  initiateRecovery(
-    iid: string,
-    newSigningKey: PublicKey,
-    newEncryptionKey: PublicKey
-  ): PendingRecovery;
-
-  // Add attestation/proof to pending recovery
-  addRecoveryProof(
-    pending: PendingRecovery,
-    proof: RecoveryAttestation | EscrowSignature | ReconstructedKey
-  ): PendingRecovery;
-
-  // Check if recovery has enough proofs
-  isRecoveryReady(pending: PendingRecovery): boolean;
-
-  // Finalize and publish recovery
-  executeRecovery(
-    pending: PendingRecovery,
-    newSigningPrivate: PrivateKey
-  ): Promise<RecoveryResult>;
-
-  // Contest a pending recovery
-  contestRecovery(
-    pendingSequence: number,
-    currentSigningPrivate: PrivateKey,
-    reason: string
-  ): Promise<ContestResult>;
-
-  // Verify a recovery document
-  verifyRecovery(
-    oldDoc: IdentityDocument,
-    newDoc: IdentityDocument
-  ): RecoveryVerificationResult;
+  config: SocialRecoveryConfig | DeviceEscrowConfig | ThresholdConfig | ProviderConfig | {};
 }
 ```
 

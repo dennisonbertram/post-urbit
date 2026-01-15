@@ -250,18 +250,18 @@ Configure node behavior.
 ### Client Architecture
 
 ```typescript
-// Base API client
+// Base API client (browser sessions use HttpOnly cookie + CSRF token)
 class ApiClient {
   private baseUrl: string;
-  private authToken: string | null;
+  private csrfToken: string | null;
 
   constructor(baseUrl: string = '/admin/v1') {
     this.baseUrl = baseUrl;
-    this.authToken = null;
+    this.csrfToken = null;
   }
 
-  setAuthToken(token: string): void {
-    this.authToken = token;
+  setCsrfToken(token: string): void {
+    this.csrfToken = token;
   }
 
   async request<T>(
@@ -272,11 +272,14 @@ class ApiClient {
       headers?: Record<string, string>;
     }
   ): Promise<T> {
+    // Session cookie is sent automatically via credentials: 'same-origin'
+    // CSRF token required for state-changing methods
+    const needsCsrf = !['GET', 'HEAD', 'OPTIONS'].includes(method);
     const response = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: {
         'Content-Type': 'application/json',
-        ...(this.authToken && { 'Authorization': `Bearer ${this.authToken}` }),
+        ...(needsCsrf && this.csrfToken ? { 'X-CSRF-Token': this.csrfToken } : {}),
         ...options?.headers,
       },
       body: options?.body ? JSON.stringify(options.body) : undefined,
@@ -427,11 +430,11 @@ interface AuthState {
   needsReauth: boolean;       // For sensitive operations
 }
 
-// Session cookie settings
+// Session cookie settings (see node-daemon.md for local vs production modes)
 const SESSION_COOKIE = {
   name: 'postnode_session',
   httpOnly: true,
-  secure: true,               // Always (even localhost uses TLS)
+  secure: true,               // true for TLS; false in local HTTP mode (localhost:8080)
   sameSite: 'strict',
   maxAge: 24 * 60 * 60,       // 24 hours default
 };
@@ -459,10 +462,31 @@ Sensitive operations require fresh authentication:
 
 ```typescript
 // WebSocket for real-time updates
-const ws = new WebSocket('wss://localhost:8080/admin/v1/events');
+// Local mode: ws://localhost:8080/admin/v1/events
+// Production: wss://<host>:8443/admin/v1/events
+const ws = new WebSocket('ws://localhost:8080/admin/v1/events');
 
-// Event types
-type AdminEvent =
+// Server→client messages are wrapped in WebSocketMessage (see node-daemon.md)
+interface WebSocketMessage {
+  id: string;               // Monotonic event ID for replay
+  type: AdminEventType;     // Event type discriminator
+  timestamp: Timestamp;     // ISO 8601 timestamp
+  data: unknown;            // Event-specific payload
+}
+
+type AdminEventType =
+  | 'status_change'
+  | 'contact_online'
+  | 'message_received'
+  | 'app_installed'
+  | 'app_updated'
+  | 'app_error'
+  | 'sync_progress'
+  | 'log_entry'
+  | 'error';
+
+// Event data types (accessed via msg.data after parsing)
+type AdminEventData =
   | { type: 'status_change'; data: NodeStatus }
   | { type: 'contact_online'; data: { iid: string; online: boolean } }
   | { type: 'message_received'; data: MessageSummary }
@@ -471,11 +495,15 @@ type AdminEvent =
   | { type: 'sync_progress'; data: SyncProgress }
   | { type: 'error'; data: ErrorEvent };
 
-// React hook for events
-function useAdminEvents(handler: (event: AdminEvent) => void) {
+// React hook for events - parse the WebSocketMessage wrapper
+function useAdminEvents(handler: (event: WebSocketMessage) => void) {
   useEffect(() => {
     const ws = new WebSocket('/admin/v1/events');
-    ws.onmessage = (e) => handler(JSON.parse(e.data));
+    ws.onmessage = (e) => {
+      const msg: WebSocketMessage = JSON.parse(e.data);
+      // Access event via msg.type, msg.data, msg.id, msg.timestamp
+      handler(msg);
+    };
     return () => ws.close();
   }, [handler]);
 }

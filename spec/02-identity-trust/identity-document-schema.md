@@ -79,7 +79,8 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
     "signing": {
       "genesis": "<base64-raw-ed25519-public-key-32-bytes>",
       "current": "<base64-raw-ed25519-public-key-32-bytes>",
-      "previous": "<base64-raw-ed25519-public-key-32-bytes>|null"
+      "previous": "<base64-raw-ed25519-public-key-32-bytes>|null",
+      "history": []
     },
     "encryption": {
       "current": "<base64-raw-x25519-public-key-32-bytes>",
@@ -127,6 +128,7 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
     "bio": "<optional-short-bio>"
   },
   "extensions": { <optional-app-specific-data> },
+  "recovery_proof": null,
   "signatures": {
     "current": "<base64-signature-by-current-signing-key>",
     "previous": "<base64-signature-by-previous-signing-key>|null"
@@ -150,31 +152,44 @@ All keys and signatures use these encodings:
 
 ## Field Specifications
 
-### Required Fields
+**Wire Encoding Requirement (per RFC-0001 §6.6):** All top-level fields MUST be present in the wire encoding. This ensures byte-identical comparison for DHT TTL refresh and deterministic conflict detection.
+
+### Top-Level Fields (All Wire-Required)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `version` | uint8 | — | Schema version (must be `1`) |
+| `iid` | string | — | Identity Identifier, 32 chars Base32 lowercase |
+| `sequence` | string | — | Monotonically increasing uint64 as decimal string |
+| `timestamp` | string | — | RFC3339 UTC timestamp |
+| `keys` | object | — | Signing and encryption keys |
+| `endpoints` | array | `[]` | How to reach this identity's node (max 10) |
+| `claims` | object | `{}` | Self-asserted metadata |
+| `recovery` | object | — | Recovery configuration |
+| `extensions` | object | `{}` | App-specific extensions (max 4KB) |
+| `recovery_proof` | object\|null | `null` | Recovery proof when using recovery instead of key continuity |
+| `signatures` | object | — | Document signatures |
+
+### Nested Required Fields
 
 | Field | Type | Constraints | Description |
 |-------|------|-------------|-------------|
-| `version` | uint8 | Must be `1` | Schema version for forward compatibility |
-| `iid` | string | 32 chars, Base32 lowercase | Identity Identifier, immutable |
-| `sequence` | string (uint64) | Monotonically increasing decimal string, max "18446744073709551614" | Prevents replay, must increment on every update |
-| `timestamp` | string | RFC3339, UTC, see validation rules | When this version was created |
 | `keys.signing.genesis` | string | Base64, 32 bytes decoded | Genesis Ed25519 public key (NEVER changes) |
 | `keys.signing.current` | string | Base64, 32 bytes decoded | Current Ed25519 public key |
+| `keys.signing.previous` | string\|null | Base64, 32 bytes or null | Previous signing key (for rotation verification) |
+| `keys.signing.history` | array | Max 10 entries | Historical signing keys with validity windows |
 | `keys.encryption.current` | string | Base64, 32 bytes decoded | Current X25519 public key |
+| `keys.encryption.previous` | array | See EncryptionKeyHistory | Previous encryption keys with validity windows |
 | `signatures.current` | string | Base64, 64 bytes decoded | Ed25519 signature over canonical document |
+| `signatures.previous` | string\|null | Base64, 64 bytes or null | Signature by previous key (required during rotation) |
 
-### Optional Fields
+### Field Presence Rules
 
-| Field | Type | Constraints | Description |
-|-------|------|-------------|-------------|
-| `keys.signing.previous` | string\|null | Base64, 32 bytes | Previous signing key (for rotation verification; see note below) |
-| `keys.signing.history` | array | Max 10 entries | Previous signing keys with validity windows (for offline signature verification) |
-| `keys.encryption.previous` | array | See EncryptionKeyHistory | Previous encryption keys with validity windows (for offline peers) |
-| `endpoints` | array | Max 10 entries | How to reach this identity's node |
-| `recovery` | object | See recovery spec | Recovery configuration |
-| `claims` | object | See claims spec | Optional public metadata |
-| `extensions` | object | Max 4KB total | App-specific extensions |
-| `signatures.previous` | string\|null | Base64, 64 bytes | Signature by previous key (required during rotation) |
+- **Empty arrays** where no values exist: `"endpoints": []`, `"keys.signing.history": []`
+- **Empty objects** where no values exist: `"claims": {}`, `"extensions": {}`
+- **`null`** for truly absent optional nested fields: `"keys.signing.previous": null`, `"recovery_proof": null`
+
+Verifiers MUST reject documents missing any required top-level field.
 
 ### Signing Key History Entry
 
@@ -194,7 +209,9 @@ Previous signing keys are retained to support signature verification for message
 | `key` | string | Base64-encoded Ed25519 public key (32 bytes) |
 | `valid_from` | string | Sequence number when this key became current |
 | `valid_until` | string | Sequence number when this key was rotated out |
-| `expires_at` | timestamp | After this time, verifiers may reject signatures with this key |
+| `expires_at` | timestamp | Metadata for UI warnings and audit trails (see note below) |
+
+**Note on `expires_at`:** The `expires_at` field is metadata for UI warnings and audit trails; it MUST NOT be used as a signature rejection criterion during verification. Verifiers MUST accept valid signatures from historical keys regardless of `expires_at`. UIs MAY display warnings for signatures made with keys past their `expires_at`, but the signature itself remains valid if cryptographically correct.
 
 **Retention policy**: Keep at most **10 previous signing keys or 2 years**, whichever is less.
 
@@ -279,7 +296,7 @@ This is the canonical endpoint schema used by both Identity and Transport layers
 
 ```json
 {
-  "method": "social|device-escrow|threshold|none",
+  "method": "none|social|device-escrow|threshold|provider",
   "config": { <method-specific> }
 }
 ```
@@ -349,8 +366,11 @@ Each device publishes a Device Document, signed by the identity:
   "iid": "<base32-identity-identifier>",
   "device_name": "<optional-friendly-name>",
   "device_signing_key": "<base64-raw-ed25519-public-key-32-bytes>",
-  "device_transport_key": "<base64-raw-x25519-public-key-32-bytes>",
+  "endpoints": [
+    { "type": "direct", "host": "192.0.2.1", "port": 4433, "transport": "quic", "priority": 0 }
+  ],
   "created_at": "<RFC3339-timestamp>",
+  "updated_at": "<RFC3339-timestamp>",
   "expires_at": "<RFC3339-timestamp-optional>",
   "capabilities": ["messaging", "sync", "relay"],
   "signature_by_identity": "<base64-signature>"
@@ -363,18 +383,21 @@ Each device publishes a Device Document, signed by the identity:
 | `iid` | string | Parent identity identifier |
 | `device_name` | string? | Optional friendly name ("iPhone", "Laptop") |
 | `device_signing_key` | string | Ed25519 public key for this device |
-| `device_transport_key` | string | X25519 public key for transport-level encryption |
+| `endpoints` | Endpoint[] | How to reach this device (see layer-integration.md) |
 | `created_at` | timestamp | When this device was authorized |
+| `updated_at` | timestamp | Last modification time (used for DHT conflict resolution per RFC-0001 §12.5) |
 | `expires_at` | timestamp? | Optional expiration (for temporary devices) |
 | `capabilities` | string[] | What this device can do |
-| `signature_by_identity` | string | Ed25519 signature by identity's current signing key |
+| `signature_by_identity` | string | Ed25519 signature by identity's signing key (current or historical) |
+
+**Note:** `device_transport_key` (X25519) is not included. Transport-level key exchange uses the device signing key via the identity handshake protocol.
 
 ### Device Document Verification
 
-1. Verify `did == Base32Lower(SHA256(device_signing_key)[0:20])`
+1. Verify `did == Base32Lower(SHA256(Base64Decode(device_signing_key))[0:20])` (decode Base64 key to raw 32 bytes)
 2. Look up identity document for `iid`
-3. Verify `signature_by_identity` using identity's current signing key
-4. Check `expires_at` if present
+3. Verify `signature_by_identity` using identity's current or historical signing keys (see RFC-0001 §7.5 for key lookup order: current → previous → history; note that `expires_at` on historical keys is metadata only and MUST NOT be used as a rejection criterion)
+4. Check device document's `expires_at` if present (this is a valid rejection criterion for temporary device authorizations, distinct from signing key `expires_at`)
 
 ### Multi-Device Implications (v1: Identity-Level Sessions)
 
@@ -390,19 +413,48 @@ In v1, **messaging sessions are identity-level** (per IID pair), not per-device:
 
 **Rationale**: Identity-level sessions are simpler and avoid ratchet state synchronization complexity. Messages are addressed to an identity; the recipient's node(s) handle device fanout internally.
 
+**Multi-Device Ratchet Synchronization (v1 Normative):**
+
+In v1, the following constraint applies to ensure interoperability:
+
+- **Single Home Node Model**: For a given identity, all devices MUST connect to a single "home node" that manages the identity's ratchet state
+- The home node handles:
+  - Maintaining the single ratchet session state per (sender_iid, recipient_iid) pair
+  - Forwarding outbound messages from any connected device
+  - Distributing inbound messages to all connected devices
+- Devices do NOT directly communicate with remote peers for encrypted messaging; they proxy through their home node
+- This model avoids the need for cross-device ratchet state synchronization at the protocol level
+
+**External Peer Connectivity (v1 Normative):**
+
+External peers (different identities) MUST connect to the **Identity Document endpoints**, NOT to device-specific endpoints. The Identity Document endpoints represent the home node.
+
+- **Device documents and device indexes are for INTRA-identity use only** in v1
+- External peers look up the target identity's Identity Document from DHT and connect to its endpoints
+- Device discovery (fetching device index, device documents) is used by devices within the SAME identity to:
+  - Find their home node
+  - Find sibling devices for internal coordination
+- External peers MUST NOT enumerate or connect to device-specific endpoints
+
+See `00-shared/layer-integration.md` "Device Discovery Flow" for the complete connectivity model.
+
 **Device-specific considerations**:
-- Each device has its own transport connection
-- Device handshake proves DID ownership
-- Ratchet state is synced between devices belonging to the same identity (implementation-defined)
+- Each device has its own transport connection to the home node
+- Device handshake proves DID ownership to the home node
+- Ratchet state is managed by the home node, not individual devices
 - Sender does NOT need to maintain separate ratchets per recipient device
+
+**Note**: Future protocol versions MAY define a distributed ratchet state synchronization mechanism (e.g., via Sync streams) to support truly peer-to-peer multi-device messaging without a home node.
 
 ### Device Registration
 
 Devices are NOT listed in the main Identity Document (to keep it compact). Instead:
 
-1. Device Document is stored in DHT: key = `"device:" + did`
-2. Identity's device list is discovered via DHT query: prefix = `"devices-for:" + iid`
+1. Device Document is stored in DHT using key: `SHA256("post-urbit:device:" || did_base32)`
+2. Identity's device list is discovered via DHT query key: `SHA256("post-urbit:devices-for:" || iid_base32)`
 3. Or devices announce themselves to peers directly via 1:1 messaging
+
+See `00-shared/layer-integration.md` "DHT Key Encoding" section for normative key derivation.
 
 ### Device Revocation
 
@@ -443,13 +495,13 @@ signature = Ed25519_Sign(signing_private_key, payload)
 
 ### For New Identity (sequence = 0)
 
-1. Verify `iid == Base32Lower(SHA256(keys.signing.genesis)[0:20])`
+1. Verify `iid == Base32Lower(SHA256(Base64Decode(keys.signing.genesis))[0:20])` (decode Base64 key to raw 32 bytes)
 2. Verify `keys.signing.genesis == keys.signing.current` (genesis doc must use genesis key)
 3. Verify `signatures.current` over canonical document using `keys.signing.current`
 
 ### For Updated Identity (sequence > 0)
 
-1. Verify `iid == Base32Lower(SHA256(keys.signing.genesis)[0:20])` (genesis key must match IID)
+1. Verify `iid == Base32Lower(SHA256(Base64Decode(keys.signing.genesis))[0:20])` (genesis key must match IID)
 2. Verify `sequence > previous_known_sequence`
 3. Verify timestamp (see Timestamp Validation Rules below)
 4. Verify `signatures.current` over canonical document using `keys.signing.current`
@@ -459,7 +511,7 @@ signature = Ed25519_Sign(signing_private_key, payload)
      - This proves the rotation was authorized by the previous key holder
    - **Recovery authorization**: If `signatures.previous` is null and `recovery_proof` exists:
      - Verify recovery proof according to the method (see recovery-mechanisms.md)
-     - If `recovery_proof.status == "pending"`, treat document as provisional until cooldown expires
+     - Compute recovery finality from timestamps: if `now < recovery_proof.cooldown_expires_at`, treat document as provisional (pending cooldown). The `recovery_proof.status` field is informational only and MUST NOT be used for verification decisions.
 
 ### Timestamp Validation Rules
 
@@ -558,7 +610,11 @@ A hash-based tiebreaker allows an attacker with key access to intentionally craf
 
 ## Wire Format
 
-For network transmission, Identity Documents are encoded as:
+**For DHT storage and binary transports**, Identity Documents are encoded as the IDOC binary envelope:
+
+**For JSON control-plane messages** (e.g., RFC-0002 identity handshake), Identity Documents are transmitted as JSON objects within the message; signature verification operates on `JCS(document_without_signatures)` derived from the parsed object. See RFC-0002 §5.6 for handshake message format.
+
+**IDOC Binary Envelope:**
 
 ```
 ┌────────────────────────────────────────┐
@@ -568,9 +624,15 @@ For network transmission, Identity Documents are encoded as:
 ├────────────────────────────────────────┤
 │ Length: uint32 (big-endian)            │ 4 bytes
 ├────────────────────────────────────────┤
-│ Canonical JSON (UTF-8)                 │ <length> bytes
+│ JCS-Canonical JSON (UTF-8)             │ <length> bytes
 └────────────────────────────────────────┘
 ```
+
+**JSON Canonicalization (Normative):**
+- The JSON body MUST be serialized using JSON Canonicalization Scheme (JCS) per RFC 8785
+- Implementations MUST reject IDOC envelopes where the JSON is not JCS-canonical
+- This ensures signature verification produces consistent results across implementations
+- See RFC-0001 §6.2 for detailed canonicalization rules
 
 **Maximum document size**: 16 KB (16384 bytes)
 
@@ -584,14 +646,15 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
 ```json
 {
   "version": 1,
-  "iid": "k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a",
+  "iid": "k5xq7z4m2n3p5r6s7t2v3v4w5x2y3z7a",
   "sequence": "0",
   "timestamp": "2025-01-13T12:00:00Z",
   "keys": {
     "signing": {
       "genesis": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M",
       "current": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M",
-      "previous": null
+      "previous": null,
+      "history": []
     },
     "encryption": {
       "current": "R4tK2mN8pQ6sL1wF3vX5yZ7aB9cD0eG2hJ4kM6nP8r",
@@ -615,6 +678,7 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
     "name": "Alice"
   },
   "extensions": {},
+  "recovery_proof": null,
   "signatures": {
     "current": "kL3mN4pQ5rS6tU7vW8xY9zA0bC1dE2fG3hI4jK5lM6nO7pQ8rS9tU0vW1xY2zA3bC4dE5fG6hI7jK8lM9nO0pQr",
     "previous": null
@@ -624,7 +688,7 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
 
 **Genesis document invariants**:
 - `keys.signing.genesis == keys.signing.current` (genesis doc uses genesis key)
-- `iid == Base32Lower(SHA256(keys.signing.genesis)[0:20])`
+- `iid == Base32Lower(SHA256(Base64Decode(keys.signing.genesis))[0:20])` (decode Base64 key to raw 32 bytes)
 - `sequence == 0`
 - `signatures.previous == null`
 
@@ -633,14 +697,15 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
 ```json
 {
   "version": 1,
-  "iid": "k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a",
+  "iid": "k5xq7z4m2n3p5r6s7t2v3v4w5x2y3z7a",
   "sequence": "1",
   "timestamp": "2025-02-15T08:30:00Z",
   "keys": {
     "signing": {
       "genesis": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M",
       "current": "xN2wP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8p",
-      "previous": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M"
+      "previous": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M",
+      "history": []
     },
     "encryption": {
       "current": "aB3cD5eF7gH9iJ1kL3mN5oP7qR9sT1uV3wX5yZ7aB9c",
@@ -671,6 +736,7 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
     "name": "Alice"
   },
   "extensions": {},
+  "recovery_proof": null,
   "signatures": {
     "current": "newKeySignature0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567",
     "previous": "oldKeySignature0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567"
@@ -705,23 +771,12 @@ Raw Ed25519 pubkey is 32 bytes → 43 Base64 chars (without padding).
 
 ## Test Vectors
 
-### Test Vector 1: Genesis Document
+**Authoritative test vectors are defined in `spec/00-shared/test-vectors.md`.**
 
-```
-Signing Private Key (hex): e8f3...2a1b
-Signing Public Key (base64): MCowBQYDK2VwAyEAb7YH...
-Expected IID: k5xq7z8m9n2p3r4s5t6u7v8w9x0y1z2a
-Expected Signature (base64): MEUCIQD7...
-```
+That document provides:
+- Seed-based deterministic key derivation for reproducibility
+- Genesis document creation and signature verification
+- Key rotation with dual signatures
+- IID derivation from raw Ed25519 public keys (NOT DER/SPKI encoded)
 
-### Test Vector 2: Key Rotation
-
-```
-Old Signing Key (base64): MCowBQYDK2VwAyEA<OLD>...
-New Signing Key (base64): MCowBQYDK2VwAyEA<NEW>...
-Sequence: 1
-Expected Current Signature: <sig-by-new>
-Expected Previous Signature: <sig-by-old>
-```
-
-(Full test vectors to be generated during implementation)
+Implementers MUST validate against those vectors before claiming conformance.

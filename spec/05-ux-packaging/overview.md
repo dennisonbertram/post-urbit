@@ -89,7 +89,7 @@ The daemon exposes an HTTP API for local management and remote access (when enab
 
 | Path Prefix | Purpose | Authentication |
 |-------------|---------|----------------|
-| `/admin/*` | Node configuration, app management | Admin token (bearer) |
+| `/admin/*` | Node configuration, app management | Session cookie (browser) or Bearer token (CLI) |
 | `/apps/*` | Per-app web UI serving | Session or app token |
 | `/api/v1/*` | Programmatic API for external tools | API key or session |
 | `/health` | Health check endpoint | None (rate limited) |
@@ -97,12 +97,14 @@ The daemon exposes an HTTP API for local management and remote access (when enab
 
 ### Authentication Methods
 
-| Method | Use Case |
-|--------|----------|
-| Admin token | CLI tools, automation |
-| Session cookie | Browser-based admin UI |
-| API key | External integrations |
-| App token | Per-app delegated access |
+| Method | Use Case | Details |
+|--------|----------|---------|
+| Session cookie | Browser-based Admin UI | HttpOnly cookie + CSRF protection |
+| Admin token | CLI tools, automation | Bearer header, no session |
+| API key | External integrations | Bearer header, scoped permissions |
+| App token | Per-app delegated access | Scoped to specific app |
+
+See `node-daemon.md` § Authentication for the complete specification including CSRF protection and session management.
 
 ## App Distribution Model
 

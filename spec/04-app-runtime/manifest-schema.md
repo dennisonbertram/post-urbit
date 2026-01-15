@@ -16,7 +16,7 @@ Every application includes a manifest file (`manifest.json`) that declares metad
     "description": "A brief description of what the app does",
     "author": {
       "name": "Developer Name",
-      "iid": "k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a",
+      "iid": "k5xq7z4m2n3p5r6s7t2v3v4w5x2y3z7a",
       "url": "https://example.com"
     },
     "license": "MIT",
@@ -383,6 +383,21 @@ interface ValidationWarning {
 }
 ```
 
+### Forward Compatibility (Normative)
+
+**Unknown fields MUST be ignored for semantic validation:** Validators MUST ignore unrecognized top-level and nested fields in `manifest.json` for purposes of semantic validation. This enables:
+- Future manifest extensions (e.g., `distribution` fields for app stores)
+- Cross-version compatibility as the schema evolves
+
+Validators MAY emit warnings for unknown fields but MUST NOT reject manifests solely due to unknown fields.
+
+**Signature Verification MUST preserve all fields:** When computing manifest hashes for signature verification (see `app-distribution.md`), implementations MUST:
+1. Parse `manifest.json` into a representation that preserves all fields (including unknown fields)
+2. Apply JCS canonicalization to the complete JSON object
+3. Hash the canonical bytes including all fields
+
+This ensures that signatures remain valid even when verified by implementations unaware of new extension fields. The "ignore unknown fields" rule applies only to semantic validation, NOT to hash computation.
+
 ### Validation Error Codes
 
 | Code | Description |
@@ -397,19 +412,37 @@ interface ValidationWarning {
 
 ### Signature Verification
 
-```typescript
-function verifyManifestSignature(manifest: Manifest): boolean {
-  // 1. Extract signature (but keep files)
-  const { signature, ...rest } = manifest;
+**Note:** Package signing uses the SIGNATURE file approach. See `05-ux-packaging/app-distribution.md` for authoritative details.
 
-  // 2. Canonicalize manifest including files (JCS - RFC 8785)
-  const canonical = canonicalize(rest);
+```typescript
+interface SignatureFile {
+  author_iid: string;
+  timestamp: string;  // RFC3339 UTC
+  signature: string;  // Base64 Ed25519 signature
+  signed_manifest_hash: string;  // "sha256:<hex>" format
+}
+
+function verifyPackageSignature(
+  signatureFile: SignatureFile,
+  manifestJson: object,  // Parsed manifest.json (will be JCS-canonicalized)
+  authorSigningKey: Uint8Array
+): boolean {
+  // 1. JCS-canonicalize manifest and compute hash
+  const canonicalBytes = jcsCanonicalizeToUtf8(manifestJson);
+  const actualHash = 'sha256:' + hex(sha256(canonicalBytes));
+  if (actualHash !== signatureFile.signed_manifest_hash) {
+    return false;
+  }
+
+  // 2. Extract hex hash for payload (strip "sha256:" prefix)
+  const manifestHashHex = signatureFile.signed_manifest_hash.replace('sha256:', '');
+  const payload = `postapp-signature-v1:${manifestHashHex}:${signatureFile.timestamp}`;
 
   // 3. Verify Ed25519 signature
   return ed25519Verify(
-    base64Decode(signature.public_key),
-    utf8Encode(canonical),
-    base64Decode(signature.signature)
+    authorSigningKey,
+    utf8Encode(payload),
+    base64Decode(signatureFile.signature)
   );
 }
 
@@ -417,13 +450,11 @@ function verifyPackageIntegrity(
   manifest: Manifest,
   packageFiles: Map<string, Uint8Array>
 ): boolean {
-  // 1. Verify manifest signature first
-  if (!verifyManifestSignature(manifest)) {
-    return false;
-  }
+  // NOTE: Signature verification should be done first via verifyPackageSignature()
+  // This function verifies file hashes only
 
-  // 2. Verify each file hash
-  for (const [path, expectedHash] of Object.entries(manifest.files)) {
+  // 2. Verify each file hash (manifest.files.hashes is Record<path, "sha256:hex">)
+  for (const [path, expectedHash] of Object.entries(manifest.files.hashes)) {
     const fileData = packageFiles.get(path);
     if (!fileData) {
       return false;  // Missing file
@@ -437,8 +468,8 @@ function verifyPackageIntegrity(
 
   // 3. Verify no extra files (optional, for strict mode)
   // for (const path of packageFiles.keys()) {
-  //   if (!(path in manifest.files) && path !== 'manifest.json') {
-  //     return false;  // Unexpected file
+  //   if (!(path in manifest.files.hashes) && path !== 'manifest.json' && path !== 'SIGNATURE') {
+  //     return false;  // Unexpected file (SIGNATURE is required but not self-hashed)
   //   }
   // }
 
@@ -471,15 +502,15 @@ function verifyPackageIntegrity(
     "api_version": "1"
   },
   "files": {
-    "main.wasm": "sha256:a1b2c3d4e5f6789..."
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "public_key": "...",
-    "signature": "..."
+    "hashes": {
+      "main.wasm": "sha256:a1b2c3d4e5f6789..."
+    },
+    "total_size": 65536
   }
 }
 ```
+
+**Note:** Signature is in separate SIGNATURE file, NOT embedded in manifest.json. See `05-ux-packaging/app-distribution.md`.
 
 ### Chat Application Manifest
 
@@ -493,7 +524,7 @@ function verifyPackageIntegrity(
     "description": "A simple peer-to-peer chat application",
     "author": {
       "name": "Chat Developers",
-      "iid": "k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a",
+      "iid": "k5xq7z4m2n3p5r6s7t2v3v4w5x2y3z7a",
       "url": "https://chat.example.com"
     },
     "license": "Apache-2.0",
@@ -555,15 +586,13 @@ function verifyPackageIntegrity(
     "api_version": "1"
   },
   "files": {
-    "chat.wasm": "sha256:b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M...",
-    "assets/icon.png": "sha256:kL3mN4pQ5rS6tU7vW8xY9zA0bC1dE2fG3hI4jK5lM6n...",
-    "assets/screenshot1.png": "sha256:O7pQ8rS9tU0vW1xY2zA3bC4dE5fG6hI7jK8lM9nO0pQ...",
-    "assets/screenshot2.png": "sha256:rS6tU7vW8xY9zA0bC1dE2fG3hI4jK5lM6nO7pQ8rS9t..."
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "public_key": "b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M",
-    "signature": "kL3mN4pQ5rS6tU7vW8xY9zA0bC1dE2fG3hI4jK5lM6nO7pQ8rS9tU0vW1xY2zA3bC4dE5fG6hI7jK8lM9nO0pQr"
+    "hashes": {
+      "chat.wasm": "sha256:b7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M...",
+      "assets/icon.png": "sha256:kL3mN4pQ5rS6tU7vW8xY9zA0bC1dE2fG3hI4jK5lM6n...",
+      "assets/screenshot1.png": "sha256:O7pQ8rS9tU0vW1xY2zA3bC4dE5fG6hI7jK8lM9nO0pQ...",
+      "assets/screenshot2.png": "sha256:rS6tU7vW8xY9zA0bC1dE2fG3hI4jK5lM6nO7pQ8rS9t..."
+    },
+    "total_size": 2097152
   }
 }
 ```

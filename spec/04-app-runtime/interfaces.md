@@ -4,6 +4,29 @@
 
 This document specifies the complete TypeScript interface for the App Runtime layer, including app lifecycle management, capability enforcement, and the host bridge.
 
+## Wire Format vs TypeScript Convention
+
+| Context | Convention | Example |
+|---------|------------|---------|
+| **On-disk manifest.json** | snake_case | `manifest_version`, `initial_pages`, `background_task` |
+| **TypeScript interfaces** | camelCase | `manifestVersion`, `initialPages`, `backgroundTask` |
+
+**Normative rule**: The on-disk `manifest.json` format uses snake_case (as shown in manifest-schema.md). TypeScript interfaces use camelCase for developer ergonomics. Implementations MUST:
+1. Parse snake_case from `manifest.json` when loading packages
+2. Map to camelCase in TypeScript runtime structures
+3. Use the snake_case manifest format for package signature verification
+
+**Field mapping** (TypeScript → Manifest JSON):
+- `manifestVersion` → `manifest_version`
+- `initialPages` → `initial_pages`
+- `maximumPages` → `maximum_pages`
+- `userAction` → `user_action`
+- `backgroundTask` → `background_task`
+- `appStart` → `app_start`
+- `totalSize` → `total_size`
+- `minVersion` → `min_version`
+- `maxVersion` → `max_version`
+
 ## Core Types
 
 ```typescript

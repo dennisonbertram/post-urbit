@@ -53,11 +53,11 @@ interface RelayInfo {
   expiresAt: Timestamp;
 }
 
-// Connection state
+// Connection state (see quic-integration.md for state machine)
 type ConnectionState =
   | 'connecting'
   | 'handshaking'
-  | 'authenticated'
+  | 'connected'    // Fully authenticated, ready for application use (CONNECTED in QUIC diagram)
   | 'closed';
 
 interface Connection {
@@ -73,17 +73,33 @@ interface Connection {
 }
 
 // Device document type (see 02-identity-trust/identity-document-schema.md § Device Identifiers)
+// Wire format uses snake_case (device_signing_key, created_at, etc.)
+// TypeScript uses camelCase per language convention
 interface DeviceDocument {
   version: number;
   did: DeviceIdentifier;
   iid: IdentityIdentifier;
   deviceName?: string;
   deviceSigningKey: PublicKey;
-  deviceTransportKey: PublicKey;
+  endpoints: Endpoint[];  // Required for device discovery
   createdAt: Timestamp;
+  updatedAt: Timestamp;   // Required for DHT conflict resolution (RFC-0001 §12.5)
   expiresAt?: Timestamp;
   capabilities: string[];
   signatureByIdentity: Signature;
+}
+
+// Endpoint type (normative definition, shared between Identity and Transport layers)
+// Wire format uses snake_case; TypeScript uses camelCase
+interface Endpoint {
+  type: 'direct' | 'relay' | 'mailbox';
+  host: string;                       // Hostname, IPv4, or [IPv6]
+  port: number;                       // Service port (1-65535). UDP for quic, TCP for https.
+  priority: number;                   // REQUIRED: 0-255, lower = higher priority
+  transport?: 'quic' | 'https';       // Default: quic. Determines port protocol (UDP/TCP).
+  relayId?: IdentityIdentifier;       // For relay endpoints (relay's IID)
+  observedAt?: Timestamp;             // When this endpoint was last verified
+  metadata?: Record<string, string>;
 }
 
 interface StreamInfo {
@@ -95,20 +111,8 @@ interface StreamInfo {
   bytesWritten: number;
 }
 
+// Note: 'bulk' (0x05) is reserved for v2 and MUST NOT be used by v1 implementations (see RFC-0002 §6.6)
 type StreamType = 'control' | 'identity' | 'message' | 'sync' | 'bulk';
-
-// Endpoint type (normative definition in 02-identity-trust/identity-document-schema.md)
-// This is the canonical schema shared between Identity and Transport layers
-interface Endpoint {
-  type: 'direct' | 'relay' | 'mailbox';
-  host: string;                       // Hostname, IPv4, or [IPv6]
-  port: number;                       // Service port (1-65535). UDP for quic, TCP for https.
-  priority: number;                   // 0-255, lower = higher priority
-  transport?: 'quic' | 'https';       // Default: quic. Determines port protocol (UDP/TCP).
-  relayId?: IdentityIdentifier;       // For relay endpoints (relay's IID)
-  observedAt?: Timestamp;             // When this endpoint was last verified
-  metadata?: Record<string, string>;
-}
 ```
 
 ## Transport Service Interface
@@ -120,6 +124,19 @@ interface TransportService {
   /**
    * Connect to a peer by IID.
    * Resolves endpoints from identity document and attempts connection.
+   *
+   * **v1 Connectivity Model:**
+   * - When connecting to an EXTERNAL peer (different identity), implementations
+   *   SHOULD resolve endpoints from the peer's Identity Document, NOT from
+   *   device-specific documents. The `did` field in PeerId is ignored for
+   *   external peer connections in v1.
+   * - When connecting to your OWN identity's devices (intra-identity), the
+   *   `did` field MAY be used to connect to a specific device endpoint.
+   * - External peers connect to the home node (Identity Document endpoints);
+   *   the home node handles device fanout internally.
+   *
+   * See identity-document-schema.md "Single Home Node Model" for rationale.
+   *
    * @param peerId Peer's identity (and optionally device) identifier
    * @param options Connection options
    * @returns Authenticated connection
@@ -249,7 +266,12 @@ interface TransportService {
     remotePort: number;
   }>;
 
-  /** Emitted when session ticket is issued (for 0-RTT resumption) */
+  /**
+   * Emitted when session ticket is issued (for 0-RTT resumption).
+   * Reserved for TLS-layer session resumption only. MUST NOT carry Post-Urbit
+   * protocol bytes in 0-RTT early data. Application-level handshake resumption
+   * is not supported in v1. See RFC-0002 §8.3-§8.4.
+   */
   onSessionTicket: Event<{
     peerId: IdentityIdentifier;
     ticket: Uint8Array;
@@ -306,6 +328,9 @@ interface ConnectOptions {
   expectedSequence?: SequenceNumber;
 
   // Session ticket for 0-RTT resumption
+  // Reserved for TLS-layer session resumption only. MUST NOT carry Post-Urbit
+  // protocol bytes in 0-RTT early data. Application-level handshake resumption
+  // is not supported in v1. See RFC-0002 §8.3-§8.4.
   sessionTicket?: Uint8Array;
 }
 
@@ -421,10 +446,11 @@ interface RelayServer {
 interface RelayAllocation {
   allocationId: string;
   relay: RelayServer;
-  // NOTE: allocatedAddress/Port refer to the CLIENT's bound address (their NAT mapping),
-  // NOT a relay-assigned port. The relay uses a stable port model (see relay-protocol.md).
-  boundAddress: string;     // Client's observed public IP
-  boundPort: number;        // Client's observed public port (NAT mapping)
+  // NOTE: binding is established on first UDP packet, NOT at HTTPS allocation time (RFC-0002 §7.10)
+  bindingState: 'pending' | 'bound';
+  // boundAddress/boundPort are only available after first UDP packet establishes binding
+  boundAddress?: string;    // Client's observed public IP (set when bindingState == 'bound')
+  boundPort?: number;       // Client's observed public port (set when bindingState == 'bound')
   expiresAt: Timestamp;
   token: string;            // Base64url, 16 bytes
 }
@@ -462,6 +488,30 @@ interface DiscoveryService {
   lookupPeer(iid: IdentityIdentifier): Promise<PeerEndpoints | null>;
 
   /**
+   * Fetch full identity document from DHT.
+   * Required by Identity layer for verification, recovery, and caching.
+   * @param iid Peer's identity identifier
+   * @returns Full IdentityDocument or null if not found
+   */
+  fetchIdentity(iid: IdentityIdentifier): Promise<IdentityDocument | null>;
+
+  /**
+   * Low-level DHT get (returns multiple values for conflict resolution).
+   * Keys are 32 raw bytes (SHA256 output).
+   * @param key DHT key (32 bytes)
+   * @returns All values from reachable nodes
+   */
+  dhtGet(key: Uint8Array): Promise<DhtResult[]>;
+
+  /**
+   * Low-level DHT put.
+   * @param key DHT key (32 bytes)
+   * @param value Value to store (typically IDOC envelope)
+   * @param options TTL in seconds
+   */
+  dhtPut(key: Uint8Array, value: Uint8Array, options: { ttl: number }): Promise<void>;
+
+  /**
    * Subscribe to peer endpoint updates.
    * @param iid Peer to watch
    * @param callback Called when endpoints change
@@ -470,6 +520,14 @@ interface DiscoveryService {
     iid: IdentityIdentifier,
     callback: (endpoints: PeerEndpoints) => void
   ): Unsubscribe;
+}
+
+// DhtResult is defined in spec/00-shared/layer-integration.md (authoritative)
+// Duplicated here for Transport-layer completeness; MUST match shared definition
+interface DhtResult {
+  value: Uint8Array;           // Raw value bytes (e.g., IDOC envelope)
+  source: string;              // Source node identifier
+  receivedAt: number;          // Unix timestamp in milliseconds
 }
 
 interface DiscoveryServer {
@@ -598,15 +656,21 @@ const TRANSPORT_CONSTANTS = {
   // Relay
   RELAY_ALLOCATION_LIFETIME_SECONDS: 3600,
   MAX_RELAY_ALLOCATIONS: 5,
-  RELAY_PACKET_MAX_SIZE: 1500,
+  // PURL header is 44 bytes (RFC-0002 §7.4)
+  PURL_HEADER_SIZE: 44,
+  // Relay path: inner QUIC payload uses standard 1200 for QUIC Initial compatibility
+  RELAY_MAX_INNER_PAYLOAD: 1200,
+  // Total outer UDP datagram: 1244 bytes (may exceed IPv6 min MTU; see RFC-0002 §7.4)
+  RELAY_PACKET_MAX_SIZE: 1244,
 
   // Streams
+  // Note: BULK (0x05) is reserved for v2 and MUST NOT be used by v1 implementations (see RFC-0002 §6.6)
   STREAM_TYPES: {
     CONTROL: 0x01,
     IDENTITY: 0x02,
     MESSAGE: 0x03,
     SYNC: 0x04,
-    BULK: 0x05,
+    BULK: 0x05,  // Reserved for v2 - MUST NOT be used in v1
   },
 } as const;
 ```

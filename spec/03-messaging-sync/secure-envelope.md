@@ -51,9 +51,28 @@ Secure Envelope:
 │ Signature (over everything above)      │ 64 bytes
 └────────────────────────────────────────┘
 
-Minimum size: 4 + 1 + 1 + 20 + 20 + 16 + 2 + 0 + 12 + 4 + 16 + 64 = 160 bytes
+Minimum size: 4 + 1 + 1 + 20 + 20 + 16 + 2 + 21 + 12 + 4 + 16 + 64 = 181 bytes
+  (21-byte Group extension is smallest; see extension registry below)
+  - Group extension (21 bytes): min = 181 bytes
+  - Initial/Ephemeral extension (33 bytes): min = 193 bytes
+  - Ratchet extension (41 bytes): min = 201 bytes
 Maximum size: 1 MB (1048576 bytes)
+
+**Note:** Exactly one header extension is REQUIRED (see RFC-0003 §3.4). Reject envelopes with ext_len == 0.
 ```
+
+### Header Extension Validation (Normative)
+
+Per RFC-0003 §3.2 and §3.4, receivers MUST validate header extensions:
+
+1. **Maximum length:** ext_len MUST NOT exceed 1024 bytes
+2. **Non-zero:** ext_len == 0 is invalid (reject envelope)
+3. **Fixed size by type:** The ext_len field MUST equal the expected size for the extension type:
+   - Type 0x00 (Initial): 33 bytes exactly
+   - Type 0x01 (Ratchet): 41 bytes exactly
+   - Type 0x02 (Group): 21 bytes exactly
+4. **Unknown types:** ext_len MUST NOT exceed 1024 even for future extension types
+5. **Reject mismatches:** Envelopes where ext_len does not match the expected size for a known extension type MUST be rejected
 
 ### Header Extension (AAD)
 
@@ -86,6 +105,8 @@ Group Header Extension:
 └────────────────────────────────────────┘
 Total: 21 bytes
 ```
+
+**Sender Key Iteration is 1-indexed:** First encrypted group message uses iteration=1. Value 0 is invalid and MUST be rejected. See RFC-0003 §3.4.4 and group-messaging.md for full specification.
 
 For initial key exchange (no ratchet yet):
 ```
@@ -151,6 +172,8 @@ For subsequent messages in an established session:
 1. Use Double Ratchet protocol as specified in `double-ratchet.md`
 2. Message key derived from sending chain via `kdf_chain_step()`
 3. Include ratchet parameters in Ratchet Header Extension (type 0x01)
+
+**Initial→Ratchet Transition (Normative):** The transition from initial (0x00) to ratchet (0x01) messages MUST follow RFC-0003 §3.4.2. The initial message consumes chain step N=0; the first ratchet message MUST use N=1.
 
 ### Group Messages (Type 0x02)
 
@@ -231,6 +254,8 @@ The encrypted payload is structured JSON:
 
 **Note on `sync_op`**: Sync operations normally flow over the dedicated sync stream (0x04) which is NOT PUSE-wrapped. However, when sync data must be delivered via mailbox (e.g., recipient offline), it may be encapsulated in PUSE with type `sync_op`. Recipients must validate the sync operation's own signature in addition to the PUSE envelope signature.
 
+**`sync_op` Wire Format (Normative):** For `sync_op` message type encoding, see RFC-0003 §8.2. The `cbor` field contains ONLY the CBOR data (excludes the 1-byte sync_type prefix).
+
 ### Text Message Content
 
 ```json
@@ -270,7 +295,7 @@ The encrypted payload is structured JSON:
   "type": "receipt",
   "content": {
     "receipt_type": "delivered|read",
-    "message_ids": ["msg-1", "msg-2"]
+    "message_ids": ["550e8400-e29b-41d4-a716-446655440000", "550e8400-e29b-41d4-a716-446655440001"]
   }
 }
 ```
@@ -306,41 +331,40 @@ Receivers MUST parse in this order:
 ### Signature Verification
 
 ```python
-def verify_envelope(envelope: bytes, sender_doc: IdentityDocument,
-                    envelope_timestamp: Timestamp = None) -> bool:
+def verify_envelope(envelope: bytes, sender_doc: dict,
+                    envelope_timestamp: str = None) -> bool:
     """
     Verify PUSE envelope signature against sender's identity document.
 
     For delayed messages (e.g., mailbox delivery), envelope_timestamp helps
     select the appropriate historical signing key.
+
+    Note: sender_doc uses snake_case field names (on-wire JSON format).
     """
     # Extract signature (last 64 bytes)
     signature = envelope[-64:]
     signed_data = envelope[:-64]
 
+    # Access signing keys (snake_case JSON)
+    signing = sender_doc["keys"]["signing"]
+
     # 1. Try current signing key
-    if ed25519_verify(sender_doc.keys.signing.current, signed_data, signature):
+    if ed25519_verify(signing["current"], signed_data, signature):
         return True
 
     # 2. Try previous signing key (for recent rotations)
-    if sender_doc.keys.signing.previous:
-        if ed25519_verify(sender_doc.keys.signing.previous, signed_data, signature):
+    if signing.get("previous"):
+        if ed25519_verify(signing["previous"], signed_data, signature):
             return True
 
-    # 3. Try historical signing keys (for delayed messages, see identity-document-schema.md)
-    # This is important for mailbox-delivered messages that may be days old
-    for hist_entry in sender_doc.keys.signing.get('history', []):
-        # If we have a timestamp, only try keys that were valid at that time
-        if envelope_timestamp:
-            # Check if key was active at envelope time
-            if hist_entry.valid_from <= envelope_timestamp <= hist_entry.expires_at:
-                if ed25519_verify(hist_entry.key, signed_data, signature):
-                    return True
-        else:
-            # Without timestamp, try all non-expired keys
-            if hist_entry.expires_at > now():
-                if ed25519_verify(hist_entry.key, signed_data, signature):
-                    return True
+    # 3. Try ALL historical signing keys (for delayed messages, see identity-document-schema.md)
+    # This is important for mailbox-delivered messages that may be days old.
+    # IMPORTANT: Try ALL keys regardless of expires_at. Accept if any verifies.
+    # The expires_at field is metadata for UI warnings only; it MUST NOT cause
+    # signature rejection.
+    for hist_entry in signing.get("history", []):
+        if ed25519_verify(hist_entry["key"], signed_data, signature):
+            return True
 
     return False
 ```
@@ -348,7 +372,11 @@ def verify_envelope(envelope: bytes, sender_doc: IdentityDocument,
 **Key lookup order:**
 1. `keys.signing.current` - Most common case
 2. `keys.signing.previous` - Recent rotation
-3. `keys.signing.history[]` - For delayed/archived messages
+3. `keys.signing.history[]` - Try ALL keys regardless of `expires_at`
+
+**Note on history entry fields:**
+- `valid_from` / `valid_until`: Sequence numbers (not timestamps) - useful for auditing which IDOC version used this key
+- `expires_at`: Metadata for UI warnings only (e.g., "this message was signed with an old key"); it MUST NOT cause signature rejection
 
 See `02-identity-trust/identity-document-schema.md` § Signing Key History Entry for the history entry format and retention policy (10 keys or 2 years).
 
@@ -477,9 +505,11 @@ DIDs are used for:
 ## Test Vectors
 
 See `00-shared/test-vectors.md` for authoritative, reproducible test vectors including:
-- PUSE envelope construction
+- IID/DID derivation (for sender/recipient identifiers)
 - Signature generation and verification
 - X3DH key agreement for initial messages
+
+**Note:** For PUSE envelope testing, implementers should construct envelopes using the Alice/Bob identities from test-vectors.md and validate encryption/decryption round-trips.
 
 ## Implementation Notes
 

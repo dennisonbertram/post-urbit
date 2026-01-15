@@ -110,10 +110,12 @@ Where:
 ### 3.3 Validation
 
 Implementations MUST:
-- Reject IIDs containing characters outside `0-9a-hj-km-np-tv-z`
+- Validate IIDs against the regex: `^[0-9a-hjkmnpqrstvwxyz]{32}$`
 - Reject IIDs not exactly 32 characters long
-- Normalize to lowercase before comparison
-- Reject non-canonical forms (e.g., uppercase)
+- Reject IIDs containing any uppercase characters (no normalization on wire)
+- Reject IIDs containing excluded characters (`i`, `l`, `o`, `u`)
+
+**Note:** User-interface input MAY normalize to lowercase before transmission, but wire validation MUST reject non-lowercase IIDs.
 
 ### 3.4 Reference Implementation
 
@@ -195,7 +197,9 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
 }
 ```
 
-### 4.2 Required Fields
+### 4.2 Semantically Required Fields
+
+These fields MUST have meaningful values (cannot use defaults):
 
 | Field | Type | Constraints | Description |
 |-------|------|-------------|-------------|
@@ -208,7 +212,9 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
 | `keys.encryption.current` | string | Base64, 32 bytes decoded | Current encryption key |
 | `signatures.current` | string | Base64, 64 bytes decoded | Current key signature |
 
-### 4.3 Optional Fields
+### 4.3 Optional Fields (Wire-Required with Defaults)
+
+These fields MAY use default values but MUST be present in the wire encoding (see §6.6):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -222,6 +228,8 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
 | `recovery_proof` | object\|null | null | Present during recovery |
 | `signatures.previous` | string\|null | null | Required during key rotation |
 
+**IMPORTANT:** Per §6.6, all fields listed in §4.2 and §4.3 MUST be present in the wire encoding, even when using default values. This ensures byte-identical comparison for DHT operations. Verifiers MUST reject documents missing any of these fields.
+
 ### 4.4 Signing Key History Entry
 
 ```json
@@ -232,6 +240,14 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
   "expires_at": "<RFC3339-timestamp>"
 }
 ```
+
+**Field types (all JSON strings, for JCS consistency):**
+| Field | JSON Type | Format |
+|-------|-----------|--------|
+| `key` | string | Base64 (no padding), 43 chars |
+| `valid_from` | string | Decimal uint64 per §6.4 (e.g., `"5"`) |
+| `valid_until` | string | Decimal uint64 per §6.4 (e.g., `"8"`) |
+| `expires_at` | string | RFC 3339 timestamp (e.g., `"2026-01-01T00:00:00Z"`) |
 
 Retention policy: At most 10 entries or 2 years, whichever is less.
 
@@ -332,6 +348,8 @@ The JSON inside IDOC envelopes (Section 11) MUST also be JCS-canonicalized for t
 - Numbers in shortest form (no trailing zeros, no leading zeros except single `0`)
 - Strings use minimal escaping
 - `null`, `true`, `false` as literals
+- **No duplicate object keys at any level** - implementations MUST reject documents containing duplicate member names before signature verification
+- Strict RFC 8259 JSON only (no NaN, Infinity, or comments)
 
 ### 6.4 Sequence Number Constraints
 
@@ -351,13 +369,19 @@ All Base64-encoded values MUST:
 
 Implementations MUST reject documents with padded or non-canonical Base64.
 
-### 6.6 Optional Fields and Defaults
+### 6.6 Field Presence and Defaults (Normative)
 
-Defaults listed in Section 4.3 are semantic only. When verifying signatures:
-- Implementations MUST NOT materialize defaults before verification
-- The signature is over the literal JSON as received
+**Wire Encoding Requirement:** For v1 IDOC, all fields defined in §4.1 and §4.2 MUST be present in the wire encoding, even if they have default values. This ensures:
+- Byte-identical comparison for DHT TTL refresh (§12.2)
+- Deterministic conflict detection for same-sequence documents (§14.6)
 
-Producers SHOULD include fields with their default values for maximum compatibility.
+**Required Fields:** Producers MUST include:
+- All top-level fields (`version`, `iid`, `sequence`, `timestamp`, `keys`, `endpoints`, `claims`, `recovery`, `extensions`, `recovery_proof`, `signatures`)
+- Empty arrays where no values exist (e.g., `"endpoints": []`)
+- Empty objects where no values exist (e.g., `"claims": {}`, `"extensions": {}`)
+- `null` for truly absent optional nested fields (e.g., `"keys.signing.previous": null`, `"recovery_proof": null`)
+
+**Verification:** Verifiers MUST reject documents missing any required top-level field. The signature is over the literal JSON as received—no field materialization before verification.
 
 ### 6.7 Example
 
@@ -365,14 +389,15 @@ Input document (before signatures):
 ```json
 {
   "version": 1,
-  "iid": "lbvhmpzmqkzrudc55hok54a6ajq6a6c3",
+  "iid": "b1anasr5h0bj3832xqexwy0f0987e1xb",
   "sequence": "0",
   "timestamp": "2025-01-15T00:00:00Z",
   "keys": {
     "signing": {
       "genesis": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
       "current": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
-      "previous": null
+      "previous": null,
+      "history": []
     },
     "encryption": {
       "current": "jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc",
@@ -382,14 +407,17 @@ Input document (before signatures):
   "endpoints": [],
   "recovery": {"method": "none", "config": {}},
   "claims": {"name": "Alice"},
-  "extensions": {}
+  "extensions": {},
+  "recovery_proof": null
 }
 ```
 
 JCS output (single line, no whitespace):
 ```
-{"claims":{"name":"Alice"},"endpoints":[],"extensions":{},"iid":"lbvhmpzmqkzrudc55hok54a6ajq6a6c3","keys":{"encryption":{"current":"jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc","previous":[]},"signing":{"current":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","genesis":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","previous":null}},"recovery":{"config":{},"method":"none"},"sequence":"0","timestamp":"2025-01-15T00:00:00Z","version":1}
+{"claims":{"name":"Alice"},"endpoints":[],"extensions":{},"iid":"b1anasr5h0bj3832xqexwy0f0987e1xb","keys":{"encryption":{"current":"jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc","previous":[]},"signing":{"current":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","genesis":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","history":[],"previous":null}},"recovery":{"config":{},"method":"none"},"recovery_proof":null,"sequence":"0","timestamp":"2025-01-15T00:00:00Z","version":1}
 ```
+
+**Note:** The above JCS includes all required fields per §6.6. The signature must be computed over this complete canonical form.
 
 ## 7. Signature Verification
 
@@ -407,9 +435,21 @@ JCS output (single line, no whitespace):
 3. Verify timestamp is not more than 24 hours in the future
 4. Compute signed payload: `b"post-urbit:idoc:v1:" || JCS(doc_without_signatures)`
 5. Verify `signatures.current` over signed payload using `keys.signing.current`
-6. **Authorization** (one of the following):
-   - **Key continuity**: `signatures.previous` valid with previous known signing key
-   - **Recovery**: `recovery_proof` validates per Section 9
+6. **Authorization** (depends on signing key change):
+   - **Key unchanged**: If `keys.signing.current` equals the previously accepted document's `keys.signing.current` (byte-identical), no additional authorization is required. The valid `signatures.current` is sufficient.
+   - **Key changed**: If `keys.signing.current` differs from the previously accepted document's signing key, ONE of the following is required:
+     - **Key continuity**: `signatures.previous` is present and valid when verified with the previous document's `keys.signing.current`
+     - **Recovery**: `recovery_proof` validates per Section 9 (in which case `signatures.previous` SHOULD be null)
+
+**Key Continuity Binding (Normative):**
+
+When verifying a key rotation (where `keys.signing.current` differs from the previously accepted document):
+
+1. `keys.signing.previous` MUST be present (not null)
+2. `keys.signing.previous` MUST be byte-identical (as Base64 strings) to the previously accepted document's `keys.signing.current`
+3. `signatures.previous` MUST verify over the new document's canonical form using the key in `keys.signing.previous`
+
+Verifiers MUST reject documents that fail any of these checks. This ensures unbroken chain-of-custody from genesis to current.
 
 ### 7.3 Bootstrap Verification (First Encounter)
 
@@ -463,12 +503,67 @@ def bootstrap_verify(iid: str) -> IdentityDocument:
 | Tolerance | SHOULD allow ~5 minutes for clock skew |
 | Format | RFC 3339 with `Z` suffix (UTC), fractional seconds OPTIONAL |
 
+**Timestamp Comparison Algorithm (Normative):** For monotonicity checks, implementations MUST:
+1. Parse both timestamps as RFC 3339 into UTC instants (calendar time)
+2. Compare the instants numerically (not as strings)
+3. Reject documents with unparseable timestamps
+
+String comparison MUST NOT be used because fractional seconds can cause incorrect ordering (e.g., `"2025-01-15T00:00:00.1Z"` is lexicographically less than `"2025-01-15T00:00:00Z"` despite representing a later instant).
+
 ### 7.5 Signature Verification for Historical Keys
 
 When verifying delayed messages (e.g., mailbox delivery), check keys in order:
-1. `keys.signing.current`
-2. `keys.signing.previous` (if present)
-3. `keys.signing.history[]` entries (match by validity window)
+1. Try `keys.signing.current`
+2. Try `keys.signing.previous` (if present)
+3. Try ALL `keys.signing.history[]` entries (regardless of `expires_at`)
+4. Accept if ANY key verifies
+
+**Note:** The `expires_at` field is metadata for UI warnings and audit; it MUST NOT be used as a verification rejection criterion.
+
+**Verification Algorithm (Normative):**
+
+**Key Encoding:** All key fields in identity documents are Base64-encoded raw 32-byte Ed25519 public keys. Implementations MUST decode these to raw bytes before use in Ed25519 verification.
+
+**Note:** This algorithm is used for PUSE envelope signature verification (see RFC-0003 §3.7). PUSE envelope signatures are **raw 64-byte values** in the binary envelope, not Base64-encoded. The caller extracts the raw signature bytes from the envelope and passes them directly to this function.
+
+```python
+def verify_with_key_selection(sender_idoc: dict, signed_data: bytes, signature: bytes) -> bool:
+    """
+    Verify a signature using the sender's current or historical signing keys.
+
+    Args:
+        sender_idoc: Sender's identity document (JSON dict)
+        signed_data: Data that was signed (raw bytes)
+        signature: Raw 64-byte Ed25519 signature (NOT Base64-encoded)
+
+    Returns:
+        True if signature verifies with any valid key
+    """
+    assert len(signature) == 64, "Signature must be raw 64 bytes"
+    signing = sender_idoc["keys"]["signing"]
+
+    # 1. Try current key first (most common case)
+    current_key = base64_decode(signing["current"])  # 32 bytes
+    if ed25519_verify(current_key, signed_data, signature):
+        return True
+
+    # 2. Try previous key (recent rotation)
+    if signing.get("previous"):
+        previous_key = base64_decode(signing["previous"])  # 32 bytes
+        if ed25519_verify(previous_key, signed_data, signature):
+            return True
+
+    # 3. Try ALL historical keys (no expires_at filtering)
+    # expires_at is for UI warnings and audit only, not verification rejection
+    for hist_entry in signing.get("history", []):
+        hist_key = base64_decode(hist_entry["key"])  # 32 bytes
+        if ed25519_verify(hist_key, signed_data, signature):
+            return True
+
+    return False  # No matching key found
+```
+
+**Important:** The `valid_from` and `valid_until` fields are **sequence numbers** (IDOC versions), not timestamps. They are useful for auditing which IDOC version used a key, but MUST NOT be used for message verification filtering because PUSE message timestamps are not available until after decryption. Similarly, `expires_at` MUST NOT be used for verification rejection - it is purely informational metadata for UI display and audit logging.
 
 ## 8. Key Rotation
 
@@ -478,14 +573,20 @@ When verifying delayed messages (e.g., mailbox delivery), check keys in order:
 2. Construct new document with `sequence = N + 1`
 3. Set `keys.signing.previous = keys.signing.current` (from old doc)
 4. Set `keys.signing.current = K_new`
-5. Sign with BOTH keys:
-   - `signatures.current = Sign(K_new_private, JCS(doc))`
-   - `signatures.previous = Sign(K_old_private, JCS(doc))`
+5. Sign with BOTH keys using the standard signature input (see §6.1):
+   ```
+   signature_input = "post-urbit:idoc:v1:" || JCS(doc_without_signatures)
+   signatures.current = Ed25519_Sign(K_new_private, signature_input)
+   signatures.previous = Ed25519_Sign(K_old_private, signature_input)
+   ```
+   Where `doc_without_signatures` is the document JSON with the `signatures` field removed.
 6. Publish new document
 
 ### 8.2 Verification
 
 ```python
+DOMAIN_SEPARATOR = b"post-urbit:idoc:v1:"  # 19 bytes (see §6)
+
 def verify_rotation(old_doc, new_doc):
     # IID must be unchanged
     assert new_doc['iid'] == old_doc['iid']
@@ -493,17 +594,20 @@ def verify_rotation(old_doc, new_doc):
     # Sequence must increase
     assert int(new_doc['sequence']) > int(old_doc['sequence'])
 
+    # Build signature input with domain separator (see §6, §7)
+    canonical_json = jcs(without_signatures(new_doc))
+    signature_input = DOMAIN_SEPARATOR + canonical_json
+
     # Current signature must be valid
-    canonical = jcs(without_signatures(new_doc))
     current_key = decode_base64(new_doc['keys']['signing']['current'])
-    assert ed25519_verify(current_key, canonical,
+    assert ed25519_verify(current_key, signature_input,
                           decode_base64(new_doc['signatures']['current']))
 
     # If signing key changed, previous signature required
     if new_doc['keys']['signing']['current'] != old_doc['keys']['signing']['current']:
         assert new_doc['signatures']['previous'] is not None
         old_key = decode_base64(old_doc['keys']['signing']['current'])
-        assert ed25519_verify(old_key, canonical,
+        assert ed25519_verify(old_key, signature_input,
                               decode_base64(new_doc['signatures']['previous']))
 
     return True
@@ -586,7 +690,7 @@ When recovery is used, `signatures.previous` is null. Instead, `recovery_proof` 
     "method": "social",
     "initiated_at": "<RFC3339>",
     "cooldown_expires_at": "<RFC3339>",
-    "status": "pending|active",
+    "status": "pending|active|contested",
     "proof_data": {
       "attestations": [<attestation>, <attestation>, ...]
     }
@@ -595,6 +699,8 @@ When recovery is used, `signatures.previous` is null. Instead, `recovery_proof` 
 ```
 
 ### 9.5 Social Recovery Verification
+
+**Key Encoding:** As with all verification algorithms, keys and signatures are Base64-encoded. Decode to raw bytes before Ed25519 operations.
 
 ```python
 def verify_social_recovery(old_doc, new_doc) -> bool:
@@ -621,8 +727,9 @@ def verify_social_recovery(old_doc, new_doc) -> bool:
         # Verify trustee signature (fetch trustee's current identity)
         trustee_doc = fetch_identity(att['trustee_iid'])
         payload = domain_sep("post-urbit:recovery-attestation:v1:", att)
-        if not ed25519_verify(trustee_doc['keys']['signing']['current'],
-                              payload, att['signature']):
+        trustee_key = base64_decode(trustee_doc['keys']['signing']['current'])  # 32 bytes
+        att_signature = base64_decode(att['signature'])  # 64 bytes
+        if not ed25519_verify(trustee_key, payload, att_signature):
             continue
 
         # Count only once per trustee
@@ -659,11 +766,23 @@ Emergency key change with explicit revocation:
   "effective_at": "<RFC3339>",
   "replacement_document": {<new-idoc>},
   "signatures": {
-    "by_revoked_key": "<sig>|null",
-    "by_new_key": "<sig>"
+    "by_current_signing_key": "<sig>|null",
+    "by_new_signing_key": "<sig>"
   },
   "recovery_proof": null
 }
+```
+
+**Revocation Signature Scheme:**
+
+```
+revocation_without_sigs = revocation with "signatures" field removed
+signature_input = concat(
+  "post-urbit:key-revocation:v1:",   // domain separator (29 bytes)
+  JCS(revocation_without_sigs)       // canonicalized JSON
+)
+by_current_signing_key = Ed25519_Sign(old_signing_key, signature_input)
+by_new_signing_key = Ed25519_Sign(new_signing_key, signature_input)
 ```
 
 ### 10.2 Identity Revocation
@@ -680,6 +799,17 @@ Permanent identity abandonment (terminal state):
   "successor_iid": "<optional-new-iid>",
   "signature": "<sig-by-current-key>"
 }
+```
+
+**Identity Revocation Signature Scheme:**
+
+```
+revocation_without_sig = revocation with "signature" field removed
+signature_input = concat(
+  "post-urbit:identity-revocation:v1:",   // domain separator (34 bytes)
+  JCS(revocation_without_sig)              // canonicalized JSON
+)
+signature = Ed25519_Sign(current_signing_key, signature_input)
 ```
 
 ## 11. Wire Format
@@ -710,6 +840,8 @@ Maximum `length` value: 16384 (16 KB).
 
 ### 11.4 Parsing Algorithm
 
+**Trailing Bytes Rule (Normative):** Parsers MUST reject IDOC envelopes where `len(data) != 9 + length`. Trailing bytes after the JSON payload indicate corruption, padding attacks, or protocol confusion, and MUST NOT be silently ignored.
+
 ```python
 def parse_idoc_envelope(data: bytes) -> dict:
     # Check minimum size
@@ -726,6 +858,9 @@ def parse_idoc_envelope(data: bytes) -> dict:
     length = int.from_bytes(data[5:9], 'big')
     assert length <= 16384, "Document too large"
     assert len(data) >= 9 + length, "Truncated"
+
+    # MUST reject trailing bytes (normative)
+    assert len(data) == 9 + length, "Trailing bytes not allowed"
 
     # Parse JSON
     json_bytes = data[9:9+length]
@@ -754,8 +889,8 @@ def dht_key(prefix: str, identifier: str) -> bytes:
     return hashlib.sha256(data).digest()
 
 # Examples:
-# Identity: dht_key("post-urbit:identity:", "lbvhmpzmqkzrudc55hok54a6ajq6a6c3")
-# Devices:  dht_key("post-urbit:devices-for:", "lbvhmpzmqkzrudc55hok54a6ajq6a6c3")
+# Identity: dht_key("post-urbit:identity:", "b1anasr5h0bj3832xqexwy0f0987e1xb")
+# Devices:  dht_key("post-urbit:devices-for:", "b1anasr5h0bj3832xqexwy0f0987e1xb")
 # Device:   dht_key("post-urbit:device:", "abc123...")
 ```
 
@@ -769,15 +904,23 @@ TTL:       86400 seconds (24 hours)
 
 **No separate DHT signature is required.** The IDOC envelope contains `signatures.current` which is validated using the embedded `keys.signing.current`. DHT nodes verify this internal signature before storing.
 
+**TTL Refresh Semantics:** Identity owners SHOULD refresh the current identity record before TTL expiry. DHT nodes MUST accept byte-identical writes as TTL refresh operations (idempotent writes extend TTL without requiring sequence increment). This allows liveness without requiring sequence bumps for purely administrative refresh.
+
 ### 12.3 Genesis Document Storage
 
-For chain verification support, implementations SHOULD also store genesis documents:
+For chain verification support, implementations MUST also store genesis documents:
 
 ```
 DHT Key:   SHA256("post-urbit:genesis:" || iid)
 DHT Value: IDOC envelope of sequence=0 document
-TTL:       Forever (or very long, e.g., 365 days)
+TTL:       86400 seconds (24 hours), same as identity records
 ```
+
+**Refresh Semantics:**
+- Genesis records are immutable but require periodic refresh before TTL expiry
+- DHT nodes MUST reject writes to genesis keys if content differs from stored value
+- DHT nodes MUST accept byte-identical writes as TTL refresh operations
+- This preserves immutability while ensuring liveness
 
 ### 12.4 Device Index Record
 
@@ -787,6 +930,16 @@ DHT Value: JCS-canonical device index JSON (Section 13.4)
 TTL:       86400 seconds (24 hours)
 ```
 
+**Usage Context (v1 Normative):** Device index records are for **intra-identity device management only**. External peers (different identities) MUST NOT use device index records for connection establishment. External peers connect via Identity Document endpoints (the home node). See `spec/02-identity-trust/identity-document-schema.md` "Single Home Node Model" and `spec/00-shared/layer-integration.md` "Device Discovery Flow" for the complete connectivity model.
+
+**Conflict Resolution (Normative):** If multiple valid device index records exist (possible during DHT convergence):
+1. Parse `updated_at` as RFC3339 instants (UTC)
+2. Select the record with the **latest** `updated_at` timestamp
+3. If timestamps are equal, compare JCS-canonical JSON bytes lexicographically; smaller bytes win
+4. If records differ but have same `updated_at` and same JCS bytes: impossible (same bytes = same record)
+
+DHT nodes SHOULD store only the winning record after conflict resolution.
+
 ### 12.5 Device Document Record
 
 ```
@@ -795,15 +948,97 @@ DHT Value: JCS-canonical device document JSON (Section 13.2)
 TTL:       86400 seconds (24 hours)
 ```
 
-### 12.6 DHT Verification Rules
+**Usage Context (v1 Normative):** Device document records are for **intra-identity device management only**. External peers (different identities) MUST NOT use device document endpoints for connection establishment. See §12.4 for rationale.
 
-DHT nodes MUST verify before storing:
+**Conflict Resolution (Normative):** If multiple valid device document records exist (possible during DHT convergence):
+1. Parse `updated_at` as RFC3339 instants (UTC)
+2. Select the record with the **latest** `updated_at` timestamp
+3. If timestamps are equal, compare JCS-canonical JSON bytes lexicographically; smaller bytes win
 
-1. **Identity documents**: Parse IDOC envelope, validate `signatures.current` using `keys.signing.current`
-2. **Device documents**: Fetch parent identity, validate `signature_by_identity` using identity's signing key
-3. **Device index**: Fetch identity, validate `signature` using identity's signing key
+Device document updates (e.g., endpoint changes) MUST increment `updated_at` to a strictly later timestamp than the previous version. DHT nodes SHOULD store only the winning record after conflict resolution.
 
-Nodes MUST reject documents that fail signature verification.
+### 12.6 Device Revocation DHT Record
+
+```
+DHT Key:   SHA256("post-urbit:device-revocation:" || did)
+DHT Value: JCS-canonical device revocation JSON (Section 13.5)
+TTL:       31536000 seconds (365 days, same as key revocations)
+```
+
+**Publication Rules:**
+- When revoking a device, the identity owner MUST publish the device revocation record to DHT
+- DHT nodes MUST verify the `signature_by_identity` field using the identity's signing key (current, previous, or historical per §7.5 key lookup order). See §13.5 for the signature scheme.
+- DHT nodes MUST accept the revocation if `iid` matches the identity document's IID
+
+**Lookup Rules:**
+- Peers MUST check for device revocation before accepting connections from a device
+- Query `SHA256("post-urbit:device-revocation:" || did)` where `did` is the 32-char Crockford Base32 lowercase DID
+- If a valid revocation record exists, reject the device connection
+
+**Multiple Records:** If multiple revocations exist for the same DID (due to network partitions), accept the one with the earliest `revoked_at` timestamp. Timestamps MUST be compared by parsing RFC3339 to UTC instants and comparing instants; do NOT compare as strings.
+
+### 12.7 Key/Identity Revocation DHT Records
+
+Identity and key revocations (defined in §10) are stored in DHT:
+
+```
+DHT Key:   SHA256("post-urbit:revocation:" || iid)
+DHT Value: JCS-canonical revocation JSON (Section 10)
+TTL:       31536000 seconds (365 days)
+```
+
+**Publication Rules:**
+- When revoking an identity or key, the owner MUST publish the revocation record to DHT
+- DHT nodes MUST verify the `signature` field using the IID's signing key (current or historical per §7.5 key lookup order)
+- DHT nodes MUST verify the revocation `iid` matches the DHT key derivation
+
+**Lookup Rules:**
+- Peers SHOULD check for identity/key revocation before establishing new connections
+- Query `SHA256("post-urbit:revocation:" || iid)` where `iid` is the 32-char Crockford Base32 lowercase IID
+- If a valid revocation record exists, treat the identity/key as revoked
+
+**Multiple Records:** If multiple revocations exist for the same IID (due to network partitions), accept the one with the earliest `effective_at` timestamp (security-conservative: earliest revocation wins). Timestamps MUST be compared by parsing RFC3339 to UTC instants and comparing instants; do NOT compare as strings.
+
+**Note:** This covers identity-level and key-level revocations. Device revocations use a separate DHT key prefix (§12.6). See `spec/02-identity-trust/revocation.md` for revocation document schemas.
+
+### 12.8 DHT Verification Rules
+
+**Verification (New Identity Records)**: DHT nodes MUST verify identity documents before storing:
+1. Parse IDOC envelope
+2. Verify `iid == derive_iid(Base64Decode(keys.signing.genesis))` (binds IID to genesis key)
+3. Verify `signatures.current` using `keys.signing.current` (with domain separation)
+4. Only store if all checks pass
+
+**Update Authorization (Existing Identity Records)**: When a DHT node receives a document for an IID it already stores:
+1. Parse the new IDOC envelope and verify basic signature (steps 1-3 above)
+2. If incoming document is **byte-identical** to stored document: Accept as TTL refresh (extend TTL, no further checks needed)
+3. Compare `sequence` numbers: new sequence MUST be > existing sequence
+4. If `keys.signing.current` differs from the stored document's key (key rotation):
+   - **Key Continuity Binding** (per §7.2): `keys.signing.previous` MUST be present (not null) in the new document AND MUST equal the stored document's `keys.signing.current` (byte-identical Base64 string comparison)
+   - Verify `signatures.previous` is present in the new document AND valid using the stored document's `keys.signing.current`
+   - OR verify `recovery_proof` is valid (see recovery-mechanisms.md), in which case key continuity binding is not required
+5. If all checks pass, replace stored document with new document
+6. If checks fail, reject the update (keep existing document)
+
+**Rationale:** Step 2 (byte-identical refresh) allows identity owners to maintain DHT liveness without incrementing sequence numbers for purely administrative refresh operations. This mirrors genesis refresh semantics (§12.3).
+
+**Genesis Document Verification**: For sequence 0 (genesis) documents, DHT nodes MUST verify:
+1. Parse IDOC envelope and verify basic signature (steps 1-4 above)
+2. Verify `sequence == "0"`
+3. Verify `keys.signing.genesis == keys.signing.current` (genesis invariant per §7.1)
+4. Verify `keys.signing.previous == null`
+5. Only store if all checks pass
+
+**Genesis Key Storage**: When storing under `post-urbit:genesis:` DHT key:
+- MUST reject writes where `sequence != "0"`
+- MUST reject writes that violate genesis invariants (steps 2-4 above)
+- MUST reject writes if existing genesis record exists with different content (genesis is immutable; only byte-identical refresh allowed per §12.3)
+
+**Device Documents**: Fetch parent identity document for `iid`, validate `signature_by_identity` using identity's current or historical signing keys. Try ALL history[] entries regardless of `expires_at`. The `expires_at` field is UI metadata only. See §13.3 for signature scheme and §7.5 for key lookup order.
+
+**Device Index**: Fetch identity document, validate `signature` using identity's signing key. See §13.5 for signature scheme.
+
+Nodes MUST reject documents that fail any verification check.
 
 ## 13. Device Documents
 
@@ -824,17 +1059,38 @@ DID = CrockfordBase32Lower(SHA256(device_signing_public_key_raw)[0:20])
   "iid": "<parent-identity-iid>",
   "device_name": "<optional-friendly-name>",
   "device_signing_key": "<base64-ed25519-pubkey>",
-  "device_transport_key": "<base64-x25519-pubkey>",
+  "endpoints": [
+    { "type": "direct", "host": "192.0.2.1", "port": 4433, "transport": "quic", "priority": 0 }
+  ],
   "created_at": "<RFC3339>",
+  "updated_at": "<RFC3339>",
   "expires_at": "<optional-RFC3339>",
   "capabilities": ["messaging", "sync"],
   "signature_by_identity": "<base64-sig-by-identity-signing-key>"
 }
 ```
 
-### 13.3 Signature Authority
+| Field | Required | Description |
+|-------|----------|-------------|
+| `endpoints` | Yes | Array of network endpoints for reaching this device |
+| `updated_at` | Yes | RFC3339 timestamp of last update; used for DHT conflict resolution (§12.5) |
+
+See `00-shared/layer-integration.md` for Endpoint schema definition.
+
+### 13.3 Device Document Signature Scheme
 
 Device documents are signed by the **identity's signing key** (not the device key). This proves the identity owner authorized the device.
+
+**Device Document Signature Scheme (v1):**
+
+```
+device_doc_without_signature = device document JSON with "signature_by_identity" field removed
+signature_input = concat(
+  "post-urbit:device-doc:v1:",           // domain separator (25 bytes)
+  JCS(device_doc_without_signature)       // canonicalized JSON
+)
+signature_by_identity = Ed25519_Sign(identity_signing_key, signature_input)
+```
 
 ### 13.4 Device Index
 
@@ -842,12 +1098,25 @@ Device documents are signed by the **identity's signing key** (not the device ke
 {
   "iid": "<identity-iid>",
   "devices": [
-    {"did": "<did-1>", "name": "Phone", "last_seen": "<RFC3339>"},
-    {"did": "<did-2>", "name": "Laptop", "last_seen": "<RFC3339>"}
+    {"did": "<did-1>", "device_name": "Phone", "last_seen": "<RFC3339>"},
+    {"did": "<did-2>", "device_name": "Laptop", "last_seen": "<RFC3339>"}
   ],
   "updated_at": "<RFC3339>",
   "signature": "<base64-sig-by-identity-signing-key>"
 }
+```
+
+**Note:** Device index entries MUST use `device_name` (matching the device document field name, not `name`).
+
+**Device Index Signature Scheme (v1):**
+
+```
+device_index_without_signature = device index JSON with "signature" field removed
+signature_input = concat(
+  "post-urbit:device-index:v1:",          // domain separator (27 bytes)
+  JCS(device_index_without_signature)     // canonicalized JSON
+)
+signature = Ed25519_Sign(identity_signing_key, signature_input)
 ```
 
 ### 13.5 Device Revocation
@@ -861,6 +1130,17 @@ Device documents are signed by the **identity's signing key** (not the device ke
   "reason": "lost|stolen|compromised|decommissioned",
   "signature_by_identity": "<base64-sig>"
 }
+```
+
+**Device Revocation Signature Scheme:**
+
+```
+revocation_without_sig = revocation with "signature_by_identity" field removed
+signature_input = concat(
+  "post-urbit:device-revocation:v1:",   // domain separator (32 bytes)
+  JCS(revocation_without_sig)            // canonicalized JSON
+)
+signature_by_identity = Ed25519_Sign(identity_signing_key, signature_input)
 ```
 
 ## 14. Security Considerations
@@ -908,10 +1188,7 @@ e3c7a72049df8c4623a2d4b61db1d76a6c3ea2efaae7b87e9d46acfb8f519bb4
 Signing public key (base64):
 48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q
 
-SHA-256 hash (full 32 bytes, hex):
-586a763f2c82b31a0c5de9dcaef01e0261e0785bb0a3c4d5e6f708192a3b4c5d
-
-First 20 bytes (hex):
+SHA-256 hash (first 20 bytes used for IID):
 586a763f2c82b31a0c5de9dcaef01e0261e0785b
 
 Crockford Base32 encoding:
@@ -929,9 +1206,9 @@ b1anasr5h0bj3832xqexwy0f0987e1xb
 
 ### 15.2 Document Signature
 
-Canonical JSON (no signatures field):
+Canonical JSON (no signatures field, includes all required fields per §6.6):
 ```
-{"claims":{"name":"Alice"},"endpoints":[],"extensions":{},"iid":"lbvhmpzmqkzrudc55hok54a6ajq6a6c3","keys":{"encryption":{"current":"jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc","previous":[]},"signing":{"current":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","genesis":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","previous":null}},"recovery":{"config":{},"method":"none"},"sequence":"0","timestamp":"2025-01-15T00:00:00Z","version":1}
+{"claims":{"name":"Alice"},"endpoints":[],"extensions":{},"iid":"b1anasr5h0bj3832xqexwy0f0987e1xb","keys":{"encryption":{"current":"jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc","previous":[]},"signing":{"current":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","genesis":"48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q","history":[],"previous":null}},"recovery":{"config":{},"method":"none"},"recovery_proof":null,"sequence":"0","timestamp":"2025-01-15T00:00:00Z","version":1}
 ```
 
 Signing seed (hex):
@@ -939,15 +1216,7 @@ Signing seed (hex):
 033cb5927062653e49646945878c1a40c6c9ee4694c93c10886d45d320028f40
 ```
 
-Signature (hex):
-```
-1d554c30226ba0a37ce77c91fecea19026a7203136fdb52dd6cc7982ed2cbda61f9e366b9a78cd65d6fb22372ee452df96272afb8e020cf0392d234011507603
-```
-
-Signature (base64):
-```
-HVVMMCJroKN853yR/s6hkCanIDE2/bUt1sx5gu0svaYfnjZrmnjNZdb7Ijcu5FLflicq+44CDPA5LSNAEVB2Aw
-```
+**Note:** For the normative expected signature value, see Test Vector 2 (Identity Document Signature) in `spec/00-shared/test-vectors.md`. That test vector provides the concrete hex and Base64 signature that implementations MUST produce for the given inputs.
 
 ### 15.3 Second Identity (Bob)
 
@@ -959,75 +1228,51 @@ Signing public key (base64):
 tfNVmKALCRQw77Z/JFbRW66/BEWwj+psJ3eK+HheTKs
 
 IID:
-2fofcybfpmka5vf7ge737exo7crgnxsw
+2f0fcybfpmka5vf7ge737ex07crgnxsw
 ```
 
 ### 15.4 Complete Genesis Document
 
-```json
-{
-  "version": 1,
-  "iid": "lbvhmpzmqkzrudc55hok54a6ajq6a6c3",
-  "sequence": "0",
-  "timestamp": "2025-01-15T00:00:00Z",
-  "keys": {
-    "signing": {
-      "genesis": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
-      "current": "48enIEnfjEYjotS2HbHXamw+ou+q57h+nUas+49Rm7Q",
-      "previous": null
-    },
-    "encryption": {
-      "current": "jdmI5R2jZOhbfJyXakw9MA1YrVEyEOXok+V+yiqxyzc",
-      "previous": []
-    }
-  },
-  "endpoints": [],
-  "recovery": {"method": "none", "config": {}},
-  "claims": {"name": "Alice"},
-  "extensions": {},
-  "signatures": {
-    "current": "HVVMMCJroKN853yR/s6hkCanIDE2/bUt1sx5gu0svaYfnjZrmnjNZdb7Ijcu5FLflicq+44CDPA5LSNAEVB2Aw",
-    "previous": null
-  }
-}
-```
+**Note:** For the complete genesis document with normative signature value, see Test Vector 2 (Identity Document Signature) in `spec/00-shared/test-vectors.md`. The test vector provides the canonical JSON structure with computed signature that implementations MUST match.
 
 ### 15.5 DHT Key Derivation
 
+DHT keys are computed as `SHA256(prefix || identifier)`. The prefix MUST include the trailing colon.
+
 ```
-IID: lbvhmpzmqkzrudc55hok54a6ajq6a6c3
+IID: b1anasr5h0bj3832xqexwy0f0987e1xb
 
 Identity DHT key input (UTF-8 bytes):
-"post-urbit:identity:lbvhmpzmqkzrudc55hok54a6ajq6a6c3"
+  Prefix: "post-urbit:identity:" (20 bytes, includes trailing colon)
+  IID:    "b1anasr5h0bj3832xqexwy0f0987e1xb" (32 bytes)
+  Full:   "post-urbit:identity:b1anasr5h0bj3832xqexwy0f0987e1xb" (52 bytes)
 
-Identity DHT key (SHA-256, hex):
-9f4a8b2c1d3e5f6071829a0b4c5d6e7f8091a2b3c4d5e6f7081929a0b1c2d3e4
+Identity DHT key: SHA-256 of input above (compute: `sha256("post-urbit:identity:b1anasr5h0bj3832xqexwy0f0987e1xb")`)
 
-Genesis DHT key input:
-"post-urbit:genesis:lbvhmpzmqkzrudc55hok54a6ajq6a6c3"
+Other DHT key inputs for this identity:
+  Genesis: "post-urbit:genesis:b1anasr5h0bj3832xqexwy0f0987e1xb"
+  Devices: "post-urbit:devices-for:b1anasr5h0bj3832xqexwy0f0987e1xb"
 
-Devices-for DHT key input:
-"post-urbit:devices-for:lbvhmpzmqkzrudc55hok54a6ajq6a6c3"
+**Note:** DHT keys are computed by applying SHA-256 to the input strings above. Implementers should verify their IID derivation matches Test Vector 1 in `spec/00-shared/test-vectors.md` before computing DHT keys.
 ```
 
 ### 15.6 Wire Envelope
 
-Complete IDOC envelope for genesis document (hex):
+IDOC envelope structure (illustrative):
 
 ```
 Header (9 bytes):
-49444f43 01 000001e3
+49444f43 01 <length-u32-be>
 
 Where:
-  49444f43 = "IDOC" magic
-  01 = version 1
-  000001e3 = length 483 (big-endian uint32)
+  49444f43 = "IDOC" magic (4 bytes)
+  01 = version 1 (1 byte)
+  <length-u32-be> = length of following JSON body (4 bytes, big-endian uint32)
 
-Full envelope (hex):
-49444f43010000???[JCS-canonical JSON bytes]
+Full envelope: `IDOC` magic (4 bytes) + version (1 byte) + length (4 bytes, big-endian) + JCS-canonical JSON bytes.
 ```
 
-**Note**: Exact length depends on JCS output. The JSON MUST be JCS-canonical for the full document including signatures.
+**Note**: The length field depends on the JCS-canonical JSON output. The JSON MUST be JCS-canonical for the full document including signatures. Implementers should validate their JCS canonicalization against Test Vector 2 (Document Signature) in `spec/00-shared/test-vectors.md`.
 
 ### 15.7 Domain-Separated Signature Payload
 

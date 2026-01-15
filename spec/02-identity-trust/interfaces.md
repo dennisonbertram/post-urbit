@@ -44,12 +44,23 @@ type Timestamp = string;
 // Monotonically increasing version number
 // On-wire: decimal string to support uint64 safely (JSON numbers lose precision >2^53)
 // In TypeScript: use string or bigint, never number
-type SequenceNumber = string;  // Decimal string, e.g., "0", "42", "18446744073709551614"
+type SequenceNumber = string;  // Decimal string, e.g., "0", "42", "18446744073709551615"
 ```
 
 ## Identity Document Types
 
 ```typescript
+/**
+ * WIRE ENCODING REQUIREMENT (RFC-0001 §6.6):
+ * ALL fields defined below MUST be present in the wire encoding, even when using
+ * default values. This ensures byte-identical comparison for DHT operations.
+ *
+ * - Empty arrays where no values exist (e.g., endpoints: [])
+ * - Empty objects where no values exist (e.g., claims: {}, extensions: {})
+ * - null for truly absent optional nested fields (e.g., recoveryProof: null)
+ *
+ * Verifiers MUST reject documents missing any required field.
+ */
 interface IdentityDocument {
   version: 1;
   iid: IdentityIdentifier;
@@ -61,8 +72,8 @@ interface IdentityDocument {
   claims: Claims;
   extensions: Record<string, unknown>;
   signatures: SignatureSet;
-  // Present only when update was authorized via recovery (not key continuity)
-  recoveryProof?: RecoveryProofEmbed;
+  // Wire-required per RFC-0001 §6.6: null when absent, object when present
+  recoveryProof: RecoveryProofEmbed | null;
 }
 
 // Recovery proof embedded in identity document
@@ -96,13 +107,24 @@ interface KeySet {
   signing: {
     genesis: PublicKey;           // IMMUTABLE - IID derived from this, never changes
     current: PublicKey;
-    previous: PublicKey | null;
+    previous: PublicKey | null;   // Wire-required per RFC-0001 §6.6: null if no previous key
+    // Wire-required per RFC-0001 §6.6: empty array if no history (max 10 entries)
+    history: SigningKeyHistory[];
   };
   encryption: {
     current: PublicKey;
     // Support multiple previous keys for offline peers
+    // Wire-required per RFC-0001 §6.6: empty array if no previous keys
     previous: EncryptionKeyHistory[];
   };
+}
+
+// Previous signing keys with validity windows (for mailbox message verification)
+interface SigningKeyHistory {
+  key: PublicKey;
+  validFrom: SequenceNumber;      // Sequence when this key became current
+  validUntil: SequenceNumber;     // Sequence when this key was rotated out
+  expiresAt: Timestamp;           // UI/audit metadata only; MUST NOT be used to reject signatures
 }
 
 // Previous encryption keys with validity windows
@@ -128,6 +150,37 @@ interface Endpoint {
 interface RecoveryConfig {
   method: 'none' | 'social' | 'device-escrow' | 'threshold' | 'provider';
   config: SocialRecoveryConfig | DeviceEscrowConfig | ThresholdConfig | ProviderConfig | {};
+}
+
+// Recovery configuration types (see recovery-mechanisms.md for semantics)
+interface SocialRecoveryConfig {
+  threshold: number;                    // M trustees required (2-10)
+  trustees: SocialTrustee[];           // N trustees (max 10)
+  cooldownHours: number;               // Waiting period before recovery executes
+}
+
+interface SocialTrustee {
+  iid: IdentityIdentifier;             // Trustee's IID
+  label: string;                       // Human-readable label (for owner's reference)
+}
+
+interface DeviceEscrowConfig {
+  escrowKeyHash: string;               // SHA256 of escrow public key (hex)
+  deviceLabel: string;                 // Human-readable device description
+}
+
+interface ThresholdConfig {
+  threshold: number;                   // M shares required to reconstruct
+  totalShares: number;                 // N total shares
+  shareCommitments: string[];          // SHA256 hash of each share (hex)
+  recoveryKeyHash: string;             // SHA256 of reconstructed key (hex)
+}
+
+interface ProviderConfig {
+  providerIid: IdentityIdentifier;     // Recovery provider's IID
+  providerEndpoint: string;            // HTTPS URL for recovery API
+  policy: string;                      // Verification method: 'kyc' | 'email' | 'phone'
+  cooldownHours: number;               // Waiting period (typically longer, e.g., 168)
 }
 
 interface Claims {

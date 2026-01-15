@@ -400,7 +400,7 @@ No identity found. Let's set one up.
     Restore from backup
 
 Creating new identity...
-Generated IID: k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a
+Generated IID: k5xq7z4m2n3p5r6s7t2v3v4w5x2y3z7a
 
 ? Set admin password: ••••••••••••
 ? Confirm admin password: ••••••••••••
@@ -408,7 +408,7 @@ Generated IID: k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a
 Identity created successfully!
 
 Admin UI available at: http://localhost:8080
-Your IID: k5xq7z4m2n3p5r6s7t2u3v4w5x2y3z7a
+Your IID: k5xq7z4m2n3p5r6s7t2v3v4w5x2y3z7a
 
 Press Ctrl+C to stop the node.
 ```

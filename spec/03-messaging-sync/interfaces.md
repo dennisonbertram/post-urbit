@@ -4,10 +4,40 @@
 
 This document specifies the complete API surface for the Messaging & Sync layer.
 
+## Wire Format vs TypeScript Convention
+
+| Context | Convention | Example |
+|---------|------------|---------|
+| **On-wire JSON (PUSE plaintext)** | snake_case | `thread_id`, `reply_to`, `is_typing`, `target_message_id` |
+| **TypeScript interfaces** | camelCase | `threadId`, `replyTo`, `isTyping`, `targetMessageId` |
+
+**Normative rule**: On-wire plaintext JSON inside PUSE envelopes uses snake_case; TypeScript interfaces use camelCase for developer ergonomics. Implementations MUST:
+1. Serialize to snake_case when creating PUSE plaintext
+2. Deserialize from snake_case when parsing received PUSE plaintext
+
+**Field mapping** (TypeScript → Wire):
+- `threadId` → `thread_id`
+- `replyTo` → `reply_to`
+- `expiresAt` → `expires_at`
+- `receiptType` → `receipt_type`
+- `messageIds` → `message_ids`
+- `targetMessageId` → `target_message_id`
+- `isTyping` → `is_typing`
+- `mediaType` → `media_type`
+- `senderIid` → `sender_iid`
+- `groupId` → `group_id`
+- `chainKey` → `chain_key`
+- `keyId` → `key_id`
+
 ## Core Types
 
+**Important:** These TypeScript types use **string representations** for developer ergonomics in app-level code. For wire encoding (sync CBOR, PUSE binary headers), see the **"API↔Wire Encoding Mapping"** section below which specifies fixed-length byte representations.
+
 ```typescript
-// Message identifier (UUID v4)
+// === In-memory/API string representations ===
+// For wire encoding, see "API↔Wire Encoding Mapping" section
+
+// Message identifier (UUID v4 string)
 type MessageId = string;
 
 // Conversation identifier (derived or random)
@@ -16,15 +46,55 @@ type ConversationId = string;
 // Group identifier (32-char Base32, same format as IID)
 type GroupId = string;
 
-// Document identifier (UUID or content-addressed hash)
+// Document identifier (UUID string or 64-char hex for content-addressed)
+// Wire: 32-byte bstr (see mapping table)
 type DocumentId = string;
 
-// Reuse from identity layer
+// Identity identifier (32-char Crockford Base32)
+// Wire: 20-byte bstr (raw IID bytes)
 type IdentityIdentifier = string;
+
+// Operation identifier (64-char lowercase hex)
+// Wire: 32-byte bstr (raw SHA256 hash)
+type OperationId = string;
+
+// Public key (43-char Base64, no padding)
+// Wire: 32-byte bstr (raw key bytes)
 type PublicKey = string;
+
+// Ed25519 signature (86-char Base64, no padding)
+// Wire: 64-byte bstr (raw signature bytes)
 type Signature = string;
+
+// RFC 3339 timestamp string
 type Timestamp = string;
+
+// Decimal string (for uint64 safety)
 type SequenceNumber = string;
+```
+
+## API↔Wire Encoding Mapping (Normative)
+
+The TypeScript interfaces above are **in-memory/app-facing only**. When encoding for the wire (sync stream 0x04 CBOR payloads), the following conversions MUST be applied:
+
+| API Type | String Format | Wire Format (CBOR) |
+|----------|---------------|-------------------|
+| `DocumentId` | UUID string (`550e8400-...`) | 32-byte bstr: UUID bytes (16) + 16 zero bytes |
+| `IdentityIdentifier` | Crockford Base32 (32 chars) | 20-byte bstr: raw IID bytes |
+| `Signature` | Base64 string (86 chars) | 64-byte bstr: raw Ed25519 signature |
+| `PublicKey` | Base64 string (43 chars) | 32-byte bstr: raw X25519/Ed25519 key |
+| `OperationId` | Hex string (64 chars) | 32-byte bstr: raw SHA256 hash |
+| `Timestamp` (messages) | RFC 3339 string | CBOR text string (same format) |
+| `HybridLogicalClock` (sync) | Object `{physical, logical, origin}` | CBOR map: `{physical: uint, logical: uint, origin: 20-byte bstr}` |
+
+**Timestamp types:** The `Timestamp` type (RFC 3339 string) is used for message timestamps, expiration times, and human-readable dates. The `HybridLogicalClock` type is used **only** for sync operation ordering (see sync-protocol.md). These are distinct types with different wire encodings.
+
+**DocumentId padding rule:** Sync documents use a 32-byte identifier. For UUID-based IDs, the 16-byte UUID is followed by 16 zero bytes. For content-addressed documents, the full 32-byte SHA256 hash is used.
+
+**Example:**
+```
+API: { documentId: "550e8400-e29b-41d4-a716-446655440000" }
+Wire CBOR: { document_id: h'550e8400e29b41d4a71644665544000000000000000000000000000000000000' }
 ```
 
 ## Message Types
@@ -45,6 +115,7 @@ interface Message {
   metadata?: Record<string, unknown>;
 }
 
+// Message types per RFC-0003 §8.2
 type MessageType =
   | 'text'
   | 'rich'
@@ -52,10 +123,11 @@ type MessageType =
   | 'reaction'
   | 'receipt'
   | 'typing'
-  | 'edit'
-  | 'delete'
-  | 'system'
-  | 'app';
+  | 'app'
+  // Reserved for future (not in RFC-0003 v1):
+  | 'edit'     // Reserved: message editing
+  | 'delete'   // Reserved: message deletion
+  | 'system';  // Reserved: system notifications
 
 // Type-specific content
 type MessageContent =
@@ -94,8 +166,11 @@ interface MediaContent {
   height?: number;
   duration?: number;           // For audio/video, seconds
   hash: string;                // Content hash (sha256:...)
-  key: Uint8Array;             // Encryption key for media file
-  nonce: Uint8Array;           // Nonce for decryption
+  // Wire format: Base64 standard encoding (no padding), 32 bytes decoded
+  // In-memory: may be decoded to Uint8Array for cryptographic operations
+  key: string;                 // Base64-encoded 32-byte encryption key
+  // Wire format: Base64 standard encoding (no padding), 12 bytes decoded
+  nonce: string;               // Base64-encoded 12-byte nonce
   url: string;                 // Where to fetch encrypted media
   thumbnail?: {
     data: string;              // Base64 inline thumbnail
@@ -103,6 +178,9 @@ interface MediaContent {
     height: number;
   };
 }
+
+// **Wire Encoding:** On the wire (JSON plaintext), `key` and `nonce` are Base64 standard
+// (no padding) strings. Applications may decode to Uint8Array for cryptographic operations.
 
 interface ReactionContent {
   targetMessageId: MessageId;
@@ -115,31 +193,37 @@ interface ReceiptContent {
   messageIds: MessageId[];
 }
 
+// Per RFC-0003 §8.2 - typing indicator content
 interface TypingContent {
-  isTyping: boolean;
-  expiresAt: Timestamp;        // Auto-clear after this time
+  isTyping: boolean;           // Note: expiration handled at message envelope level (Message.expiresAt), not in content
 }
 
+// Reserved for future - not in RFC-0003 v1
 interface EditContent {
   targetMessageId: MessageId;
   newContent: TextContent | RichContent;
   editedAt: Timestamp;
 }
 
+// Reserved for future - not in RFC-0003 v1
 interface DeleteContent {
   targetMessageId: MessageId;
   deleteType: 'for_me' | 'for_all';
 }
 
+// Reserved for future - not in RFC-0003 v1
 interface SystemContent {
   event: string;
   data: Record<string, unknown>;
 }
 
+// Per RFC-0003 §8.2 - app-defined message content
+// Wire format: { "app_id": string, "data": CBOR-decoded }
+// App message content uses the CBOR↔JSON mapping defined in RFC-0003 §8.2.
+// CBOR bytes use `~b` prefix, big integers use `~i` prefix, etc.
 interface AppContent {
-  appId: string;
-  appVersion: string;
-  payload: unknown;
+  appId: string;               // Application identifier (maps to wire "app_id")
+  data: unknown;               // Application payload (CBOR-decoded, maps to wire "data")
 }
 ```
 
@@ -195,11 +279,21 @@ interface MessagingService {
 
   /**
    * Edit a previously sent message.
+   *
+   * @reserved NOT IMPLEMENTED in v1. Calling this method will throw
+   * MessagingError with code 'INVALID_MESSAGE_TYPE'. The 'edit' message type
+   * and EditContent are reserved for future protocol versions.
    */
   editMessage(messageId: MessageId, newContent: TextContent | RichContent): Promise<Message>;
 
   /**
    * Delete a message.
+   *
+   * @reserved NOT IMPLEMENTED in v1. Calling this method will throw
+   * MessagingError with code 'INVALID_MESSAGE_TYPE'. The 'delete' message type
+   * and DeleteContent are reserved for future protocol versions.
+   * Local-only deletion (removing from local storage) should use
+   * deleteConversation() or direct database operations.
    */
   deleteMessage(messageId: MessageId, type: 'for_me' | 'for_all'): Promise<void>;
 
@@ -228,7 +322,9 @@ interface MessagingService {
   // === Events ===
 
   onMessageReceived: Event<{ message: Message }>;
+  /** @reserved NOT IMPLEMENTED in v1. This event will never fire until edit support is added. */
   onMessageEdited: Event<{ messageId: MessageId; newContent: MessageContent }>;
+  /** @reserved NOT IMPLEMENTED in v1. This event will never fire until delete support is added. */
   onMessageDeleted: Event<{ messageId: MessageId; conversationId: ConversationId }>;
   onReaction: Event<{ messageId: MessageId; senderId: IdentityIdentifier; emoji: string; action: 'add' | 'remove' }>;
   onTyping: Event<{ conversationId: ConversationId; senderId: IdentityIdentifier; isTyping: boolean }>;
@@ -509,14 +605,20 @@ interface HybridLogicalClock {
   origin: IdentityIdentifier;
 }
 
+/**
+ * Wire-level CRDT operations (matches sync-protocol.md CBOR schema).
+ * Type codes match the Operation Type Registry in sync-protocol.md.
+ * App-level APIs may use higher-level abstractions that translate to these wire operations.
+ */
 type CRDTOperation =
-  | { type: 'lww_set'; key: string; value: unknown; timestamp: HybridLogicalClock }
-  | { type: 'counter_inc'; delta: number }
-  | { type: 'counter_dec'; delta: number }
-  | { type: 'set_add'; element: unknown; tag: string }
-  | { type: 'set_remove'; element: unknown; tag: string }
-  | { type: 'list_insert'; index: number; element: unknown; id: string }
-  | { type: 'list_delete'; id: string };
+  | { type: 0; value: unknown }                                    // lww_set: set LWW-Register value
+  | { type: 1; element: unknown; tag: Uint8Array }                 // orset_add: add to OR-Set (tag is 24-byte UniqueTag)
+  | { type: 2; element: unknown; tags: Uint8Array[] }              // orset_remove: remove from OR-Set
+  | { type: 3; amount: number }                                    // pncounter_inc: increment counter
+  | { type: 4; amount: number }                                    // pncounter_dec: decrement counter
+  | { type: 5; key: string; value: unknown | null }                // lwwmap_set: set map key-value (null to delete)
+  | { type: 6; id: Uint8Array; parent: Uint8Array; value: unknown }// rga_insert: insert into RGA (24-byte IDs)
+  | { type: 7; id: Uint8Array };                                   // rga_delete: delete from RGA
 
 interface SyncOperation {
   id: string;

@@ -43,30 +43,40 @@ Identity Document v(N):
    {
      "version": 1,
      "iid": "<unchanged>",
-     "sequence": N + 1,
+     "sequence": "N + 1",
      "timestamp": "<now>",
      "keys": {
        "signing": {
          "genesis": "<K_sign_genesis>",
          "current": "<K_sign_new>",
-         "previous": "<K_sign_old>"
+         "previous": "<K_sign_old>",
+         "history": []
        },
        "encryption": {
          "current": "<K_enc_new>",
          "previous": [
            {
              "key": "<K_enc_old>",
-             "valid_from": "<old-doc-timestamp>",
-             "valid_until": null
+             "valid_from": "0",
+             "valid_until": "1",
+             "expires_at": "<RFC3339-timestamp>"
            }
          ]
        }
      },
-     ...
+     "endpoints": [],
+     "recovery": {"method": "none", "config": {}},
+     "claims": {},
+     "extensions": {},
+     "recovery_proof": null,
+     "signatures": {
+       "current": "<sig-by-K_sign_new>",
+       "previous": "<sig-by-K_sign_old>"
+     }
    }
    ```
 
-   **Note:** `keys.encryption.previous` is an array of history entries (not a single key string). Each entry includes `key`, `valid_from`, and optional `valid_until` for decryption key selection.
+   **Note:** `keys.encryption.previous` is an array of history entries (not a single key string). Each entry includes `key`, `valid_from` (sequence number when key became current), `valid_until` (sequence number when rotated out), and `expires_at` (timestamp).
 
 3. **Sign with BOTH keys**
    ```
@@ -155,14 +165,20 @@ After creating a rotated document:
 
 ### Propagation Message
 
+The wire format for identity updates uses the schema defined in `spec/00-shared/layer-integration.md`:
+
 ```json
 {
   "type": "identity_update",
-  "document": { <full identity document> },
-  "urgency": "normal|urgent",
-  "reason": "routine|suspected_compromise|device_migration"
+  "idoc": "<base64-standard-no-padding-of-IDOC-envelope>",
+  "sequence": "<decimal-string>",
+  "sent_at": "<RFC3339-UTC-canonical>"
 }
 ```
+
+**Note:** The `idoc` field contains the Base64-encoded IDOC binary envelope (magic + version + length + JCS JSON), NOT an inline JSON object. This ensures signature verification uses the exact bytes that were signed.
+
+For rotation urgency hints, implementations MAY use out-of-band signaling or extended fields (future versions may standardize urgency/reason fields), but the core wire format above is sufficient for v1.
 
 | Urgency | Meaning |
 |---------|---------|

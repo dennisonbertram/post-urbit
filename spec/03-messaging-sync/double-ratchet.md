@@ -74,19 +74,23 @@ def kdf_root(root_key: bytes, dh_output: bytes) -> tuple[bytes, bytes]:
     return derived[0:32], derived[32:64]
 ```
 
-### Initial Key Derivation (X3DH)
+### Initial Key Derivation (2DH)
+
+**Note:** Despite the "x3dh" string in the domain separator (historical), Post-Urbit v1 performs 2 DH operations (2DH), not Signal's X3DH which has 3+ DH operations with signed prekeys.
 
 ```
 def kdf_initial(dh1: bytes, dh2: bytes, iid_a: bytes, iid_b: bytes) -> tuple[bytes, bytes]:
     """
-    Derive initial root key and sending chain from X3DH outputs.
+    Derive initial root key and sending chain from 2DH outputs.
     Domain separation includes both IIDs for binding.
     """
     # Concatenate DH outputs
     ikm = dh1 + dh2
 
     # Salt includes sorted IIDs (consistent regardless of who initiates)
-    if iid_a < iid_b:
+    # IID comparison is bytewise lexicographic over raw 20 bytes (RFC-0003 §4.2.3)
+    # DO NOT compare Base32 strings - raw byte ordering is required
+    if iid_a < iid_b:  # bytewise comparison of raw 20-byte values
         salt = iid_a + iid_b
     else:
         salt = iid_b + iid_a
@@ -104,13 +108,22 @@ def kdf_initial(dh1: bytes, dh2: bytes, iid_a: bytes, iid_b: bytes) -> tuple[byt
 
 ### Group Sender Key KDF
 
+**Input encoding (Normative):**
+- `chain_key`: 32 bytes (current chain key)
+- `group_id`: 20 bytes raw (Crockford Base32 decoded, NOT the 32-char string)
+- `sender_iid`: 20 bytes raw (Crockford Base32 decoded, NOT the 32-char string)
+- `key_id`: 16 bytes raw (NOT Base64 encoded string)
+
 ```
 def kdf_sender_key(chain_key: bytes, group_id: bytes, sender_iid: bytes, key_id: bytes) -> tuple[bytes, bytes]:
     """
     Advance sender key chain for group messaging.
     Domain separation binds to group and sender.
+
+    All byte inputs MUST be raw bytes, NOT encoded strings.
+    Total info length: 25 (prefix) + 20 + 1 + 20 + 1 + 16 = 83 bytes (fixed)
     """
-    # Construct domain-separated info
+    # Construct domain-separated info (fixed-length inputs, : separators are literal 0x3a)
     info = b"post-urbit-sender-key-v1:" + group_id + b":" + sender_iid + b":" + key_id
 
     message_key = HMAC-SHA256(key=chain_key, data=b"\x01" + info)
@@ -121,9 +134,9 @@ def kdf_sender_key(chain_key: bytes, group_id: bytes, sender_iid: bytes, key_id:
 
 ## Session Initialization
 
-### X3DH (Extended Triple Diffie-Hellman)
+### 2DH (Two Diffie-Hellman) Initial Key Exchange
 
-For initial key agreement when recipient may be offline:
+For initial key agreement when recipient may be offline. This is intentionally simpler than Signal's X3DH (which uses 3+ DH operations with signed prekeys). See RFC-0003 §5 for the authoritative specification.
 
 ```
 Alice wants to message Bob:
@@ -134,15 +147,15 @@ Alice wants to message Bob:
 2. Alice generates ephemeral key:
    - EK_A: Alice's ephemeral X25519 key pair
 
-3. Alice computes:
+3. Alice computes (2 DH operations):
    DH1 = X25519(IK_A_private, IK_B)      # Alice identity × Bob identity
    DH2 = X25519(EK_A_private, IK_B)      # Alice ephemeral × Bob identity
 
-   # Note: We skip signed prekey for simplicity (Signal has SPK)
-   # Our identity layer already provides key rotation
+   # Note: No signed prekey (unlike Signal X3DH)
+   # Post-Urbit v1 uses 2DH; identity layer provides key rotation
 
 4. Master secret:
-   master_secret = KDF(DH1 || DH2, "post-urbit x3dh")
+   master_secret = KDF(DH1 || DH2, "post-urbit x3dh")  # Historical name preserved
 
 5. Derive initial keys:
    root_key = master_secret[:32]
@@ -186,16 +199,17 @@ interface RatchetState {
 
   // Sending chain
   sendingChainKey: Uint8Array | null;
-  sendingChainIndex: number;
+  sendingChainIndex: number;          // N: next message number (0-indexed)
+  previousChainLength: number;        // PN: messages sent in previous sending chain
 
   // Receiving chain (may have multiple for out-of-order messages)
   receivingChains: Map<PublicKey, {
     chainKey: Uint8Array;
-    chainIndex: number;
+    n: number;                        // Next expected message number (0-indexed)
   }>;
 
   // Skipped message keys (for out-of-order delivery)
-  skippedKeys: Map<string, Uint8Array>;  // key: "pubkey:index"
+  skippedKeys: Map<string, Uint8Array>;  // key: "pubkey:n"
   maxSkip: number;  // Maximum messages to skip (default: 100)
 }
 ```
@@ -211,18 +225,21 @@ def send_message(state: RatchetState, plaintext: bytes) -> tuple[bytes, bytes]:
         state.root_key, state.sending_chain_key = kdf_root(state.root_key, dh_output)
         state.sending_chain_index = 0
 
-    # Get message key
+    # Capture N (message number) BEFORE incrementing - N is 0-indexed per RFC-0003
+    n = state.sending_chain_index
+
+    # Get message key and advance chain
     state.sending_chain_key, message_key = kdf_chain_step(state.sending_chain_key)
     state.sending_chain_index += 1
 
     # Encrypt
     ciphertext = chacha20_poly1305_encrypt(message_key, nonce, plaintext)
 
-    # Header
+    # Header (N is the pre-increment value, 0-indexed)
     header = encode_header(
         dh_public=state.dh_sending_key.public,
-        chain_index=state.sending_chain_index,
-        previous_chain_length=...
+        n=n,
+        pn=state.previous_chain_length  # Messages sent in previous sending chain
     )
 
     return header, ciphertext
@@ -232,45 +249,47 @@ def send_message(state: RatchetState, plaintext: bytes) -> tuple[bytes, bytes]:
 
 ```
 def receive_message(state: RatchetState, header: Header, ciphertext: bytes) -> bytes:
-    # Check for skipped message key
-    skip_key = f"{header.dh_public}:{header.chain_index}"
+    # Check for skipped message key (N is 0-indexed)
+    skip_key = f"{header.dh_public}:{header.n}"
     if skip_key in state.skipped_keys:
         message_key = state.skipped_keys.pop(skip_key)
         return chacha20_poly1305_decrypt(message_key, nonce, ciphertext)
 
     # If new DH key, perform DH ratchet
     if header.dh_public != state.dh_receiving_key:
-        # Store skipped keys from current receiving chain
-        skip_message_keys(state, header.previous_chain_length)
+        # Store skipped keys from current receiving chain (using PN)
+        skip_message_keys(state, header.pn)
 
         # DH ratchet step
         state.dh_receiving_key = header.dh_public
         dh_output = x25519(state.dh_sending_key.private, state.dh_receiving_key)
         state.root_key, receiving_chain_key = kdf_root(state.root_key, dh_output)
 
+        # Save previous chain length for next outgoing header.pn
+        state.previous_chain_length = state.sending_chain_index
         # Clear sending chain (will ratchet on next send)
         state.sending_chain_key = None
 
-        # Store new receiving chain
+        # Store new receiving chain (N starts at 0)
         state.receiving_chains[header.dh_public] = {
             chain_key: receiving_chain_key,
-            chain_index: 0
+            n: 0  # Next expected message number
         }
 
     # Get receiving chain
     chain = state.receiving_chains[header.dh_public]
 
-    # Skip ahead if needed
-    while chain.chain_index < header.chain_index:
+    # Skip ahead if needed (N is 0-indexed)
+    while chain.n < header.n:
         if len(state.skipped_keys) > state.max_skip:
             raise TooManySkippedMessages()
         chain.chain_key, skipped_key = kdf_chain_step(chain.chain_key)
-        state.skipped_keys[f"{header.dh_public}:{chain.chain_index}"] = skipped_key
-        chain.chain_index += 1
+        state.skipped_keys[f"{header.dh_public}:{chain.n}"] = skipped_key
+        chain.n += 1
 
-    # Get message key
+    # Get message key and advance expected N
     chain.chain_key, message_key = kdf_chain_step(chain.chain_key)
-    chain.chain_index += 1
+    chain.n += 1
 
     return chacha20_poly1305_decrypt(message_key, nonce, ciphertext)
 ```
@@ -279,18 +298,38 @@ def receive_message(state: RatchetState, header: Header, ciphertext: bytes) -> b
 
 The ratchet header is placed in the **PUSE header extension** (type `0x01`), NOT in the encrypted plaintext. This is required because the receiver needs the ratchet parameters to derive the decryption key.
 
+**Counter semantics (normative, per RFC-0003):**
+- **N (Message Number)**: 0-indexed within each sending chain. The first message in a chain has N=0.
+- **PN (Previous Chain Length)**: The count of messages sent in the PREVIOUS sending chain before this DH ratchet occurred.
+
+**Initial→Ratchet Transition (Normative):**
+
+The transition from initial (0x00) to ratchet (0x01) message types is NOT a DH ratchet step. Both message types use the same initial sending chain:
+
+| Message | PUSE Type | Chain | N |
+|---------|-----------|-------|---|
+| First message (initial) | 0x00 | Initial chain | 0 |
+| Second message (before DH ratchet) | 0x01 | Initial chain | 1 |
+| After DH ratchet | 0x01 | NEW chain | 0 |
+
+The DH ratchet only occurs when the sender receives a response containing a new DH public key from the recipient. Until then, all messages continue on the initial chain with incrementing N.
+
+**Summary:** The initial (0x00) message consumes N=0; the first ratchet (0x01) message MUST use N=1 (continuing the same chain). Subsequent DH ratchets reset N to 0 for the NEW chain.
+
 ```
 Ratchet Header (PUSE Header Extension Type 0x01):
 ┌────────────────────────────────────────┐
 │ DH Public Key                          │ 32 bytes
 ├────────────────────────────────────────┤
-│ Previous Chain Length (big-endian)     │ 4 bytes
+│ PN - Previous Chain Length (big-endian)│ 4 bytes
 ├────────────────────────────────────────┤
-│ Chain Index (big-endian)               │ 4 bytes
+│ N - Message Number (big-endian)        │ 4 bytes
 └────────────────────────────────────────┘
 
 Total: 40 bytes
 ```
+
+**Note:** RFC-0003 is authoritative for ratchet header semantics.
 
 **Wire format in PUSE envelope:**
 ```
@@ -366,7 +405,7 @@ When a session becomes corrupted or desync'd:
 1. Generate new ephemeral key pair
 2. Send session reset message (unencrypted metadata, no content)
 3. Wait for acknowledgment
-4. Reinitialize from X3DH
+4. Reinitialize from 2DH
 
 ### Session Reset Message
 

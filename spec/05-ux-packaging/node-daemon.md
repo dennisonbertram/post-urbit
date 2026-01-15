@@ -212,7 +212,8 @@ interface KeyStorage {
 
   // Device keys
   getDeviceSigningKey(did: DeviceIdentifier): Promise<Ed25519KeyPair>;
-  getDeviceTransportKey(did: DeviceIdentifier): Promise<X25519KeyPair>;
+  // NOTE: getDeviceTransportKey is reserved for future use. v1 uses device signing key for handshake.
+  // getDeviceTransportKey(did: DeviceIdentifier): Promise<X25519KeyPair>;
   createDeviceKeys(): Promise<{ did: DeviceIdentifier; keys: DeviceKeyPair }>;
   revokeDeviceKeys(did: DeviceIdentifier): Promise<void>;
 
@@ -229,8 +230,8 @@ type KeyType =
   | 'identity:signing:genesis'
   | 'identity:signing:current'
   | 'identity:encryption:current'
-  | `device:signing:${string}`
-  | `device:transport:${string}`;
+  | `device:signing:${string}`;
+  // NOTE: device:transport reserved for future use (v1 uses device signing key only)
 ```
 
 ## HTTP API
@@ -314,7 +315,7 @@ Complete Admin API endpoint specification. All endpoints under `/admin/v1/` requ
 
 | Method | Path | Request | Response | Notes |
 |--------|------|---------|----------|-------|
-| GET | `/admin/v1/contacts` | Query: `limit`, `offset`, `sortBy`, `sortOrder` | `PaginatedResult<Contact>` | List contacts |
+| GET | `/admin/v1/contacts` | Query: `limit`, `offset`, `sort_by`, `sort_order` | `PaginatedResult<Contact>` | List contacts |
 | GET | `/admin/v1/contacts/{iid}` | - | `Contact` | Get single contact |
 | POST | `/admin/v1/contacts` | `AddContactRequest` | `Contact` | Add contact |
 | PUT | `/admin/v1/contacts/{iid}` | `ContactUpdate` | `Contact` | Update contact |
@@ -322,7 +323,9 @@ Complete Admin API endpoint specification. All endpoints under `/admin/v1/` requ
 | POST | `/admin/v1/contacts/{iid}/block` | - | `204 No Content` | Block contact |
 | DELETE | `/admin/v1/contacts/{iid}/block` | - | `204 No Content` | Unblock contact |
 
-**Allowed sort fields for contacts:** `displayName`, `addedAt`, `lastSeen`, `trustLevel`
+**Allowed sort fields for contacts:** `display_name`, `added_at`, `last_seen`, `trust_level`
+
+**Note:** All query parameter names use snake_case for consistency with JSON field naming (see interfaces.md).
 
 #### App Endpoints
 
@@ -331,7 +334,7 @@ Complete Admin API endpoint specification. All endpoints under `/admin/v1/` requ
 | GET | `/admin/v1/apps` | - | `InstalledApp[]` | List installed apps |
 | GET | `/admin/v1/apps/{app_id}` | - | `InstalledApp` | Get app details |
 | POST | `/admin/v1/apps/install` | `InstallRequest` | `InstallResult` | Install app (see below) |
-| POST | `/admin/v1/apps/install/upload` | `multipart/form-data` | `InstallResult` | Upload and install `.postapp` |
+| POST | `/admin/v1/apps/install/upload` | `multipart/form-data` | `InstallResult` | Upload and install `.postapp` (see multipart spec below) |
 | POST | `/admin/v1/apps/{app_id}/update` | - | `UpdateResult` | Update to latest |
 | DELETE | `/admin/v1/apps/{app_id}` | Query: `keepData?` | `204 No Content` | Uninstall app |
 | GET | `/admin/v1/apps/{app_id}/permissions` | - | `AppPermissions` | Get permissions |
@@ -360,6 +363,40 @@ interface PermissionPatch {
 }
 ```
 
+**Multipart Upload Specification:**
+
+For file upload endpoints (`/apps/install/upload` and `/backups/upload`), the following normative requirements apply:
+
+| Field | Requirement | Description |
+|-------|-------------|-------------|
+| Part name | **REQUIRED**: `file` | The form field name MUST be `file` |
+| Content-Type | `application/octet-stream` or `application/zip` | MIME type of the uploaded file |
+| Filename | Recommended | Original filename for logging/display |
+
+**Example multipart request:**
+```http
+POST /admin/v1/apps/install/upload HTTP/1.1
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="notes-app.postapp"
+Content-Type: application/octet-stream
+
+<binary data>
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+```
+
+**JavaScript example:**
+```typescript
+const formData = new FormData();
+formData.append('file', fileBlob, 'app.postapp');
+await fetch('/admin/v1/apps/install/upload', {
+  method: 'POST',
+  body: formData,
+  credentials: 'same-origin',
+});
+```
+
 #### Settings Endpoints
 
 | Method | Path | Request | Response | Notes |
@@ -376,7 +413,7 @@ interface PermissionPatch {
 | GET | `/admin/v1/backups` | - | `BackupListEntry[]` | List backups |
 | POST | `/admin/v1/backups` | `{ type?: 'full' \| 'identity' \| 'data' }` | `BackupResult` | Create backup |
 | GET | `/admin/v1/backups/{id}` | - | `application/octet-stream` | Download backup file |
-| POST | `/admin/v1/backups/upload` | `multipart/form-data` | `BackupListEntry` | Upload backup file |
+| POST | `/admin/v1/backups/upload` | `multipart/form-data` | `BackupListEntry` | Upload backup file (see multipart spec below) |
 | POST | `/admin/v1/backups/{id}/restore` | `{ password?: string }` | `RestoreResult` | Restore backup (fresh auth) |
 | DELETE | `/admin/v1/backups/{id}` | - | `204 No Content` | Delete backup file |
 
@@ -448,12 +485,16 @@ The `/admin/v1/events` WebSocket provides real-time updates.
 - Pass `?lastEventId=<id>` on reconnect to receive missed events
 - Server buffers last 1000 events for replay
 
+**Server→Client Messages (wrapped):**
+
+Server messages are wrapped in `WebSocketMessage` with metadata for replay support:
+
 ```typescript
 interface WebSocketMessage {
-  id: string;               // Monotonic event ID
-  type: AdminEventType;
-  timestamp: Timestamp;
-  data: unknown;
+  id: string;               // Monotonic event ID for replay
+  type: AdminEventType;     // Event type discriminator
+  timestamp: Timestamp;     // ISO 8601 timestamp
+  data: unknown;            // Event-specific payload
 }
 
 type AdminEventType =
@@ -466,9 +507,46 @@ type AdminEventType =
   | 'sync_progress'
   | 'log_entry'            // Optional, if subscribed
   | 'error';
+```
 
-// Subscribe to specific events (default: all except log_entry)
-// Send after connection: { type: 'subscribe', events: ['status_change', 'log_entry'] }
+**Client→Server Messages (NOT wrapped):**
+
+Client messages are simple command objects without wrapper metadata:
+
+```typescript
+// Subscribe to specific event types
+interface SubscribeMessage {
+  type: 'subscribe';
+  events: AdminEventType[];  // Event types to subscribe to
+}
+
+// Unsubscribe from event types
+interface UnsubscribeMessage {
+  type: 'unsubscribe';
+  events: AdminEventType[];  // Event types to unsubscribe from
+}
+
+// Union of all client→server message types
+type ClientWebSocketMessage = SubscribeMessage | UnsubscribeMessage;
+```
+
+**Default subscription:** All event types except `log_entry` are subscribed by default on connection.
+
+**Example client usage:**
+```typescript
+const ws = new WebSocket('/admin/v1/events');
+
+// Subscribe to log entries (not included by default)
+ws.send(JSON.stringify({ type: 'subscribe', events: ['log_entry'] }));
+
+// Unsubscribe from sync progress events
+ws.send(JSON.stringify({ type: 'unsubscribe', events: ['sync_progress'] }));
+
+// Handle server messages (always wrapped)
+ws.onmessage = (e) => {
+  const msg: WebSocketMessage = JSON.parse(e.data);
+  console.log(`Event ${msg.id} at ${msg.timestamp}: ${msg.type}`, msg.data);
+};
 ```
 
 ### Authentication
@@ -540,12 +618,18 @@ interface ApiKey {
 
 For browser sessions using HttpOnly cookies, CSRF protection is required on all state-changing endpoints.
 
-**Mechanism: Double-Submit Cookie Pattern**
+**Mechanism: Double-Submit Cookie Pattern with Body Token**
 
-1. Server sets `csrf_token` cookie (NOT HttpOnly, readable by JS)
-2. Client includes token in `X-CSRF-Token` header on POST/PUT/DELETE
-3. Server validates header matches cookie value
-4. Both cookies use `SameSite=Strict`
+On successful login, the server MUST:
+1. Return `csrfToken` in the `LoginResponse` body (see `interfaces.md`)
+2. Set `postnode_csrf` cookie (NOT HttpOnly, readable by JS) to the SAME value
+3. Use `SameSite=Strict` for both session and CSRF cookies
+
+On subsequent requests:
+1. Client includes token in `X-CSRF-Token` header on POST/PUT/DELETE
+2. Server validates header matches cookie value
+
+The dual delivery (body + cookie) allows clients to initialize CSRF state immediately after login without parsing cookies.
 
 ```typescript
 // CSRF configuration
@@ -620,19 +704,26 @@ interface ApiError {
 
 type ApiErrorCode =
   // Client errors (4xx)
-  | 'INVALID_REQUEST'
-  | 'UNAUTHORIZED'
-  | 'FORBIDDEN'
-  | 'NOT_FOUND'
-  | 'CONFLICT'
-  | 'RATE_LIMITED'
-  | 'PAYLOAD_TOO_LARGE'
+  | 'INVALID_REQUEST'       // 400: Malformed request
+  | 'UNAUTHORIZED'          // 401: Missing or invalid authentication
+  | 'FORBIDDEN'             // 403: Authenticated but not allowed
+  | 'NOT_FOUND'             // 404: Resource doesn't exist
+  | 'CONFLICT'              // 409: Resource state conflict
+  | 'RATE_LIMITED'          // 429: Too many requests
+  | 'PAYLOAD_TOO_LARGE'     // 413: Request body too large
+  | 'VALIDATION_ERROR'      // 422: Request validation failed
+  | 'CSRF_INVALID'          // 403: CSRF token missing/invalid
+  | 'FRESH_AUTH_REQUIRED'   // 403: Sensitive operation needs re-auth
 
   // Server errors (5xx)
-  | 'INTERNAL_ERROR'
-  | 'SERVICE_UNAVAILABLE'
-  | 'TIMEOUT';
+  | 'INTERNAL_ERROR'        // 500: Unexpected server error
+  | 'SERVICE_UNAVAILABLE'   // 503: Service temporarily unavailable
+  | 'TIMEOUT';              // 504: Operation timed out
 ```
+
+**Forward Compatibility:** Clients MUST accept unknown error codes gracefully. New error codes may be added in future versions without a major version bump. Unknown codes SHOULD be treated as `INTERNAL_ERROR` for error handling purposes.
+
+**Canonical Error Registry:** The authoritative `ApiErrorCode` definition and HTTP status code mappings are specified in `interfaces.md`. This file mirrors that definition for reference.
 
 ## Background Services
 

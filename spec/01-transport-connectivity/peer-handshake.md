@@ -6,6 +6,23 @@
 
 The peer handshake establishes an **identity-authenticated connection** on top of QUIC TLS. After QUIC handshake completes, both peers prove they control their claimed identities and optionally their device identifiers (DIDs).
 
+**Optional Field Handling (Normative):**
+
+Per RFC-0002 §5.5, optional handshake fields MAY be omitted entirely or present with value `null`. Receivers MUST treat both forms equivalently:
+
+```json
+// These are semantically identical:
+{"device": "abc123", "capabilities": null}
+{"device": "abc123"}
+```
+
+Implementations:
+- Senders MAY omit optional fields or include them as `null`
+- Receivers MUST accept both forms without error
+- Receivers MUST NOT require a specific representation
+
+This ensures interoperability between implementations that serialize optionals differently.
+
 ## Goals
 
 1. **Mutual authentication**: Both peers prove identity ownership
@@ -89,12 +106,12 @@ The peer handshake establishes an **identity-authenticated connection** on top o
 |-------|----------|-------------|
 | `type` | Yes | Message type identifier |
 | `version` | Yes | Handshake protocol version |
-| `client_iid` | Yes | Client's identity identifier |
-| `client_did` | No | Client's device identifier (for per-device sessions) |
-| `expected_server_iid` | No | Expected server IID (if connecting to specific peer) |
-| `client_nonce` | Yes | 32 random bytes for challenge |
-| `timestamp` | Yes | Current time, must be within ±5 minutes |
-| `tls_binding` | Yes | Binds handshake to TLS session |
+| `client_iid` | Yes | Client's identity identifier (Crockford Base32, 32 chars) |
+| `client_did` | No | Client's device identifier (Crockford Base32, 32 chars) |
+| `expected_server_iid` | No | Expected server IID (Crockford Base32, 32 chars) |
+| `client_nonce` | Yes | 32 random bytes, Base64 standard alphabet (RFC 4648 §4), **no padding** |
+| `timestamp` | Yes | Canonical RFC3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`, no fractional seconds); must be within ±5 minutes. Implementations MUST reject non-canonical forms. |
+| `tls_binding` | Yes | 32 bytes from TLS exporter, Base64 standard alphabet, **no padding** |
 
 ### ServerHello
 
@@ -116,9 +133,15 @@ The peer handshake establishes an **identity-authenticated connection** on top o
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `server_did` | No | Server's device identifier |
+| `server_iid` | Yes | Server's identity identifier (Crockford Base32, 32 chars) |
+| `server_did` | No | Server's device identifier (Crockford Base32, 32 chars) |
+| `server_nonce` | Yes | 32 random bytes, Base64 standard alphabet, **no padding** |
+| `timestamp` | Yes | Canonical RFC3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`, no fractional seconds); must be within ±5 minutes. Implementations MUST reject non-canonical forms. |
+| `tls_binding` | Yes | 32 bytes from TLS exporter, Base64 standard alphabet, **no padding** |
+| `identity_document` | Yes | Full identity document (JSON object) |
 | `device_document` | If `server_did` | Device document proving DID ownership |
-| `device_signature` | If `server_did` | Signature using device signing key |
+| `challenge_signature` | Yes | Ed25519 signature, Base64 standard alphabet, **no padding** (64 bytes → 86 chars) |
+| `device_signature` | If `server_did` | Ed25519 signature using device signing key, Base64 standard, **no padding** |
 
 ### Challenge Signature
 
@@ -126,16 +149,19 @@ Server signs to prove identity ownership:
 
 ```
 challenge_data = concat(
-  "post-urbit-handshake-v1",    // domain separator
-  client_nonce,                  // from ClientHello
-  server_nonce,                  // from ServerHello
-  tls_binding,                   // binds to TLS session
-  client_iid,                    // who we're authenticating to
-  server_iid                     // who we are
+  "post-urbit-handshake-v1",         // domain separator (23 bytes)
+  decode_base64(client_nonce),       // 32 bytes from ClientHello
+  decode_base64(server_nonce),       // 32 bytes from ServerHello
+  decode_base64(tls_binding),        // 32 bytes, binds to TLS session
+  decode_base32(client_iid),         // 20 bytes raw, who we're authenticating to
+  decode_base32(server_iid)          // 20 bytes raw, who we are
 )
+// Total: 23 + 32 + 32 + 32 + 20 + 20 = 159 bytes
 
 challenge_signature = Ed25519_Sign(server_signing_key, SHA256(challenge_data))
 ```
+
+**Note:** IIDs MUST be decoded from Base32 to 20 raw bytes. Nonces and tls_binding are decoded from Base64 standard (no padding).
 
 ### Device Signature (if DID provided)
 
@@ -143,23 +169,26 @@ If the server provides a `server_did`, it must also prove device ownership:
 
 ```
 device_challenge_data = concat(
-  "post-urbit-device-handshake-v1",  // domain separator
-  client_nonce,
-  server_nonce,
-  tls_binding,
-  server_iid,
-  server_did
+  "post-urbit-device-v1",        // domain separator (20 bytes)
+  decode_base64(client_nonce),   // 32 bytes
+  decode_base64(server_nonce),   // 32 bytes
+  decode_base64(tls_binding),    // 32 bytes
+  decode_base32(server_iid),     // 20 bytes raw
+  decode_base32(server_did)      // 20 bytes raw
 )
+// Total: 20 + 32 + 32 + 32 + 20 + 20 = 156 bytes
 
 device_signature = Ed25519_Sign(device_signing_key, SHA256(device_challenge_data))
 ```
 
 **Device verification:**
-1. Verify `device_document.signature_by_identity` using identity's current signing key
+1. Verify `device_document.signature_by_identity` using identity signing key (current, previous, or history per RFC-0001 §7 key lookup)
 2. Verify `device_signature` using `device_document.device_signing_key`
 3. Check `device_document.iid` matches `server_iid`
 4. Check `device_document.did` matches `server_did`
 5. Check device document is not expired (`expires_at` if present)
+
+**Note:** Device documents may be signed with a key that was rotated since. Accept any signing key valid at signature time.
 
 ### ClientAuth
 
@@ -177,13 +206,14 @@ Client signs the same challenge data with swapped roles:
 
 ```
 challenge_data = concat(
-  "post-urbit-handshake-v1",
-  server_nonce,                  // from ServerHello
-  client_nonce,                  // from ClientHello
-  tls_binding,
-  server_iid,
-  client_iid
+  "post-urbit-handshake-v1",         // domain separator (23 bytes)
+  decode_base64(server_nonce),       // 32 bytes (swapped)
+  decode_base64(client_nonce),       // 32 bytes (swapped)
+  decode_base64(tls_binding),        // 32 bytes
+  decode_base32(server_iid),         // 20 bytes raw (swapped)
+  decode_base32(client_iid)          // 20 bytes raw (swapped)
 )
+// Total: 159 bytes
 
 challenge_signature = Ed25519_Sign(client_signing_key, SHA256(challenge_data))
 ```
@@ -192,13 +222,14 @@ If `client_did` was provided in ClientHello, client also includes device proof:
 
 ```
 device_challenge_data = concat(
-  "post-urbit-device-handshake-v1",
-  server_nonce,
-  client_nonce,
-  tls_binding,
-  client_iid,
-  client_did
+  "post-urbit-device-v1",        // domain separator (20 bytes)
+  decode_base64(server_nonce),   // 32 bytes
+  decode_base64(client_nonce),   // 32 bytes
+  decode_base64(tls_binding),    // 32 bytes
+  decode_base32(client_iid),     // 20 bytes raw
+  decode_base32(client_did)      // 20 bytes raw
 )
+// Total: 156 bytes
 
 device_signature = Ed25519_Sign(device_signing_key, SHA256(device_challenge_data))
 ```
@@ -280,9 +311,21 @@ Each Message:
 3. Check `tls_binding` matches current TLS session
 4. Verify server's identity document
 5. Verify `server_iid` matches document's IID
-6. If client had `expected_server_iid`, verify it matches
+6. If client had `expected_server_iid`, verify it matches `server_iid`; MUST abort if mismatch
 7. Reconstruct challenge data
 8. Verify `challenge_signature` with document's current signing key
+
+**IID Binding Requirement (Normative):**
+
+When the connection is initiated for a **specific known IID** (e.g., via `TransportService.connect(peerIID)` or equivalent API where the caller knows the intended peer):
+
+1. The client MUST include `expected_server_iid` in the ClientHello
+2. The client MUST abort the handshake with error `IDENTITY_MISMATCH` if `server_iid` differs from `expected_server_iid`
+3. The connection MUST NOT be established if the expected IID check fails
+
+The `expected_server_iid` field MAY be omitted only in discovery scenarios where the client genuinely does not know who it is connecting to (e.g., connecting to a relay endpoint where the relay's IID was not pre-known). Such scenarios require explicit threat modeling and are not typical for peer-to-peer messaging.
+
+**Rationale:** This prevents wrong-peer acceptance attacks where a user could be induced to complete a valid handshake with an unintended identity (e.g., via DNS poisoning, misdirected endpoint hints, or UI confusion).
 
 ## TLS Binding
 
@@ -370,15 +413,33 @@ Relay and DHT services use separate protocols (HTTPS for relay allocation, DHT-n
 
 Future versions may define anonymous connection modes for specific use cases.
 
-## Connection Resumption
+## Abbreviated Handshake Resumption [OUT OF SCOPE FOR V1]
 
-For performance, previously authenticated connections can resume:
+**Status:** This section describes a future optimization. For v1, implementations MUST NOT use application-level abbreviated handshake resumption. The `resume` field and `resume_accepted` message are reserved for future use.
+
+This refers to Post-Urbit application-level handshake abbreviation, NOT QUIC/TLS session resumption. QUIC TLS resumption MAY be used for transport efficiency, but Post-Urbit protocol bytes MUST NOT be sent in 0-RTT early data.
+
+**V1 Requirements (Normative):**
+- Implementations MUST NOT include `resume` in `client_hello`
+- Implementations MUST ignore `resume` if received (proceed with full handshake)
+- Implementations MUST NOT send `resume_accepted`
+- Implementations MUST treat `resume_accepted` as an unknown message type (error)
+
+All v1 connections MUST use the full handshake flow (§Handshake Flow above).
+
+---
+
+**Future Direction (Non-Normative):**
+
+The following describes the anticipated design for a future protocol version:
+
+For performance, previously authenticated connections could resume:
 
 1. **Session ticket**: Store `(peer_iid, session_ticket, timestamp)` after successful handshake
 2. **On reconnect**: Use QUIC 0-RTT with stored session ticket
 3. **Abbreviated handshake**: Skip identity document exchange if sequence unchanged
 
-### Resumption Check
+### Resumption Check (Reserved)
 
 ```json
 {
@@ -396,7 +457,7 @@ For performance, previously authenticated connections can resume:
 }
 ```
 
-Server can respond:
+Server could respond:
 - If sequence unchanged: `{"type": "resume_accepted"}` → proceed to authenticated
 - If sequence changed: Include full `identity_document` in ServerHello
 
@@ -414,6 +475,6 @@ Server can respond:
 2. **Wrong server**: Client expects different IID, rejects
 3. **Expired timestamp**: Server rejects stale ClientHello
 4. **Invalid signature**: Peer rejects forged challenge response
-5. **Anonymous client**: Server accepts anonymous connection
+5. **Missing client identity**: Server rejects unauthenticated client (anonymous rejected)
 6. **Session resumption**: Skip document exchange on reconnect
 7. **Key rotation during session**: Detect sequence change, re-exchange documents

@@ -41,6 +41,44 @@ A relay must NOT:
 
 Clients allocate a relay address before receiving connections.
 
+### Allocation URL Derivation (Normative)
+
+The relay endpoint in identity documents specifies the UDP/QUIC relay address. The HTTPS allocation API is derived as follows:
+
+```python
+def derive_allocation_url(relay_endpoint: dict) -> str:
+    """
+    Derive HTTPS allocation URL from relay endpoint.
+
+    relay_endpoint: {"host": "relay.example.com", "port": 4433, ...}
+    """
+    host = relay_endpoint["host"].lower()
+
+    # Allocation uses HTTPS on port 443 (or 8443 for non-standard deployments)
+    # If relay port is 4433 (default QUIC), allocation port is 443
+    # If relay port is non-standard, allocation port is relay_port - 4000
+    # (e.g., relay 8433 → allocation 4433 is invalid; use explicit config)
+
+    # v1 simple rule: allocation always on port 443
+    return f"https://{host}/allocate"
+```
+
+**v1 Normative Rule:** For v1, the allocation endpoint is always `https://{relay.host}/allocate` on port 443. Relay operators MUST serve the allocation API on port 443 with a valid TLS certificate. The QUIC relay port (typically 4433) is separate from the HTTPS allocation port.
+
+**Future versions** MAY extend the relay endpoint schema to include an explicit `allocation_port` or `allocation_url` field.
+
+### HTTPS TLS Policy for Allocation (Normative)
+
+The HTTPS allocation request MUST use standard WebPKI TLS validation:
+
+1. **Certificate validation:** Clients MUST verify the server certificate against the system trust store (WebPKI roots)
+2. **Hostname verification:** Clients MUST verify the certificate is valid for `relay.host`
+3. **No self-signed:** Self-signed certificates MUST be rejected for allocation requests
+
+**Rationale:** Unlike Post-Urbit QUIC connections (which use identity-based authentication and can accept any TLS certificate), the allocation request occurs before the client has established identity-based trust with the relay. A MITM on the allocation channel could steal the allocation token and race to bind the allocation to their own IP:port, hijacking inbound traffic. WebPKI validation prevents this attack.
+
+**Note:** This is stricter than the QUIC TLS policy (which accepts any certificate for ALPN `post-urbit/1`). The allocation HTTPS endpoint is a separate trust domain.
+
 ### Allocation Request
 
 Allocation uses signed request body (NOT JWT) to prove identity ownership:
@@ -53,24 +91,28 @@ Content-Type: application/json
 {
   "iid": "<client's identity identifier>",
   "lifetime": 3600,
-  "timestamp": "<RFC3339-UTC>",
-  "nonce": "<16-bytes-base64-random>",
-  "identity_doc_sequence": 42,
+  "timestamp": "<RFC3339-UTC-canonical>",
+  "nonce": "<16-bytes-base64url>",
+  "identity_doc_sequence": "42",
   "signature": "<Ed25519-signature-base64>"
 }
 ```
 
+**Note:** `identity_doc_sequence` is a decimal string (not number) to avoid JSON uint64 precision issues. See RFC-0002 §7.8.
+
 **Signature construction**:
 ```
 signature_input = concat(
-  "post-urbit-relay-allocate-v1",  // domain separator
+  "post-urbit-relay-alloc-v1",  // domain separator (25 bytes)
   iid,                              // 32-char Base32
   lifetime (big-endian uint32),     // 4 bytes
-  timestamp (UTF-8),                // variable
+  timestamp (UTF-8),                // 20 bytes (canonical YYYY-MM-DDTHH:MM:SSZ)
   nonce (raw bytes)                 // 16 bytes
 )
 signature = Ed25519_Sign(signing_key, SHA256(signature_input))
 ```
+
+**Timestamp canonicalization:** Timestamps MUST use canonical RFC3339 UTC format: `YYYY-MM-DDTHH:MM:SSZ` (no fractional seconds, `Z` suffix). Implementations MUST reject non-canonical forms (see RFC-0002 §5.5).
 
 **Relay verification**:
 1. Parse request body
@@ -78,7 +120,7 @@ signature = Ed25519_Sign(signing_key, SHA256(signature_input))
 3. Check `nonce` not seen before (replay cache with 10-minute TTL)
 4. Fetch/cache identity document for `iid` at `identity_doc_sequence` or higher
 5. Reconstruct signature input and verify against identity document's current signing key
-6. If valid, create allocation bound to source IP:port
+6. If valid, create allocation record with **UDP binding pending** (HTTPS source is TCP, not UDP; see RFC-0002 §7.8)
 
 ### Allocation Response
 
@@ -119,7 +161,12 @@ This means a relay can host many identities on one port, with the allocation tok
 
 ### Allocation Binding and Mobility
 
-**IP Binding**: Allocations are bound to the source IP:port at creation time.
+**Two-Step UDP Binding (per RFC-0002 §7.8):**
+1. HTTPS allocation creates record with UDP binding **pending**
+2. First valid PURL packet from client establishes UDP binding (relay learns client's UDP source address:port)
+3. Subsequent packets must come from bound address; REBIND updates binding after NAT changes
+
+**IP Binding Validation (after initial bind):**
 
 | Scenario | Behavior |
 |----------|----------|
@@ -135,7 +182,7 @@ This means a relay can host many identities on one port, with the allocation tok
   "type": "rebind",
   "allocation_id": "<id>",
   "token": "<allocation-token>",
-  "timestamp": "<RFC3339>",
+  "timestamp": "<RFC3339-UTC-canonical>",
   "signature": "<Ed25519-sig-over-rebind-request>"
 }
 ```
@@ -184,7 +231,7 @@ Relay Packet:
 ├────────────────────────────────────────┤
 │ Allocation Token                       │ 16 bytes
 ├────────────────────────────────────────┤
-│ Destination IID (raw, decoded)         │ 20 bytes (or 0 for relay commands)
+│ Destination IID (raw bytes)            │ 20 bytes; for control packets (ALLOCATE, REFRESH, REBIND, RELEASE, KEEPALIVE, ERROR) this field MUST be 20 zero bytes (0x00 × 20)
 ├────────────────────────────────────────┤
 │ Payload Length (big-endian)            │ 2 bytes
 ├────────────────────────────────────────┤
@@ -200,6 +247,7 @@ Packet Types (see RFC-0002 §7.5 for authoritative registry):
   0x06 = RELEASE       End allocation
   0x07 = ERROR         Relay error response
   0x08 = REBIND        Update source IP:port binding
+  0x09 = COORDINATE    Hole-punch coordination (see nat-traversal.md)
 
 IID Encoding:
   - IID on wire is the raw 20-byte hash value (NOT Base32 encoded)
@@ -239,6 +287,27 @@ Alice ────────────────────────�
 - All clients connect to the SAME relay port (4433)
 - Routing is by destination IID, not per-allocation ports
 - Allocations track the client's bound IP:port (their NAT mapping), not relay-assigned ports
+
+### Encapsulation Model (Normative)
+
+**Per RFC-0002 §7.6:**
+
+1. **DATA packets forwarded unchanged**: The relay forwards the **entire PURL packet** (header + payload) to the destination without modification
+2. **Receiver decapsulates**: The receiving node strips the PURL header and passes only the inner QUIC payload to the QUIC stack
+3. **Token validation on receive**: Recipients MUST NOT validate the allocation token on forwarded DATA packets (only the relay validates tokens for routing)
+4. **Destination IID sanity check**: Receivers SHOULD verify the destination IID matches their own IID. **Note:** Per RFC-0002 §7.4, the PURL destination field is always an IID (20 bytes), not a DID. Device-level routing is NOT supported in v1.
+5. **Payload size limit**: Payload length MUST NOT exceed 1200 bytes; relays and receivers MUST silently drop oversized packets
+
+```
+Sender flow:
+  QUIC packet → wrap in PURL header → send to relay:4433
+
+Relay flow:
+  receive PURL → validate token → lookup dest IID → forward entire PURL packet unchanged
+
+Receiver flow:
+  receive PURL → verify dest IID → strip PURL header → pass inner payload to QUIC
+```
 
 ## Relay Authentication
 
@@ -298,9 +367,11 @@ ERROR Packet:
 ├────────────────────────────────────────┤
 │ Error Code: 0x01 (RATE_LIMITED)        │ 1 byte
 ├────────────────────────────────────────┤
-│ Retry After (seconds)                  │ 4 bytes
+│ Retry After (seconds, big-endian)      │ 4 bytes
 ├────────────────────────────────────────┤
-│ Message (UTF-8)                        │ variable
+│ Message Length (big-endian)            │ 2 bytes
+├────────────────────────────────────────┤
+│ Message (UTF-8)                        │ <length> bytes
 └────────────────────────────────────────┘
 
 Error Codes:
@@ -311,6 +382,11 @@ Error Codes:
   0x05 = RELAY_OVERLOADED
   0x06 = AUTHENTICATION_FAILED
   0x07 = BANNED
+
+ERROR Payload Framing (Normative):
+  - ERROR payload total length MUST equal: 1 (error_code) + 4 (details) + 2 (msg_len) + msg_len
+  - Recipients MUST reject ERROR packets where lengths are inconsistent
+  - Malformed ERROR packets MUST be silently dropped
 ```
 
 ## Multiple Relays
@@ -343,31 +419,24 @@ interface RelayConfig {
 
 ## Relay-Assisted Hole Punching
 
-Relays can coordinate hole punching:
+Relays can coordinate hole punching using the PURL COORDINATE packet type (0x09).
 
+**Normative Specification:** See `nat-traversal.md` "Coordination Message Transport (Normative)" for the authoritative specification of:
+- PURL COORDINATE packet format
+- Message schemas (hole_punch_request, hole_punch_offer, hole_punch_accept)
+- Signature construction for relay-assisted coordination
+- Authentication requirements
+
+**Overview:**
 ```
 1. Alice and Bob both have allocations on same relay
-2. Alice requests hole punch via relay
-3. Relay sends coordination messages to both
-4. Alice and Bob attempt direct connection
-5. If successful: close relay path, use direct
-6. If failed: continue via relay
-```
-
-### Hole Punch Coordination Message
-
-```json
-{
-  "type": "hole_punch_coordinate",
-  "transaction_id": "<random-16-bytes>",
-  "initiator_iid": "<alice>",
-  "target_iid": "<bob>",
-  "initiator_candidates": [
-    {"address": "1.2.3.4", "port": 5000, "type": "srflx"},
-    {"address": "10.0.0.5", "port": 5000, "type": "host"}
-  ],
-  "timestamp": "<RFC3339>"
-}
+2. Alice sends PURL COORDINATE packet with hole_punch_request to relay
+3. Relay forwards COORDINATE packet to Bob (same as DATA forwarding)
+4. Bob responds with hole_punch_accept via COORDINATE packet
+5. Relay forwards accept back to Alice
+6. Both Alice and Bob attempt direct connection via PUHP probes
+7. If successful: close relay path, use direct QUIC
+8. If failed (5s timeout): continue via relay
 ```
 
 ## Relay Operator Guidelines
