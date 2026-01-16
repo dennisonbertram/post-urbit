@@ -1,6 +1,6 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,6 +9,7 @@ use url::Url;
 use crate::canonical_json::canonical_json_from;
 use crate::encoding::{base64_decode, base64_encode, crockford_base32_decode, validate_crockford_base32_lower};
 use crate::error::{PostUrbitError, Result};
+use crate::identity::IdentityDocument;
 
 const MAILBOX_DOMAIN: &[u8] = b"post-urbit-mailbox-token-v1";
 
@@ -53,6 +54,14 @@ pub fn create_mailbox_token(
 }
 
 pub fn verify_mailbox_token(token_b64: &str, signing_keys: &[String]) -> Result<MailboxToken> {
+    verify_mailbox_token_with_time(token_b64, signing_keys, Utc::now())
+}
+
+pub fn verify_mailbox_token_with_time(
+    token_b64: &str,
+    signing_keys: &[String],
+    now: DateTime<Utc>,
+) -> Result<MailboxToken> {
     let token_bytes = URL_SAFE_NO_PAD
         .decode(token_b64.as_bytes())
         .map_err(|_| PostUrbitError::InvalidEncoding("token base64url"))?;
@@ -72,8 +81,25 @@ pub fn verify_mailbox_token(token_b64: &str, signing_keys: &[String]) -> Result<
         .try_into()
         .map_err(|_| PostUrbitError::InvalidInput("token nonce length"))?;
 
+    validate_token_expiry(&token.expires_at, now)?;
     verify_mailbox_signature(&token, &nonce, signing_keys)?;
     Ok(token)
+}
+
+pub fn verify_mailbox_token_with_identity(
+    token_b64: &str,
+    identity: &IdentityDocument,
+    now: DateTime<Utc>,
+) -> Result<MailboxToken> {
+    let mut keys = Vec::new();
+    keys.push(identity.keys.signing.current.clone());
+    if let Some(prev) = identity.keys.signing.previous.clone() {
+        keys.push(prev);
+    }
+    for hist in &identity.keys.signing.history {
+        keys.push(hist.key.clone());
+    }
+    verify_mailbox_token_with_time(token_b64, &keys, now)
 }
 
 fn mailbox_signature(
@@ -196,6 +222,25 @@ pub fn canonicalize_mailbox_url(input: &str) -> Result<String> {
     Ok(out)
 }
 
+fn validate_token_expiry(expires_at: &str, now: DateTime<Utc>) -> Result<()> {
+    if expires_at.contains('.') {
+        return Err(PostUrbitError::InvalidInput("expires_at fractional"));
+    }
+    if !expires_at.ends_with('Z') {
+        return Err(PostUrbitError::InvalidInput("expires_at not UTC"));
+    }
+    let expires = expires_at
+        .parse::<DateTime<Utc>>()
+        .map_err(|_| PostUrbitError::InvalidInput("expires_at parse"))?;
+    if expires < now - Duration::minutes(5) {
+        return Err(PostUrbitError::InvalidInput("token expired"));
+    }
+    if expires > now + Duration::hours(24) {
+        return Err(PostUrbitError::InvalidInput("token lifetime too long"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +249,14 @@ mod tests {
     fn canonicalize_mailbox_url_basic() {
         let url = canonicalize_mailbox_url("HTTPS://Mailbox.Example.COM:443/").unwrap();
         assert_eq!(url, "https://mailbox.example.com/");
+    }
+
+    #[test]
+    fn token_expiry_checks() {
+        let now = DateTime::parse_from_rfc3339("2025-01-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(validate_token_expiry("2025-01-16T00:00:00Z", now).is_ok());
+        assert!(validate_token_expiry("2025-01-14T23:00:00Z", now).is_err());
     }
 }
