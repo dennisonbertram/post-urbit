@@ -387,6 +387,8 @@ pub fn verify_challenge_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::base64_encode;
+    use ed25519_dalek::Signer;
 
     #[test]
     fn framing_round_trip() {
@@ -424,5 +426,59 @@ mod tests {
         });
         let json = canonical_handshake_json(&msg).unwrap();
         assert!(json.contains("client_hello"));
+    }
+
+    #[test]
+    fn handshake_challenge_round_trip() {
+        let client_nonce = base64_encode(
+            &hex::decode("0001020304050607080910111213141516171819202122232425262728293031")
+                .unwrap(),
+        );
+        let server_nonce = base64_encode(
+            &hex::decode("3130292827262524232221201918171615141312111009080706050403020100")
+                .unwrap(),
+        );
+        let tls_binding = base64_encode(
+            &hex::decode("ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100")
+                .unwrap(),
+        );
+
+        let signing_seed = hex::decode(
+            "a227446ee9fe9e7a55d2d1247bd83639bf213aa035b4faf3b66da60a208be99c",
+        )
+        .unwrap();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(
+            signing_seed.as_slice().try_into().unwrap(),
+        );
+
+        let client_nonce_raw = base64_decode(&client_nonce).unwrap();
+        let server_nonce_raw = base64_decode(&server_nonce).unwrap();
+        let tls_binding_raw = base64_decode(&tls_binding).unwrap();
+        let client_iid_raw = crockford_base32_decode("b1n7cfscgashm32xx7eaxw0y09gy0y2v").unwrap();
+        let server_iid_raw = crockford_base32_decode("2f0fcybfpmka5vf7ge737ex07crgnxsw").unwrap();
+
+        let mut challenge = Vec::new();
+        challenge.extend_from_slice(HANDSHAKE_DOMAIN);
+        challenge.extend_from_slice(&client_nonce_raw);
+        challenge.extend_from_slice(&server_nonce_raw);
+        challenge.extend_from_slice(&tls_binding_raw);
+        challenge.extend_from_slice(&client_iid_raw);
+        challenge.extend_from_slice(&server_iid_raw);
+
+        let digest = Sha256::digest(&challenge);
+        let signature = signing_key.sign(&digest);
+        let signature_base64 = base64_encode(signature.to_bytes().as_slice());
+        let signing_key_base64 = base64_encode(signing_key.verifying_key().as_bytes());
+        verify_challenge_signature(
+            &signature_base64,
+            &signing_key_base64,
+            &client_nonce,
+            &server_nonce,
+            &tls_binding,
+            "b1n7cfscgashm32xx7eaxw0y09gy0y2v",
+            "2f0fcybfpmka5vf7ge737ex07crgnxsw",
+            true,
+        )
+        .unwrap();
     }
 }

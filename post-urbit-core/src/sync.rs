@@ -360,6 +360,7 @@ impl<T: Eq + Hash + Clone> ORSet<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::base64_encode;
 
     #[test]
     fn cbor_round_trip() {
@@ -468,5 +469,47 @@ mod tests {
         };
         let keys = vec![signing_key.verifying_key().to_bytes().to_vec()];
         verify_sync_operation(&record, &keys).unwrap();
+    }
+
+    #[test]
+    fn sync_operation_matches_test_vector() {
+        let signing_seed = hex::decode(
+            "033cb5927062653e49646945878c1a40c6c9ee4694c93c10886d45d320028f40",
+        )
+        .unwrap();
+        let signing_key = SigningKey::from_bytes(signing_seed.as_slice().try_into().unwrap());
+
+        let document_id: [u8; 32] = hex::decode(
+            "550e8400e29b41d4a71644665544000000000000000000000000000000000000",
+        )
+        .unwrap()
+        .as_slice()
+        .try_into()
+        .unwrap();
+        let origin: [u8; 20] = hex::decode("586a763f2c82b31a0c5de9dcaef01e0261e0785b")
+            .unwrap()
+            .as_slice()
+            .try_into()
+            .unwrap();
+        let operation = hex::decode("a20000016b416c69636520536d697468").unwrap();
+
+        let (op_id, signature) = sign_sync_operation(
+            &document_id,
+            &origin,
+            1_700_000_000_000,
+            7,
+            &operation,
+            &[],
+            &signing_key,
+        );
+
+        assert_eq!(
+            hex::encode(op_id),
+            "27bff0b3171025eef73c81edb1c88bf61f902b30eef342b0e65ce847d65c2314"
+        );
+        assert_eq!(
+            base64_encode(&signature),
+            "q/5rBz+Pr7SiFvUJn2/q7HsqJXMJ4pvbMc1kexQJqqtMCBngpbxBIuo1Ab2QqZN0F8bQ5h0XnUu5sByjUgM/Cw"
+        );
     }
 }

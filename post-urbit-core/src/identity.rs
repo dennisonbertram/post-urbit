@@ -86,8 +86,11 @@ pub struct Endpoint {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Claims {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bio: Option<String>,
 }
 
@@ -263,6 +266,10 @@ pub fn derive_iid(verifying_key: &VerifyingKey) -> String {
     crockford_base32_encode(&hash[..20]).to_lowercase()
 }
 
+pub fn derive_did(verifying_key: &VerifyingKey) -> String {
+    derive_iid(verifying_key)
+}
+
 pub async fn publish_identity(dht: &dyn Dht, document: &IdentityDocument) -> Result<()> {
     let ttl = Duration::from_secs(60 * 60 * 24);
     let idoc = encode_idoc_envelope(document)?;
@@ -406,6 +413,78 @@ mod tests {
         let iid = derive_iid(&verifying_key);
         // Base32 per RFC-0002 §2.1 (MSB-first 5-bit groups).
         assert_eq!(iid, "b1n7cfscgashm32xx7eaxw0y09gy0y2v");
+    }
+
+    #[test]
+    fn derive_did_matches_test_vector() {
+        let pubkey_hex = "ea0757f2720fa3459633c30eb2e0ab737656321c4803d849aa7f614239c28652";
+        let pubkey_bytes = hex::decode(pubkey_hex).unwrap();
+        let verifying_key = VerifyingKey::from_bytes(
+            pubkey_bytes.as_slice().try_into().unwrap(),
+        )
+        .unwrap();
+        let did = derive_did(&verifying_key);
+        assert_eq!(did, "42kbzq2tyab939amybd76bm8kfpzgn95");
+    }
+
+    #[test]
+    fn idoc_signature_matches_test_vector() {
+        let signing_seed = hex::decode(
+            "033cb5927062653e49646945878c1a40c6c9ee4694c93c10886d45d320028f40",
+        )
+        .unwrap();
+        let signing_key = SigningKey::from_bytes(signing_seed.as_slice().try_into().unwrap());
+        let verifying_key = signing_key.verifying_key();
+
+        let enc_priv = hex::decode(
+            "7ff8c1a741fd3c5253f5d6953cd78f5411f36507f8f653b498e19d381bf7877b",
+        )
+        .unwrap();
+        let enc_priv: [u8; 32] = enc_priv.as_slice().try_into().unwrap();
+        let enc_key = StaticSecret::from(enc_priv);
+        let enc_pub = PublicKey::from(&enc_key);
+
+        let mut doc = IdentityDocument {
+            version: 1,
+            iid: "b1anasr5h0bj3832xqexwy0f0987e1xb".to_string(),
+            sequence: "0".to_string(),
+            timestamp: "2025-01-15T00:00:00Z".to_string(),
+            keys: Keys {
+                signing: SigningKeys {
+                    genesis: base64_encode(verifying_key.as_bytes()),
+                    current: base64_encode(verifying_key.as_bytes()),
+                    previous: None,
+                    history: Vec::new(),
+                },
+                encryption: EncryptionKeys {
+                    current: base64_encode(enc_pub.as_bytes()),
+                    previous: Vec::new(),
+                },
+            },
+            endpoints: Vec::new(),
+            claims: Claims {
+                name: Some("Alice".to_string()),
+                avatar: None,
+                bio: None,
+            },
+            recovery: Recovery {
+                method: "none".to_string(),
+                config: empty_object(),
+            },
+            extensions: empty_object(),
+            recovery_proof: None,
+            signatures: Signatures {
+                current: String::new(),
+                previous: None,
+            },
+        };
+
+        let signature = sign_idoc(&doc, &signing_key).unwrap();
+        doc.signatures.current = signature.clone();
+        assert_eq!(
+            signature,
+            "mScYPiZ8NTMXk+TnOh/6gQph+MAmV9nUnX6GirzDCM2kVqFmY4DCuTAYdMfM3Mh043oQfPv7V7tvEnlC4yUNCQ"
+        );
     }
 
     #[test]

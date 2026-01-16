@@ -271,6 +271,7 @@ pub fn decode_signature_b64(signature: &str) -> Result<[u8; 64]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ratchet::kdf_chain_step;
 
     #[test]
     fn puse_header_round_trip() {
@@ -302,5 +303,126 @@ mod tests {
         let ciphertext = encrypt_puse_payload(&message_key, &aad, &nonce, plaintext).unwrap();
         let decrypted = decrypt_puse_payload(&message_key, &aad, &nonce, &ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn puse_envelope_matches_test_vector_10() {
+        let signing_seed = hex::decode(
+            "033cb5927062653e49646945878c1a40c6c9ee4694c93c10886d45d320028f40",
+        )
+        .unwrap();
+        let signing_key = SigningKey::from_bytes(signing_seed.as_slice().try_into().unwrap());
+
+        let sender_iid: [u8; 20] = hex::decode("586a763f2c82b31a0c5de9dcaef01e0261e0785b")
+            .unwrap()
+            .as_slice()
+            .try_into()
+            .unwrap();
+        let recipient_iid: [u8; 20] =
+            hex::decode("d15c5160257b140ed4bf313fbf92eef8a266de56")
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap();
+        let message_id: [u8; 16] =
+            hex::decode("550e8400e29b41d4a716446655440000")
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap();
+        let header_extension = hex::decode(
+            "0089fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be627904522217",
+        )
+        .unwrap();
+        let nonce: [u8; 12] =
+            hex::decode("6560a3c00102030405060708")
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap();
+
+        let initial_chain_key = hex::decode(
+            "47920ff7fbbdca074b8abebfc125e456909b36635c9177a8afee8a1e6314d86e",
+        )
+        .unwrap();
+        let initial_chain_key: [u8; 32] = initial_chain_key.as_slice().try_into().unwrap();
+        let (_new_chain, message_key) = kdf_chain_step(&initial_chain_key);
+
+        let header = PUSEHeader {
+            flags: 0,
+            sender_iid,
+            recipient_iid,
+            message_id,
+            header_extension,
+            nonce,
+            ciphertext_length: 0,
+        };
+
+        let envelope = build_puse_envelope(&signing_key, header, &message_key, b"hello").unwrap();
+        assert_eq!(
+            hex::encode(envelope),
+            "505553450100586a763f2c82b31a0c5de9dcaef01e0261e0785bd15c5160257b140ed4bf313fbf92eef8a266de56550e8400e29b41d4a71644665544000000210089fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be6279045222176560a3c0010203040506070800000015900c9a179c3e847fdf3660033e1dc73ad0a11a8db6fdc884da4019717b56265c8172c731a3ea577fad6e77fb736f765a93d1cabfe6c2ca99a96620c3d0b60cf6f3c1ccaddfd1dddf8df197ad4e7f480ee513fec70d"
+        );
+    }
+
+    #[test]
+    fn puse_envelope_matches_test_vector_11() {
+        let signing_seed = hex::decode(
+            "033cb5927062653e49646945878c1a40c6c9ee4694c93c10886d45d320028f40",
+        )
+        .unwrap();
+        let signing_key = SigningKey::from_bytes(signing_seed.as_slice().try_into().unwrap());
+
+        let sender_iid: [u8; 20] = hex::decode("586a763f2c82b31a0c5de9dcaef01e0261e0785b")
+            .unwrap()
+            .as_slice()
+            .try_into()
+            .unwrap();
+        let recipient_iid: [u8; 20] =
+            hex::decode("d15c5160257b140ed4bf313fbf92eef8a266de56")
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap();
+        let message_id: [u8; 16] =
+            hex::decode("550e8400e29b41d4a716446655440001")
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap();
+        let header_extension = hex::decode(
+            "0189fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be6279045222170000000000000001",
+        )
+        .unwrap();
+        let nonce: [u8; 12] =
+            hex::decode("6560a3c11112131415161718")
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap();
+
+        let chain_key_1 = hex::decode(
+            "4e75e0384cbd36e42464b656a3a1f8078f4c72ac8a8eceba75e2eb21689cde91",
+        )
+        .unwrap();
+        let chain_key_1: [u8; 32] = chain_key_1.as_slice().try_into().unwrap();
+        let (_new_chain, message_key) = kdf_chain_step(&chain_key_1);
+
+        let header = PUSEHeader {
+            flags: 0,
+            sender_iid,
+            recipient_iid,
+            message_id,
+            header_extension,
+            nonce,
+            ciphertext_length: 0,
+        };
+
+        let envelope =
+            build_puse_envelope(&signing_key, header, &message_key, b"hello again").unwrap();
+        assert_eq!(
+            hex::encode(envelope),
+            "505553450100586a763f2c82b31a0c5de9dcaef01e0261e0785bd15c5160257b140ed4bf313fbf92eef8a266de56550e8400e29b41d4a71644665544000100290189fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be62790452221700000000000000016560a3c111121314151617180000001b32c8241cd1dd0baff3719c390843c0b056443cc1c0686b5f3c0126094b4d9c3ca5e0229d6f40a94b13492ff290bf812fbc203dcae818912457fc4befc0af1e857baab75d0ca434de46205b2f64262d1fed5f5963d33f43cb54c60c"
+        );
     }
 }
