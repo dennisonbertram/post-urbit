@@ -64,5 +64,6 @@ pub mod node_http;
 pub mod ratchet;
 pub mod mailbox;
 pub mod messaging_service;
+pub mod mailbox_client;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};
