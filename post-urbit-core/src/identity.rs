@@ -393,6 +393,7 @@ fn parse_sequence(value: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dht::MemoryDht;
 
     #[test]
     fn derive_iid_matches_test_vector() {
@@ -424,5 +425,56 @@ mod tests {
         let envelope = encode_idoc_envelope(&doc).unwrap();
         let decoded = decode_idoc_envelope(&envelope).unwrap();
         assert_eq!(decoded.iid, doc.iid);
+    }
+
+    #[test]
+    fn publish_genesis_prevents_overwrite() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dht = MemoryDht::new();
+        rt.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+            let doc = IdentityManager::create_genesis_document(
+                &signing_key,
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+            .unwrap();
+            publish_genesis(&dht, &doc).await.unwrap();
+
+            let mut altered = doc.clone();
+            altered.timestamp = "2025-01-16T00:00:00Z".to_string();
+            let err = publish_genesis(&dht, &altered).await.unwrap_err();
+            assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+        });
+    }
+
+    #[test]
+    fn fetch_identity_conflict_same_sequence() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dht = MemoryDht::new();
+        rt.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+            let doc = IdentityManager::create_genesis_document(
+                &signing_key,
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+            .unwrap();
+            publish_identity(&dht, &doc).await.unwrap();
+
+            let mut conflicting = doc.clone();
+            conflicting.timestamp = "2025-01-16T00:00:00Z".to_string();
+            conflicting.signatures.current = sign_idoc(&conflicting, &signing_key).unwrap();
+            publish_identity(&dht, &conflicting).await.unwrap();
+
+            let err = fetch_identity(&dht, doc.iid.as_str()).await.unwrap_err();
+            assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+        });
     }
 }
