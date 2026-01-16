@@ -149,6 +149,37 @@ pub struct ReplicationFilter {
     denylist: HashSet<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SyncStateMachine {
+    local_root: Vec<u8>,
+    remote_root: Vec<u8>,
+}
+
+impl SyncStateMachine {
+    pub fn new(local_root: Vec<u8>) -> Self {
+        Self {
+            local_root: local_root.clone(),
+            remote_root: local_root,
+        }
+    }
+
+    pub fn request_diff(&self, remote_root: &[u8]) -> bool {
+        self.local_root != remote_root
+    }
+
+    pub fn apply_remote_root(&mut self, remote_root: Vec<u8>) {
+        self.remote_root = remote_root;
+    }
+
+    pub fn apply_local_root(&mut self, local_root: Vec<u8>) {
+        self.local_root = local_root;
+    }
+
+    pub fn converged(&self) -> bool {
+        self.local_root == self.remote_root
+    }
+}
+
 impl ReplicationFilter {
     pub fn new(allowlist: Option<HashSet<String>>, denylist: HashSet<String>) -> Self {
         Self { allowlist, denylist }
@@ -291,5 +322,16 @@ mod tests {
         let filter = ReplicationFilter::new(None, deny);
         assert!(!filter.allows("secret"));
         assert!(filter.allows("public"));
+    }
+
+    #[test]
+    fn sync_state_machine_converges() {
+        let mut sm = SyncStateMachine::new(vec![1u8; 32]);
+        assert!(sm.converged());
+        assert!(sm.request_diff(&[2u8; 32]));
+        sm.apply_remote_root(vec![2u8; 32]);
+        assert!(!sm.converged());
+        sm.apply_local_root(vec![2u8; 32]);
+        assert!(sm.converged());
     }
 }
