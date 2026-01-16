@@ -73,7 +73,7 @@ pub enum SyncMessage {
     Error(SyncError),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncOperationRecord {
     pub id: [u8; 32],
     pub origin: [u8; 20],
@@ -82,7 +82,12 @@ pub struct SyncOperationRecord {
     pub logical: u32,
     pub operation: Vec<u8>,
     pub dependencies: Vec<[u8; 32]>,
-    pub signature: [u8; 64],
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Default)]
+pub struct SyncStore {
+    operations: HashMap<[u8; 32], SyncOperationRecord>,
 }
 
 pub fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>> {
@@ -159,6 +164,78 @@ pub fn merkle_empty_hash() -> [u8; 32] {
     hasher.finalize().as_slice().try_into().expect("sha256 length")
 }
 
+pub fn merkle_root(records: &[SyncOperationRecord]) -> [u8; 32] {
+    if records.is_empty() {
+        return merkle_empty_hash();
+    }
+    let mut leaves = Vec::with_capacity(records.len());
+    for record in ordered_operations(records) {
+        leaves.push(merkle_leaf_hash(&record.id));
+    }
+    let mut size = 1usize;
+    while size < leaves.len() {
+        size <<= 1;
+    }
+    let empty = merkle_empty_hash();
+    while leaves.len() < size {
+        leaves.push(empty);
+    }
+    let mut level = leaves;
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len() / 2);
+        for pair in level.chunks(2) {
+            let right = if pair.len() == 2 { &pair[1] } else { &empty };
+            next.push(merkle_node_hash(&pair[0], right));
+        }
+        level = next;
+    }
+    level[0]
+}
+
+pub fn ordered_operations(records: &[SyncOperationRecord]) -> Vec<SyncOperationRecord> {
+    let mut ops = records.to_vec();
+    ops.sort_by(|a, b| {
+        let order = a.physical_ms.cmp(&b.physical_ms);
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+        let order = a.logical.cmp(&b.logical);
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+        let order = a.origin.cmp(&b.origin);
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+        a.id.cmp(&b.id)
+    });
+    ops
+}
+
+pub fn offer_operation_ids(records: &[SyncOperationRecord]) -> Vec<[u8; 32]> {
+    ordered_operations(records)
+        .into_iter()
+        .map(|record| record.id)
+        .collect()
+}
+
+pub fn missing_operation_ids(
+    local: &HashSet<[u8; 32]>,
+    offer: &[Vec<u8>],
+) -> Result<Vec<Vec<u8>>> {
+    let mut out = Vec::new();
+    for id in offer {
+        let id_bytes: [u8; 32] = id
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("operation id length"))?;
+        if !local.contains(&id_bytes) {
+            out.push(id.clone());
+        }
+    }
+    Ok(out)
+}
+
 pub fn timestamp_bytes(physical_ms: u64, logical: u32, origin: &[u8; 20]) -> [u8; 20] {
     let mut out = [0u8; 20];
     out[..8].copy_from_slice(&physical_ms.to_be_bytes());
@@ -222,7 +299,12 @@ pub fn verify_sync_operation(
     signature_input.extend_from_slice(&record.operation);
     signature_input.extend_from_slice(&deps);
 
-    let signature = Signature::from_bytes(&record.signature);
+    let sig_bytes: [u8; 64] = record
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| PostUrbitError::InvalidInput("signature length"))?;
+    let signature = Signature::from_bytes(&sig_bytes);
     for key_bytes in signing_keys {
         if key_bytes.len() != 32 {
             continue;
@@ -249,6 +331,76 @@ fn dependencies_bytes(dependencies: &[ [u8; 32] ]) -> Vec<u8> {
         out.extend_from_slice(&dep);
     }
     out
+}
+
+impl SyncStore {
+    pub fn new() -> Self {
+        Self {
+            operations: HashMap::new(),
+        }
+    }
+
+    pub fn add_operation(
+        &mut self,
+        record: SyncOperationRecord,
+        signing_keys: &[Vec<u8>],
+    ) -> Result<()> {
+        verify_sync_operation(&record, signing_keys)?;
+        for dep in &record.dependencies {
+            if !self.operations.contains_key(dep) {
+                return Err(PostUrbitError::InvalidInput("dependency missing"));
+            }
+        }
+        self.operations.insert(record.id, record);
+        Ok(())
+    }
+
+    pub fn has_operation(&self, id: &[u8; 32]) -> bool {
+        self.operations.contains_key(id)
+    }
+
+    pub fn all_operations(&self) -> Vec<SyncOperationRecord> {
+        self.operations.values().cloned().collect()
+    }
+
+    pub fn merkle_root(&self) -> [u8; 32] {
+        merkle_root(&self.all_operations())
+    }
+
+    pub fn offer(&self, document_id: [u8; 32]) -> SyncOffer {
+        let ids = offer_operation_ids(&self.all_operations())
+            .into_iter()
+            .map(|id| id.to_vec())
+            .collect();
+        SyncOffer {
+            document_id: document_id.to_vec(),
+            operation_ids: ids,
+        }
+    }
+
+    pub fn accept(&self, offer: &SyncOffer) -> Result<SyncAccept> {
+        let local_ids: HashSet<[u8; 32]> = self.operations.keys().copied().collect();
+        let wanted_ids = missing_operation_ids(&local_ids, &offer.operation_ids)?;
+        Ok(SyncAccept {
+            document_id: offer.document_id.clone(),
+            wanted_ids,
+        })
+    }
+
+    pub fn operations_for(&self, ids: &[Vec<u8>]) -> Result<Vec<Vec<u8>>> {
+        let mut out = Vec::new();
+        for id in ids {
+            let key: [u8; 32] = id
+                .as_slice()
+                .try_into()
+                .map_err(|_| PostUrbitError::InvalidInput("operation id length"))?;
+            let Some(record) = self.operations.get(&key) else {
+                return Err(PostUrbitError::InvalidInput("operation not found"));
+            };
+            out.push(encode_cbor(record)?);
+        }
+        Ok(out)
+    }
 }
 
 fn encode_cbor_value(value: &CborValue) -> Result<Vec<u8>> {
@@ -487,6 +639,89 @@ mod tests {
     }
 
     #[test]
+    fn merkle_root_empty_is_empty_hash() {
+        let root = merkle_root(&[]);
+        assert_eq!(root, merkle_empty_hash());
+    }
+
+    #[test]
+    fn offer_ids_sorted_by_timestamp_origin() {
+        let mut records = Vec::new();
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let origin_a = [1u8; 20];
+        let origin_b = [2u8; 20];
+        let document_id = [9u8; 32];
+        let deps: Vec<[u8; 32]> = Vec::new();
+
+        let (id1, sig1) = sign_sync_operation(
+            &document_id,
+            &origin_b,
+            10,
+            1,
+            b"op1",
+            &deps,
+            &signing_key,
+        );
+        records.push(SyncOperationRecord {
+            id: id1,
+            origin: origin_b,
+            document_id,
+            physical_ms: 10,
+            logical: 1,
+            operation: b"op1".to_vec(),
+            dependencies: deps.clone(),
+            signature: sig1.to_vec(),
+        });
+
+        let (id2, sig2) = sign_sync_operation(
+            &document_id,
+            &origin_a,
+            9,
+            5,
+            b"op2",
+            &deps,
+            &signing_key,
+        );
+        records.push(SyncOperationRecord {
+            id: id2,
+            origin: origin_a,
+            document_id,
+            physical_ms: 9,
+            logical: 5,
+            operation: b"op2".to_vec(),
+            dependencies: deps.clone(),
+            signature: sig2.to_vec(),
+        });
+
+        let ordered = offer_operation_ids(&records);
+        assert_eq!(ordered[0], id2);
+        assert_eq!(ordered[1], id1);
+    }
+
+    #[test]
+    fn sync_store_accepts_missing_ids() {
+        let mut store = SyncStore::new();
+        let document_id = [7u8; 32];
+        let record = SyncOperationRecord {
+            id: [1u8; 32],
+            origin: [3u8; 20],
+            document_id,
+            physical_ms: 1,
+            logical: 0,
+            operation: vec![0x01],
+            dependencies: Vec::new(),
+            signature: vec![0u8; 64],
+        };
+        store.operations.insert(record.id, record);
+        let offer = SyncOffer {
+            document_id: document_id.to_vec(),
+            operation_ids: vec![vec![1u8; 32], vec![2u8; 32]],
+        };
+        let accept = store.accept(&offer).unwrap();
+        assert_eq!(accept.wanted_ids, vec![vec![2u8; 32]]);
+    }
+
+    #[test]
     fn orset_add_remove_merge() {
         let mut a = ORSet::new();
         a.add("hello", 1);
@@ -554,7 +789,7 @@ mod tests {
             logical: 1,
             operation,
             dependencies: deps,
-            signature,
+            signature: signature.to_vec(),
         };
         let keys = vec![signing_key.verifying_key().to_bytes().to_vec()];
         verify_sync_operation(&record, &keys).unwrap();
