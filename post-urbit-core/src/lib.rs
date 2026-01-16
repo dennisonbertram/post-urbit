@@ -58,5 +58,8 @@ pub mod node;
 pub mod messaging;
 pub mod sync;
 pub mod runtime;
+pub mod node_config;
+pub mod node_backup;
+pub mod node_http;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};
