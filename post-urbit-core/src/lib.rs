@@ -57,5 +57,6 @@ pub mod error;
 pub mod node;
 pub mod messaging;
 pub mod sync;
+pub mod runtime;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};
