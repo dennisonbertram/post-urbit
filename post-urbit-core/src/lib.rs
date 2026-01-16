@@ -62,5 +62,6 @@ pub mod node_config;
 pub mod node_backup;
 pub mod node_http;
 pub mod ratchet;
+pub mod mailbox;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};

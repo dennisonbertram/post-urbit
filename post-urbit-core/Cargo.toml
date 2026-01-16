@@ -25,6 +25,7 @@ tar = "0.4"
 pbkdf2 = "0.12"
 hmac = "0.12"
 hkdf = "0.12"
+url = "2.5"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
