@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
+use serde_cbor::Value as CborValue;
 use sha2::{Digest, Sha256};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
 
@@ -85,10 +86,18 @@ pub struct SyncOperationRecord {
 }
 
 pub fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    serde_cbor::to_vec(value).map_err(|_| PostUrbitError::InvalidInput("cbor encode"))
+    let cbor_value = serde_cbor::value::to_value(value)
+        .map_err(|_| PostUrbitError::InvalidInput("cbor encode"))?;
+    encode_cbor_value(&cbor_value)
 }
 
 pub fn decode_cbor<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T> {
+    let value: CborValue =
+        serde_cbor::from_slice(bytes).map_err(|_| PostUrbitError::InvalidInput("cbor decode"))?;
+    let encoded = encode_cbor_value(&value)?;
+    if encoded != bytes {
+        return Err(PostUrbitError::InvalidInput("cbor non-canonical"));
+    }
     serde_cbor::from_slice(bytes).map_err(|_| PostUrbitError::InvalidInput("cbor decode"))
 }
 
@@ -240,6 +249,86 @@ fn dependencies_bytes(dependencies: &[ [u8; 32] ]) -> Vec<u8> {
         out.extend_from_slice(&dep);
     }
     out
+}
+
+fn encode_cbor_value(value: &CborValue) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_cbor_value_into(value, &mut out)?;
+    Ok(out)
+}
+
+fn encode_cbor_value_into(value: &CborValue, out: &mut Vec<u8>) -> Result<()> {
+    match value {
+        CborValue::Null => {
+            out.push(0xf6);
+        }
+        CborValue::Bool(value) => {
+            out.push(if *value { 0xf5 } else { 0xf4 });
+        }
+        CborValue::Integer(value) => {
+            if *value >= 0 {
+                encode_major(out, 0, *value as u64);
+            } else {
+                let encoded = (-1 - *value) as u64;
+                encode_major(out, 1, encoded);
+            }
+        }
+        CborValue::Bytes(bytes) => {
+            encode_major(out, 2, bytes.len() as u64);
+            out.extend_from_slice(bytes);
+        }
+        CborValue::Text(text) => {
+            encode_major(out, 3, text.len() as u64);
+            out.extend_from_slice(text.as_bytes());
+        }
+        CborValue::Array(items) => {
+            encode_major(out, 4, items.len() as u64);
+            for item in items {
+                encode_cbor_value_into(item, out)?;
+            }
+        }
+        CborValue::Map(entries) => {
+            let mut keyed = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
+                let key_bytes = encode_cbor_value(key)?;
+                keyed.push((key_bytes, key, value));
+            }
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            for idx in 1..keyed.len() {
+                if keyed[idx - 1].0 == keyed[idx].0 {
+                    return Err(PostUrbitError::InvalidInput("cbor duplicate map key"));
+                }
+            }
+
+            encode_major(out, 5, keyed.len() as u64);
+            for (key_bytes, _key, value) in keyed {
+                out.extend_from_slice(&key_bytes);
+                encode_cbor_value_into(value, out)?;
+            }
+        }
+        _ => {
+            return Err(PostUrbitError::InvalidInput("cbor unsupported type"));
+        }
+    }
+    Ok(())
+}
+
+fn encode_major(out: &mut Vec<u8>, major: u8, value: u64) {
+    if value < 24 {
+        out.push((major << 5) | value as u8);
+    } else if value <= u8::MAX as u64 {
+        out.push((major << 5) | 24);
+        out.push(value as u8);
+    } else if value <= u16::MAX as u64 {
+        out.push((major << 5) | 25);
+        out.extend_from_slice(&(value as u16).to_be_bytes());
+    } else if value <= u32::MAX as u64 {
+        out.push((major << 5) | 26);
+        out.extend_from_slice(&(value as u32).to_be_bytes());
+    } else {
+        out.push((major << 5) | 27);
+        out.extend_from_slice(&value.to_be_bytes());
+    }
 }
 
 #[derive(Debug, Clone)]
