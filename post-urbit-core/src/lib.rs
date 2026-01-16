@@ -68,5 +68,6 @@ pub mod mailbox_client;
 pub mod harness;
 pub mod runtime_wasm;
 pub mod mailbox_store;
+pub mod nat;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};
