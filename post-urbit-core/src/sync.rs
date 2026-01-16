@@ -3,6 +3,7 @@ use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
 
 use crate::error::{PostUrbitError, Result};
 
@@ -71,6 +72,18 @@ pub enum SyncMessage {
     Error(SyncError),
 }
 
+#[derive(Debug, Clone)]
+pub struct SyncOperationRecord {
+    pub id: [u8; 32],
+    pub origin: [u8; 20],
+    pub document_id: [u8; 32],
+    pub physical_ms: u64,
+    pub logical: u32,
+    pub operation: Vec<u8>,
+    pub dependencies: Vec<[u8; 32]>,
+    pub signature: [u8; 64],
+}
+
 pub fn encode_cbor<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_cbor::to_vec(value).map_err(|_| PostUrbitError::InvalidInput("cbor encode"))
 }
@@ -135,6 +148,98 @@ pub fn merkle_empty_hash() -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(MERKLE_EMPTY_PREFIX);
     hasher.finalize().as_slice().try_into().expect("sha256 length")
+}
+
+pub fn timestamp_bytes(physical_ms: u64, logical: u32, origin: &[u8; 20]) -> [u8; 20] {
+    let mut out = [0u8; 20];
+    out[..8].copy_from_slice(&physical_ms.to_be_bytes());
+    out[8..12].copy_from_slice(&logical.to_be_bytes());
+    let hash = Sha256::digest(origin);
+    out[12..20].copy_from_slice(&hash[..8]);
+    out
+}
+
+pub fn operation_id(
+    origin: &[u8; 20],
+    physical_ms: u64,
+    logical: u32,
+    operation_bytes: &[u8],
+    dependencies: &[ [u8; 32] ],
+) -> [u8; 32] {
+    let timestamp = timestamp_bytes(physical_ms, logical, origin);
+    let deps = dependencies_bytes(dependencies);
+    let mut hasher = Sha256::new();
+    hasher.update(origin);
+    hasher.update(&timestamp);
+    hasher.update(operation_bytes);
+    hasher.update(&deps);
+    hasher.finalize().as_slice().try_into().expect("sha256 length")
+}
+
+pub fn sign_sync_operation(
+    document_id: &[u8; 32],
+    origin: &[u8; 20],
+    physical_ms: u64,
+    logical: u32,
+    operation_bytes: &[u8],
+    dependencies: &[ [u8; 32] ],
+    signing_key: &SigningKey,
+) -> ([u8; 32], [u8; 64]) {
+    let op_id = operation_id(origin, physical_ms, logical, operation_bytes, dependencies);
+    let timestamp = timestamp_bytes(physical_ms, logical, origin);
+    let deps = dependencies_bytes(dependencies);
+    let mut signature_input = Vec::new();
+    signature_input.extend_from_slice(b"post-urbit:sync-op:v1:");
+    signature_input.extend_from_slice(&op_id);
+    signature_input.extend_from_slice(document_id);
+    signature_input.extend_from_slice(&timestamp);
+    signature_input.extend_from_slice(operation_bytes);
+    signature_input.extend_from_slice(&deps);
+    let signature: Signature = signing_key.sign(&signature_input);
+    (op_id, signature.to_bytes())
+}
+
+pub fn verify_sync_operation(
+    record: &SyncOperationRecord,
+    signing_keys: &[Vec<u8>],
+) -> Result<()> {
+    let timestamp = timestamp_bytes(record.physical_ms, record.logical, &record.origin);
+    let deps = dependencies_bytes(&record.dependencies);
+    let mut signature_input = Vec::new();
+    signature_input.extend_from_slice(b"post-urbit:sync-op:v1:");
+    signature_input.extend_from_slice(&record.id);
+    signature_input.extend_from_slice(&record.document_id);
+    signature_input.extend_from_slice(&timestamp);
+    signature_input.extend_from_slice(&record.operation);
+    signature_input.extend_from_slice(&deps);
+
+    let signature = Signature::from_bytes(&record.signature);
+    for key_bytes in signing_keys {
+        if key_bytes.len() != 32 {
+            continue;
+        }
+        let verifying_key = VerifyingKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| PostUrbitError::InvalidInput("signing key length"))?,
+        )
+        .map_err(|_| PostUrbitError::InvalidInput("signing key parse"))?;
+        if verifying_key.verify_strict(&signature_input, &signature).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(PostUrbitError::Crypto("sync signature invalid"))
+}
+
+fn dependencies_bytes(dependencies: &[ [u8; 32] ]) -> Vec<u8> {
+    let mut deps = dependencies.to_vec();
+    deps.sort();
+    let mut out = Vec::with_capacity(deps.len() * 32);
+    for dep in deps {
+        out.extend_from_slice(&dep);
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -333,5 +438,35 @@ mod tests {
         assert!(!sm.converged());
         sm.apply_local_root(vec![2u8; 32]);
         assert!(sm.converged());
+    }
+
+    #[test]
+    fn sync_operation_signature_round_trip() {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let document_id = [1u8; 32];
+        let origin = [2u8; 20];
+        let operation = vec![0x01, 0x02];
+        let deps = vec![[9u8; 32]];
+        let (op_id, signature) = sign_sync_operation(
+            &document_id,
+            &origin,
+            123,
+            1,
+            &operation,
+            &deps,
+            &signing_key,
+        );
+        let record = SyncOperationRecord {
+            id: op_id,
+            origin,
+            document_id,
+            physical_ms: 123,
+            logical: 1,
+            operation,
+            dependencies: deps,
+            signature,
+        };
+        let keys = vec![signing_key.verifying_key().to_bytes().to_vec()];
+        verify_sync_operation(&record, &keys).unwrap();
     }
 }
