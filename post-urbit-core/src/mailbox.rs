@@ -175,6 +175,9 @@ fn mailbox_signature_input(
 }
 
 pub fn canonicalize_mailbox_url(input: &str) -> Result<String> {
+    if !input.is_ascii() {
+        return Err(PostUrbitError::InvalidInput("mailbox url ascii"));
+    }
     let url = Url::parse(input).map_err(|_| PostUrbitError::InvalidInput("mailbox url"))?;
     if url.scheme() != "https" {
         return Err(PostUrbitError::InvalidInput("mailbox url scheme"));
@@ -249,6 +252,14 @@ mod tests {
     fn canonicalize_mailbox_url_basic() {
         let url = canonicalize_mailbox_url("HTTPS://Mailbox.Example.COM:443/").unwrap();
         assert_eq!(url, "https://mailbox.example.com/");
+    }
+
+    #[test]
+    fn canonicalize_mailbox_url_rejects_invalid() {
+        assert!(canonicalize_mailbox_url("http://example.com/").is_err());
+        assert!(canonicalize_mailbox_url("https://user@example.com/").is_err());
+        assert!(canonicalize_mailbox_url("https://example.com/?query").is_err());
+        assert!(canonicalize_mailbox_url("https://müller.example/").is_err());
     }
 
     #[test]
