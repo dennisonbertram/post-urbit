@@ -89,6 +89,10 @@ mod tests {
     use super::*;
     use crate::dht::MemoryDht;
     use crate::identity::{fetch_identity, publish_genesis, IdentityManager};
+    use crate::mailbox_store::MailboxStore;
+    use crate::messaging::{build_puse_envelope, decode_puse_envelope, PUSEHeader};
+    use crate::encoding::crockford_base32_decode;
+    use ed25519_dalek::SigningKey;
 
     #[test]
     fn evidence_bundle_writes_files() {
@@ -122,6 +126,40 @@ mod tests {
         });
 
         bundle.record_event("S2", "publish identity");
+        bundle.finalize("ok").unwrap();
+    }
+
+    #[test]
+    fn harness_mailbox_store_retrieve() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut bundle = EvidenceBundle::new(temp.path(), "run-mailbox").unwrap();
+        bundle.add_scenario("SCEN-JOURNEY-04");
+        bundle.record_event("S1", "store envelope");
+
+        let sender_iid = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let sender_raw = crockford_base32_decode(sender_iid).unwrap();
+        let sender_raw: [u8; 20] = sender_raw.try_into().unwrap();
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let header = PUSEHeader {
+            flags: 0,
+            sender_iid: sender_raw,
+            recipient_iid: [3u8; 20],
+            message_id: [7u8; 16],
+            header_extension: vec![0x00; 33],
+            nonce: [8u8; 12],
+            ciphertext_length: 0,
+        };
+        let message_key = [9u8; 32];
+        let envelope = build_puse_envelope(&signing_key, header, &message_key, b"hello").unwrap();
+        let mut store = MailboxStore::new();
+        let _ = store.store(sender_iid, sender_iid, &envelope).unwrap();
+
+        let messages = store.retrieve(sender_iid).unwrap();
+        assert_eq!(messages.len(), 1);
+        let decoded = decode_puse_envelope(&messages[0].envelope).unwrap();
+        assert_eq!(decoded.header.message_id, [7u8; 16]);
+
+        bundle.record_event("S2", "retrieve envelope");
         bundle.finalize("ok").unwrap();
     }
 }
