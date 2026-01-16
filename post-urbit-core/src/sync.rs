@@ -143,6 +143,28 @@ pub struct ORSet<T: Eq + Hash + Clone> {
     removes: HashMap<T, HashSet<u64>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReplicationFilter {
+    allowlist: Option<HashSet<String>>,
+    denylist: HashSet<String>,
+}
+
+impl ReplicationFilter {
+    pub fn new(allowlist: Option<HashSet<String>>, denylist: HashSet<String>) -> Self {
+        Self { allowlist, denylist }
+    }
+
+    pub fn allows(&self, dataset: &str) -> bool {
+        if self.denylist.contains(dataset) {
+            return false;
+        }
+        match &self.allowlist {
+            Some(list) => list.contains(dataset),
+            None => true,
+        }
+    }
+}
+
 impl<T: Eq + Hash + Clone> ORSet<T> {
     pub fn new() -> Self {
         Self {
@@ -251,5 +273,23 @@ mod tests {
         a.merge(&b);
         let values = a.values();
         assert!(values.contains("hello"));
+    }
+
+    #[test]
+    fn replication_filter_allows() {
+        let mut allow = HashSet::new();
+        allow.insert("docs".to_string());
+        let filter = ReplicationFilter::new(Some(allow), HashSet::new());
+        assert!(filter.allows("docs"));
+        assert!(!filter.allows("photos"));
+    }
+
+    #[test]
+    fn replication_filter_denies() {
+        let mut deny = HashSet::new();
+        deny.insert("secret".to_string());
+        let filter = ReplicationFilter::new(None, deny);
+        assert!(!filter.allows("secret"));
+        assert!(filter.allows("public"));
     }
 }
