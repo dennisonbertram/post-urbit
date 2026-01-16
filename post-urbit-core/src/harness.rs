@@ -87,6 +87,8 @@ impl EvidenceBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dht::MemoryDht;
+    use crate::identity::{fetch_identity, publish_genesis, IdentityManager};
 
     #[test]
     fn evidence_bundle_writes_files() {
@@ -99,5 +101,27 @@ mod tests {
         assert!(temp.path().join("run-test/summary.md").exists());
         assert!(temp.path().join("run-test/summary.json").exists());
         assert!(temp.path().join("run-test/events.ndjson").exists());
+    }
+
+    #[test]
+    fn harness_single_node_identity_publish() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut bundle = EvidenceBundle::new(temp.path(), "run-e2e").unwrap();
+        bundle.add_scenario("SCEN-ID-01");
+        bundle.record_event("S1", "create identity");
+
+        rt.block_on(async {
+            let dht = MemoryDht::new();
+            let identity = IdentityManager::new(temp.path().to_str().unwrap())
+                .await
+                .unwrap();
+            publish_genesis(&dht, identity.identity_document()).await.unwrap();
+            let fetched = fetch_identity(&dht, identity.iid()).await.unwrap();
+            assert!(fetched.is_some());
+        });
+
+        bundle.record_event("S2", "publish identity");
+        bundle.finalize("ok").unwrap();
     }
 }
