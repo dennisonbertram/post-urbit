@@ -69,5 +69,6 @@ pub mod harness;
 pub mod runtime_wasm;
 pub mod mailbox_store;
 pub mod nat;
+pub mod relay;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};
