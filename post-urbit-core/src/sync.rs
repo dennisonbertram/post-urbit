@@ -501,6 +501,12 @@ pub struct SyncStateMachine {
     remote_root: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub struct SyncSession {
+    document_id: [u8; 32],
+    store: SyncStore,
+}
+
 impl SyncStateMachine {
     pub fn new(local_root: Vec<u8>) -> Self {
         Self {
@@ -523,6 +529,76 @@ impl SyncStateMachine {
 
     pub fn converged(&self) -> bool {
         self.local_root == self.remote_root
+    }
+}
+
+impl SyncSession {
+    pub fn new(document_id: [u8; 32], store: SyncStore) -> Self {
+        Self { document_id, store }
+    }
+
+    pub fn request(&self) -> SyncRequest {
+        SyncRequest {
+            document_id: self.document_id.to_vec(),
+            merkle_root: self.store.merkle_root().to_vec(),
+            depth: 0,
+        }
+    }
+
+    pub fn handle_request(&self, req: &SyncRequest) -> Result<SyncOffer> {
+        if req.document_id.as_slice() != self.document_id.as_ref() {
+            return Err(PostUrbitError::InvalidInput("document id mismatch"));
+        }
+        let local_root = self.store.merkle_root();
+        if req.merkle_root == local_root.to_vec() {
+            return Ok(SyncOffer {
+                document_id: self.document_id.to_vec(),
+                operation_ids: Vec::new(),
+            });
+        }
+        Ok(self.store.offer(self.document_id))
+    }
+
+    pub fn handle_offer(&self, offer: &SyncOffer) -> Result<SyncAccept> {
+        if offer.document_id.as_slice() != self.document_id.as_ref() {
+            return Err(PostUrbitError::InvalidInput("document id mismatch"));
+        }
+        self.store.accept(offer)
+    }
+
+    pub fn handle_accept(&self, accept: &SyncAccept) -> Result<SyncOperations> {
+        if accept.document_id.as_slice() != self.document_id.as_ref() {
+            return Err(PostUrbitError::InvalidInput("document id mismatch"));
+        }
+        let operations = self.store.operations_for(&accept.wanted_ids)?;
+        Ok(SyncOperations {
+            document_id: self.document_id.to_vec(),
+            operations,
+        })
+    }
+
+    pub fn handle_operations(
+        &mut self,
+        ops: &SyncOperations,
+        signing_keys: &[Vec<u8>],
+    ) -> Result<SyncAck> {
+        if ops.document_id.as_slice() != self.document_id.as_ref() {
+            return Err(PostUrbitError::InvalidInput("document id mismatch"));
+        }
+        let mut acked = Vec::new();
+        for op_bytes in &ops.operations {
+            let record: SyncOperationRecord = decode_cbor(op_bytes)?;
+            self.store.add_operation(record.clone(), signing_keys)?;
+            acked.push(record.id.to_vec());
+        }
+        Ok(SyncAck {
+            document_id: self.document_id.to_vec(),
+            operation_ids: acked,
+        })
+    }
+
+    pub fn store(&self) -> &SyncStore {
+        &self.store
     }
 }
 
@@ -719,6 +795,52 @@ mod tests {
         };
         let accept = store.accept(&offer).unwrap();
         assert_eq!(accept.wanted_ids, vec![vec![2u8; 32]]);
+    }
+
+    #[test]
+    fn sync_session_flow_exchanges_operations() {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let keys = vec![signing_key.verifying_key().to_bytes().to_vec()];
+        let document_id = [4u8; 32];
+
+        let (op_id, signature) = sign_sync_operation(
+            &document_id,
+            &[7u8; 20],
+            10,
+            1,
+            b"op",
+            &[],
+            &signing_key,
+        );
+        let record = SyncOperationRecord {
+            id: op_id,
+            origin: [7u8; 20],
+            document_id,
+            physical_ms: 10,
+            logical: 1,
+            operation: b"op".to_vec(),
+            dependencies: Vec::new(),
+            signature: signature.to_vec(),
+        };
+
+        let mut sender_store = SyncStore::new();
+        sender_store
+            .add_operation(record, &keys)
+            .unwrap();
+        let sender = SyncSession::new(document_id, sender_store);
+
+        let receiver_store = SyncStore::new();
+        let mut receiver = SyncSession::new(document_id, receiver_store);
+
+        let request = receiver.request();
+        let offer = sender.handle_request(&request).unwrap();
+        let accept = receiver.handle_offer(&offer).unwrap();
+        let operations = sender.handle_accept(&accept).unwrap();
+        let ack = receiver.handle_operations(&operations, &keys).unwrap();
+
+        assert_eq!(ack.operation_ids.len(), 1);
+        assert!(receiver.store().has_operation(&op_id));
+        assert_eq!(receiver.store().merkle_root(), sender.store().merkle_root());
     }
 
     #[test]
