@@ -55,5 +55,6 @@ pub mod encoding;
 pub mod canonical_json;
 pub mod error;
 pub mod node;
+pub mod messaging;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};
