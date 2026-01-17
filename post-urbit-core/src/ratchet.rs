@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use hmac::{Hmac, Mac};
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -102,6 +104,267 @@ pub fn two_dh_initiator(
         .diffie_hellman(peer_identity_public)
         .to_bytes();
     (dh1, dh2)
+}
+
+pub fn two_dh_responder(
+    identity_private: &StaticSecret,
+    peer_identity_public: &PublicKey,
+    peer_ephemeral_public: &PublicKey,
+) -> ([u8; 32], [u8; 32]) {
+    let dh1 = identity_private
+        .diffie_hellman(peer_identity_public)
+        .to_bytes();
+    let dh2 = identity_private
+        .diffie_hellman(peer_ephemeral_public)
+        .to_bytes();
+    (dh1, dh2)
+}
+
+#[derive(Clone)]
+pub struct RatchetKeyPair {
+    pub private: StaticSecret,
+    pub public: PublicKey,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReceivingChain {
+    pub chain_key: [u8; 32],
+    pub chain_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SkippedKeyId {
+    dh_public: [u8; 32],
+    n: u32,
+}
+
+#[derive(Clone)]
+pub struct RatchetState {
+    pub peer_iid: [u8; 20],
+    pub dh_sending_key: RatchetKeyPair,
+    pub dh_receiving_key: PublicKey,
+    pub root_key: [u8; 32],
+    pub sending_chain_key: Option<[u8; 32]>,
+    pub sending_chain_index: u32,
+    pub previous_sending_chain_length: u32,
+    pub receiving_chains: HashMap<[u8; 32], ReceivingChain>,
+    skipped_keys: HashMap<SkippedKeyId, [u8; 32]>,
+    pub max_skip: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RatchetHeader {
+    pub dh_public: [u8; 32],
+    pub pn: u32,
+    pub n: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialMessage {
+    pub ephemeral_public: [u8; 32],
+    pub message_key: [u8; 32],
+}
+
+impl RatchetState {
+    pub fn initialize_initiator(
+        root_key: [u8; 32],
+        initial_chain_key: [u8; 32],
+        peer_identity_key: PublicKey,
+        peer_iid: [u8; 20],
+        ephemeral_private: StaticSecret,
+    ) -> Self {
+        let ephemeral_public = PublicKey::from(&ephemeral_private);
+        Self {
+            peer_iid,
+            dh_sending_key: RatchetKeyPair {
+                private: ephemeral_private,
+                public: ephemeral_public,
+            },
+            dh_receiving_key: peer_identity_key,
+            root_key,
+            sending_chain_key: Some(initial_chain_key),
+            sending_chain_index: 0,
+            previous_sending_chain_length: 0,
+            receiving_chains: HashMap::new(),
+            skipped_keys: HashMap::new(),
+            max_skip: 100,
+        }
+    }
+
+    pub fn initialize_responder(
+        root_key: [u8; 32],
+        initial_chain_key: [u8; 32],
+        peer_ephemeral_key: PublicKey,
+        peer_iid: [u8; 20],
+        sending_private: StaticSecret,
+    ) -> Self {
+        let sending_public = PublicKey::from(&sending_private);
+        let mut receiving_chains = HashMap::new();
+        receiving_chains.insert(
+            peer_ephemeral_key.to_bytes(),
+            ReceivingChain {
+                chain_key: initial_chain_key,
+                chain_index: 0,
+            },
+        );
+        Self {
+            peer_iid,
+            dh_sending_key: RatchetKeyPair {
+                private: sending_private,
+                public: sending_public,
+            },
+            dh_receiving_key: peer_ephemeral_key,
+            root_key,
+            sending_chain_key: None,
+            sending_chain_index: 0,
+            previous_sending_chain_length: 0,
+            receiving_chains,
+            skipped_keys: HashMap::new(),
+            max_skip: 100,
+        }
+    }
+
+    pub fn initial_message_key(&mut self) -> Result<InitialMessage> {
+        let chain_key = self
+            .sending_chain_key
+            .ok_or(PostUrbitError::InvalidInput("missing sending chain"))?;
+        let (new_chain, message_key) = kdf_chain_step(&chain_key);
+        self.sending_chain_key = Some(new_chain);
+        let n = self.sending_chain_index;
+        if n == 0 {
+            self.sending_chain_index = 1;
+        } else {
+            self.sending_chain_index += 1;
+        }
+        Ok(InitialMessage {
+            ephemeral_public: self.dh_sending_key.public.to_bytes(),
+            message_key,
+        })
+    }
+
+    pub fn initial_receive_message_key(&mut self) -> Result<[u8; 32]> {
+        let key = self.dh_receiving_key.to_bytes();
+        let chain = self
+            .receiving_chains
+            .get_mut(&key)
+            .ok_or(PostUrbitError::InvalidInput("missing receiving chain"))?;
+        let (new_chain, message_key) = kdf_chain_step(&chain.chain_key);
+        chain.chain_key = new_chain;
+        chain.chain_index += 1;
+        Ok(message_key)
+    }
+
+    pub fn ratchet_encrypt(&mut self) -> Result<(RatchetHeader, [u8; 32])> {
+        if self.sending_chain_key.is_none() {
+            self.previous_sending_chain_length = self.sending_chain_index;
+            let new_private = StaticSecret::random_from_rng(rand::rngs::OsRng);
+            let new_public = PublicKey::from(&new_private);
+            self.dh_sending_key = RatchetKeyPair {
+                private: new_private,
+                public: new_public,
+            };
+            let dh_output = self
+                .dh_sending_key
+                .private
+                .diffie_hellman(&self.dh_receiving_key)
+                .to_bytes();
+            let (new_root, chain_key) = kdf_root(&self.root_key, &dh_output)?;
+            self.root_key = new_root;
+            self.sending_chain_key = Some(chain_key);
+            self.sending_chain_index = 0;
+        }
+
+        let chain_key = self
+            .sending_chain_key
+            .ok_or(PostUrbitError::InvalidInput("missing sending chain"))?;
+        let n = self.sending_chain_index;
+        let (new_chain, message_key) = kdf_chain_step(&chain_key);
+        self.sending_chain_key = Some(new_chain);
+        self.sending_chain_index += 1;
+
+        let header = RatchetHeader {
+            dh_public: self.dh_sending_key.public.to_bytes(),
+            pn: self.previous_sending_chain_length,
+            n,
+        };
+        Ok((header, message_key))
+    }
+
+    pub fn ratchet_decrypt(&mut self, header: &RatchetHeader) -> Result<[u8; 32]> {
+        if let Some(key) = self
+            .skipped_keys
+            .remove(&SkippedKeyId { dh_public: header.dh_public, n: header.n })
+        {
+            return Ok(key);
+        }
+
+        if header.dh_public != self.dh_receiving_key.to_bytes() {
+            let current = self.dh_receiving_key.to_bytes();
+            self.skip_message_keys(&current, header.pn)?;
+
+            self.dh_receiving_key = PublicKey::from(header.dh_public);
+            let dh_output = self
+                .dh_sending_key
+                .private
+                .diffie_hellman(&self.dh_receiving_key)
+                .to_bytes();
+            let (new_root, receiving_chain_key) = kdf_root(&self.root_key, &dh_output)?;
+            self.root_key = new_root;
+            self.sending_chain_key = None;
+
+            self.receiving_chains.insert(
+                header.dh_public,
+                ReceivingChain {
+                    chain_key: receiving_chain_key,
+                    chain_index: 0,
+                },
+            );
+        }
+
+        let chain = self
+            .receiving_chains
+            .get_mut(&header.dh_public)
+            .ok_or(PostUrbitError::InvalidInput("missing receiving chain"))?;
+
+        while chain.chain_index < header.n {
+            if self.skipped_keys.len() as u32 >= self.max_skip {
+                return Err(PostUrbitError::InvalidInput("too many skipped"));
+            }
+            let (new_chain, message_key) = kdf_chain_step(&chain.chain_key);
+            let key_id = SkippedKeyId {
+                dh_public: header.dh_public,
+                n: chain.chain_index,
+            };
+            self.skipped_keys.insert(key_id, message_key);
+            chain.chain_key = new_chain;
+            chain.chain_index += 1;
+        }
+
+        let (new_chain, message_key) = kdf_chain_step(&chain.chain_key);
+        chain.chain_key = new_chain;
+        chain.chain_index += 1;
+        Ok(message_key)
+    }
+
+    fn skip_message_keys(&mut self, dh_public: &[u8; 32], until: u32) -> Result<()> {
+        let Some(chain) = self.receiving_chains.get_mut(dh_public) else {
+            return Ok(());
+        };
+        while chain.chain_index < until {
+            if self.skipped_keys.len() as u32 >= self.max_skip {
+                return Err(PostUrbitError::InvalidInput("too many skipped"));
+            }
+            let (new_chain, message_key) = kdf_chain_step(&chain.chain_key);
+            let key_id = SkippedKeyId {
+                dh_public: *dh_public,
+                n: chain.chain_index,
+            };
+            self.skipped_keys.insert(key_id, message_key);
+            chain.chain_key = new_chain;
+            chain.chain_index += 1;
+        }
+        Ok(())
+    }
 }
 
 fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
@@ -230,5 +493,89 @@ mod tests {
             hex::encode(chain_key),
             "47920ff7fbbdca074b8abebfc125e456909b36635c9177a8afee8a1e6314d86e"
         );
+    }
+
+    #[test]
+    fn kdf_initial_responder_matches_initiator() {
+        let alice_priv_bytes: [u8; 32] = hex::decode(
+            "7ff8c1a741fd3c5253f5d6953cd78f5411f36507f8f653b498e19d381bf7877b",
+        )
+        .unwrap()
+        .as_slice()
+        .try_into()
+        .unwrap();
+        let alice_priv = StaticSecret::from(alice_priv_bytes);
+        let alice_pub = PublicKey::from(&alice_priv);
+
+        let alice_ephemeral_bytes: [u8; 32] = hex::decode(
+            "3803e7c7f979da62ad5f1aaf9253be156695d8ae845b8cbc2e24afcd9a32d50d",
+        )
+        .unwrap()
+        .as_slice()
+        .try_into()
+        .unwrap();
+        let alice_ephemeral = StaticSecret::from(alice_ephemeral_bytes);
+        let alice_ephemeral_pub = PublicKey::from(&alice_ephemeral);
+
+        let bob_priv_bytes: [u8; 32] = hex::decode(
+            "ea7d6a9217038a4c58f81cfe00b87f1c4feeaa3f182d430936646c4cd11885b2",
+        )
+        .unwrap()
+        .as_slice()
+        .try_into()
+        .unwrap();
+        let bob_priv = StaticSecret::from(bob_priv_bytes);
+        let bob_pub = PublicKey::from(&bob_priv);
+
+        let (dh1_a, dh2_a) = two_dh_initiator(&alice_priv, &alice_ephemeral, &bob_pub);
+        let (dh1_b, dh2_b) = two_dh_responder(&bob_priv, &alice_pub, &alice_ephemeral_pub);
+        assert_eq!(dh1_a, dh1_b);
+        assert_eq!(dh2_a, dh2_b);
+    }
+
+    #[test]
+    fn ratchet_initial_and_out_of_order() {
+        let alice_identity = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let bob_identity = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let alice_ephemeral = StaticSecret::random_from_rng(rand::rngs::OsRng);
+
+        let bob_pub = PublicKey::from(&bob_identity);
+        let alice_pub = PublicKey::from(&alice_identity);
+        let alice_ephemeral_pub = PublicKey::from(&alice_ephemeral);
+
+        let (dh1, dh2) = two_dh_initiator(&alice_identity, &alice_ephemeral, &bob_pub);
+        let alice_iid = [1u8; 20];
+        let bob_iid = [2u8; 20];
+        let (root_a, chain_a) = kdf_initial(&dh1, &dh2, &alice_iid, &bob_iid).unwrap();
+        let mut alice_state = RatchetState::initialize_initiator(
+            root_a,
+            chain_a,
+            bob_pub,
+            bob_iid,
+            alice_ephemeral,
+        );
+
+        let (dh1_b, dh2_b) = two_dh_responder(&bob_identity, &alice_pub, &alice_ephemeral_pub);
+        let (root_b, chain_b) = kdf_initial(&dh1_b, &dh2_b, &alice_iid, &bob_iid).unwrap();
+        let bob_sending = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let mut bob_state = RatchetState::initialize_responder(
+            root_b,
+            chain_b,
+            alice_ephemeral_pub,
+            alice_iid,
+            bob_sending,
+        );
+
+        let initial = alice_state.initial_message_key().unwrap();
+        let initial_recv = bob_state.initial_receive_message_key().unwrap();
+        assert_eq!(initial.message_key, initial_recv);
+
+        let (h1, k1) = alice_state.ratchet_encrypt().unwrap();
+        let (h2, k2) = alice_state.ratchet_encrypt().unwrap();
+
+        let k2_recv = bob_state.ratchet_decrypt(&h2).unwrap();
+        assert_eq!(k2, k2_recv);
+        let k1_recv = bob_state.ratchet_decrypt(&h1).unwrap();
+        assert_eq!(k1, k1_recv);
     }
 }
