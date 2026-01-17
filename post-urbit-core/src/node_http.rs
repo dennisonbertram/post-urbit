@@ -232,7 +232,7 @@ async fn handle_admin_authed(req: Request<Body>, path: &str, state: Arc<HttpServ
         }
         (&Method::DELETE, path) if path.starts_with("/admin/v1/apps/") => {
             if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
-            handle_delete_app(path, state).await
+            handle_delete_app(req, path, state).await
         }
         (&Method::GET, path) if path.ends_with("/permissions") && path.starts_with("/admin/v1/apps/") => {
             if let Err(resp) = require_permission(&auth, Permission::ReadApps) { return resp; }
@@ -1186,17 +1186,36 @@ async fn handle_update_app(path: &str, state: Arc<HttpServerState>) -> Response<
     api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND)
 }
 
-async fn handle_delete_app(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+async fn handle_delete_app(req: Request<Body>, path: &str, state: Arc<HttpServerState>) -> Response<Body> {
     let app_id = path.trim_start_matches("/admin/v1/apps/");
+    let keep_data = req
+        .uri()
+        .query()
+        .map(parse_query)
+        .and_then(|params| params.get("keepData").cloned())
+        .map(|value| value == "true" || value == "1")
+        .unwrap_or(false);
     let mut data = state.admin.data.lock().await;
     if let Some(pos) = data.apps.iter().position(|app| app.id == app_id) {
-        data.apps.remove(pos);
+        let app = data.apps.remove(pos);
         data.app_settings.remove(app_id);
         data.app_sources.remove(app_id);
         drop(data);
         let app_dir = state.apps_dir.join(app_id);
         let _ = std::fs::remove_dir_all(app_dir);
+        if !keep_data {
+            let storage_dir = state.admin.data_dir.join("apps").join("storage").join(app_id);
+            let _ = std::fs::remove_dir_all(storage_dir);
+        }
         let _ = state.admin.persist().await;
+        log_entry(
+            &state,
+            "info",
+            "postnode::apps",
+            "app uninstalled",
+            Some(json!({"app_id": app.id, "keep_data": keep_data})),
+        )
+        .await;
         return Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap();
     }
     api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND)
@@ -1233,7 +1252,26 @@ async fn handle_patch_app_permissions(req: Request<Body>, path: &str, state: Arc
     api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND)
 }
 
-async fn handle_clear_app_data(_path: &str, _state: Arc<HttpServerState>) -> Response<Body> {
+async fn handle_clear_app_data(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/clear-data");
+    let storage_dir = state.admin.data_dir.join("apps").join("storage").join(app_id);
+    let _ = std::fs::remove_dir_all(storage_dir);
+    {
+        let mut data = state.admin.data.lock().await;
+        let Some(app) = data.apps.iter_mut().find(|app| app.id == app_id) else {
+            return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND);
+        };
+        app.storage_used = 0;
+    }
+    let _ = state.admin.persist().await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::apps",
+        "app data cleared",
+        Some(json!({"app_id": app_id})),
+    )
+    .await;
     Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap()
 }
 
@@ -1331,11 +1369,28 @@ async fn handle_list_backups(state: Arc<HttpServerState>) -> Response<Body> {
     json_response(data.backups.clone())
 }
 
-async fn handle_create_backup(_req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+async fn handle_create_backup(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
     let backups_dir = state.admin.data_dir.join("backups");
     if tokio::fs::create_dir_all(&backups_dir).await.is_err() {
         return api_error_response(ApiErrorCode::InternalError, "backup directory error", StatusCode::INTERNAL_SERVER_ERROR);
     }
+    let bytes = match hyper::body::to_bytes(req.into_body()).await {
+        Ok(bytes) => bytes,
+        Err(_) => return api_error_response(ApiErrorCode::InvalidRequest, "invalid body", StatusCode::BAD_REQUEST),
+    };
+    let backup_type = if bytes.is_empty() {
+        "full".to_string()
+    } else {
+        let value: Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => return api_error_response(ApiErrorCode::InvalidRequest, "invalid json", StatusCode::BAD_REQUEST),
+        };
+        match value.get("type").and_then(|value| value.as_str()) {
+            Some(value @ ("full" | "identity" | "data")) => value.to_string(),
+            None => "full".to_string(),
+            _ => return api_error_response(ApiErrorCode::ValidationError, "invalid backup type", StatusCode::UNPROCESSABLE_ENTITY),
+        }
+    };
     let backup_id = generate_token_hex(8);
     let path = backups_dir.join(format!("{}.pusb", backup_id));
     let data = match create_backup(&state.admin.data_dir, "") {
@@ -1350,7 +1405,7 @@ async fn handle_create_backup(_req: Request<Body>, state: Arc<HttpServerState>) 
         created_at: Utc::now().to_rfc3339(),
         size: data.len() as u64,
         path: path.to_string_lossy().to_string(),
-        r#type: "full".to_string(),
+        r#type: backup_type.clone(),
     };
     {
         let mut data = state.admin.data.lock().await;
@@ -1369,7 +1424,7 @@ async fn handle_create_backup(_req: Request<Body>, state: Arc<HttpServerState>) 
         "info",
         "postnode::admin",
         "backup created",
-        Some(json!({"backup_id": result.id, "size": result.size})),
+        Some(json!({"backup_id": result.id, "size": result.size, "type": backup_type})),
     )
     .await;
     json_response(result)
@@ -1554,8 +1609,8 @@ async fn handle_status(state: Arc<HttpServerState>) -> Response<Body> {
             external_addr_detected: None,
         },
         storage: crate::admin_types::StorageStatus {
-            data_used_bytes: 0,
-            data_free_bytes: 0,
+            data_used_bytes: directory_size(&state.admin.data_dir),
+            data_free_bytes: fs2::available_space(&state.admin.data_dir).unwrap_or(0),
             messages_count: 0,
             documents_count: 0,
         },
@@ -1568,7 +1623,7 @@ async fn handle_status(state: Arc<HttpServerState>) -> Response<Body> {
     json_response(status)
 }
 
-async fn handle_logs(req: Request<Body>, _state: Arc<HttpServerState>) -> Response<Body> {
+async fn handle_logs(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
     let query = req.uri().query().unwrap_or("");
     let params = parse_query(query);
     let limit = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100usize);
@@ -1585,7 +1640,7 @@ async fn handle_logs(req: Request<Body>, _state: Arc<HttpServerState>) -> Respon
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .map(|ts| ts.with_timezone(&Utc));
 
-    let data = _state.admin.data.lock().await;
+    let data = state.admin.data.lock().await;
     let mut filtered: Vec<&LogEntry> = data
         .logs
         .iter()
