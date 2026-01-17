@@ -71,5 +71,6 @@ pub mod mailbox_store;
 pub mod mailbox_http;
 pub mod nat;
 pub mod relay;
+pub mod group;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};
