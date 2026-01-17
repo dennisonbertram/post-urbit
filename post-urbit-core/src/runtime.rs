@@ -2,8 +2,13 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use chrono::{DateTime, Duration, Utc};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
 
 use crate::error::{PostUrbitError, Result};
+use crate::canonical_json::canonical_json_from;
+use crate::encoding::{base64_decode, base64_encode};
+use crate::identity::{IdentityDocument, RevocationDocument};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -66,6 +71,14 @@ pub struct FilesConfig {
     pub total_size: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageSignature {
+    pub author_iid: String,
+    pub timestamp: String,
+    pub signature: String,
+    pub signed_manifest_hash: String,
+}
+
 pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
     serde_json::from_slice(bytes).map_err(|_| PostUrbitError::InvalidInput("manifest json"))
 }
@@ -97,6 +110,147 @@ pub fn verify_package(manifest: &Manifest, files: &HashMap<String, Vec<u8>>) -> 
         }
     }
     Ok(())
+}
+
+pub fn sign_package_signature(
+    manifest: &Manifest,
+    author_iid: &str,
+    timestamp: &str,
+    signing_key: &SigningKey,
+) -> Result<PackageSignature> {
+    let manifest_hash_hex = manifest_hash_hex(manifest)?;
+    let payload = format!("postapp-signature-v1:{manifest_hash_hex}:{timestamp}");
+    let signature: Signature = signing_key.sign(payload.as_bytes());
+    Ok(PackageSignature {
+        author_iid: author_iid.to_string(),
+        timestamp: timestamp.to_string(),
+        signature: base64_encode(signature.to_bytes().as_slice()),
+        signed_manifest_hash: format!("sha256:{manifest_hash_hex}"),
+    })
+}
+
+pub fn verify_package_signature(
+    manifest: &Manifest,
+    signature: &PackageSignature,
+    identity: &IdentityDocument,
+) -> Result<()> {
+    verify_package_signature_with_revocations(manifest, signature, identity, &[])
+}
+
+pub fn verify_package_signature_with_revocations(
+    manifest: &Manifest,
+    signature: &PackageSignature,
+    identity: &IdentityDocument,
+    revocations: &[RevocationDocument],
+) -> Result<()> {
+    if signature.author_iid != identity.iid {
+        return Err(PostUrbitError::InvalidInput("author iid mismatch"));
+    }
+
+    let signed_at = parse_timestamp(&signature.timestamp)?;
+    let now = Utc::now() + Duration::minutes(5);
+    if signed_at > now {
+        return Err(PostUrbitError::InvalidInput("signature timestamp in future"));
+    }
+    let genesis = parse_timestamp(&identity.timestamp)?;
+    if signed_at < genesis {
+        return Err(PostUrbitError::InvalidInput("signature before genesis"));
+    }
+
+    let manifest_hash_hex = manifest_hash_hex(manifest)?;
+    let expected = format!("sha256:{manifest_hash_hex}");
+    if signature.signed_manifest_hash != expected {
+        return Err(PostUrbitError::InvalidInput("manifest hash mismatch"));
+    }
+
+    let payload = format!("postapp-signature-v1:{manifest_hash_hex}:{}", signature.timestamp);
+    let verified_key = verify_with_signing_keys(payload.as_bytes(), signature, identity)?;
+    check_revocations(&verified_key, signed_at, revocations)?;
+    Ok(())
+}
+
+fn manifest_hash_hex(manifest: &Manifest) -> Result<String> {
+    let canonical = canonical_json_from(manifest)?;
+    let hash = Sha256::digest(canonical.as_bytes());
+    Ok(hex::encode(hash))
+}
+
+fn verify_with_signing_keys(
+    payload: &[u8],
+    signature: &PackageSignature,
+    identity: &IdentityDocument,
+) -> Result<Vec<u8>> {
+    let signature_bytes = base64_decode(&signature.signature)?;
+    if signature_bytes.len() != 64 {
+        return Err(PostUrbitError::InvalidInput("signature length"));
+    }
+    let signature = Signature::from_bytes(
+        signature_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("signature length"))?,
+    );
+
+    let mut keys = Vec::new();
+    keys.push(identity.keys.signing.current.clone());
+    if let Some(prev) = identity.keys.signing.previous.clone() {
+        keys.push(prev);
+    }
+    for hist in &identity.keys.signing.history {
+        keys.push(hist.key.clone());
+    }
+
+    for key in keys {
+        let key_bytes = base64_decode(&key)?;
+        if key_bytes.len() != 32 {
+            continue;
+        }
+        let verifying_key = VerifyingKey::from_bytes(
+            key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| PostUrbitError::InvalidInput("signing key length"))?,
+        )
+        .map_err(|_| PostUrbitError::InvalidInput("signing key parse"))?;
+        if verifying_key.verify_strict(payload, &signature).is_ok() {
+            return Ok(key_bytes);
+        }
+    }
+
+    Err(PostUrbitError::Crypto("package signature invalid"))
+}
+
+fn check_revocations(
+    verified_key: &[u8],
+    signed_at: DateTime<Utc>,
+    revocations: &[RevocationDocument],
+) -> Result<()> {
+    for revocation in revocations {
+        match revocation {
+            RevocationDocument::Identity(doc) => {
+                let effective = parse_timestamp(&doc.effective_at)?;
+                if effective <= signed_at {
+                    return Err(PostUrbitError::InvalidInput("identity revoked"));
+                }
+            }
+            RevocationDocument::Key(doc) => {
+                let effective = parse_timestamp(&doc.effective_at)?;
+                if effective <= signed_at {
+                    let revoked_key = base64_decode(&doc.revoked_key)?;
+                    if revoked_key == verified_key {
+                        return Err(PostUrbitError::InvalidInput("signing key revoked"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_timestamp(value: &str) -> Result<DateTime<Utc>> {
+    value
+        .parse::<DateTime<Utc>>()
+        .map_err(|_| PostUrbitError::InvalidInput("timestamp parse"))
 }
 
 fn validate_app_id(id: &str) -> Result<()> {
@@ -220,6 +374,11 @@ pub trait SyncHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{
+        derive_iid, sign_idoc, Claims, EncryptionKeys, IdentityDocument, Keys, Recovery,
+        RevocationDocument, Signatures, SigningKeys,
+    };
+    use x25519_dalek::{PublicKey, StaticSecret};
 
     fn sample_manifest() -> Manifest {
         Manifest {
@@ -279,5 +438,94 @@ mod tests {
         assert_eq!(value, Some(b"value".to_vec()));
         let missing = storage.get("app.b", "key").unwrap();
         assert!(missing.is_none());
+    }
+
+    fn sample_identity(signing_key: &SigningKey, enc_key: &StaticSecret) -> IdentityDocument {
+        let verifying_key = signing_key.verifying_key();
+        let iid = derive_iid(&verifying_key);
+        let enc_pub = PublicKey::from(enc_key);
+        let mut doc = IdentityDocument {
+            version: 1,
+            iid,
+            sequence: "0".to_string(),
+            timestamp: "2025-01-15T00:00:00Z".to_string(),
+            keys: Keys {
+                signing: SigningKeys {
+                    genesis: base64_encode(verifying_key.as_bytes()),
+                    current: base64_encode(verifying_key.as_bytes()),
+                    previous: None,
+                    history: Vec::new(),
+                },
+                encryption: EncryptionKeys {
+                    current: base64_encode(enc_pub.as_bytes()),
+                    previous: Vec::new(),
+                },
+            },
+            endpoints: Vec::new(),
+            claims: Claims::default(),
+            recovery: Recovery {
+                method: "none".to_string(),
+                config: serde_json::Value::Object(serde_json::Map::new()),
+            },
+            extensions: serde_json::Value::Object(serde_json::Map::new()),
+            recovery_proof: None,
+            signatures: Signatures {
+                current: String::new(),
+                previous: None,
+            },
+        };
+        doc.signatures.current = sign_idoc(&doc, signing_key).unwrap();
+        doc
+    }
+
+    #[test]
+    fn package_signature_round_trip() {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let identity = sample_identity(&signing_key, &enc_key);
+        let manifest = sample_manifest();
+
+        let signature = sign_package_signature(
+            &manifest,
+            identity.iid.as_str(),
+            "2025-01-15T12:00:00Z",
+            &signing_key,
+        )
+        .unwrap();
+        verify_package_signature(&manifest, &signature, &identity).unwrap();
+    }
+
+    #[test]
+    fn package_signature_rejected_on_revocation() {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let identity = sample_identity(&signing_key, &enc_key);
+        let manifest = sample_manifest();
+
+        let signature = sign_package_signature(
+            &manifest,
+            identity.iid.as_str(),
+            "2025-01-15T12:00:00Z",
+            &signing_key,
+        )
+        .unwrap();
+
+        let revocation = RevocationDocument::Identity(crate::identity::IdentityRevocation {
+            iid: identity.iid.clone(),
+            reason: "compromised".to_string(),
+            message: None,
+            effective_at: "2025-01-14T12:00:00Z".to_string(),
+            successor_iid: None,
+            signature: "ignored".to_string(),
+        });
+
+        let err = verify_package_signature_with_revocations(
+            &manifest,
+            &signature,
+            &identity,
+            &[revocation],
+        )
+        .unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
     }
 }
