@@ -8,7 +8,9 @@ use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::canonical_json::canonical_json_from;
-use crate::dht::{dht_key_genesis, dht_key_identity, dht_key_revocation, Dht};
+use crate::dht::{
+    dht_key_device_revocation, dht_key_genesis, dht_key_identity, dht_key_revocation, Dht,
+};
 use crate::encoding::{base64_decode, base64_encode, crockford_base32_encode, validate_crockford_base32_lower};
 use crate::error::{PostUrbitError, Result};
 
@@ -17,6 +19,7 @@ const IDOC_VERSION: u8 = 1;
 const IDOC_DOMAIN_SEPARATOR: &[u8] = b"post-urbit:idoc:v1:";
 const KEY_REVOCATION_DOMAIN: &[u8] = b"post-urbit:key-revocation:v1:";
 const IDENTITY_REVOCATION_DOMAIN: &[u8] = b"post-urbit:identity-revocation:v1:";
+const DEVICE_REVOCATION_DOMAIN: &[u8] = b"post-urbit:device-revocation:v1:";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IdentityDocument {
@@ -144,6 +147,15 @@ pub struct IdentityRevocation {
     pub effective_at: String,
     pub successor_iid: Option<String>,
     pub signature: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeviceRevocation {
+    pub did: String,
+    pub iid: String,
+    pub revoked_at: String,
+    pub reason: String,
+    pub signature_by_identity: String,
 }
 
 pub struct IdentityManager {
@@ -511,6 +523,34 @@ pub fn sign_identity_revocation(
     Ok(base64_encode(signature.to_bytes().as_slice()))
 }
 
+pub fn device_revocation_signature_input(revocation: &DeviceRevocation) -> Result<Vec<u8>> {
+    let mut value = serde_json::to_value(revocation)
+        .map_err(|_| PostUrbitError::InvalidInput("serialize revocation"))?;
+    if let serde_json::Value::Object(ref mut map) = value {
+        map.remove("signature_by_identity");
+    }
+    revocation_signature_payload(&value, DEVICE_REVOCATION_DOMAIN)
+}
+
+pub fn sign_device_revocation(
+    revocation: &DeviceRevocation,
+    signing_key: &SigningKey,
+) -> Result<String> {
+    let payload = device_revocation_signature_input(revocation)?;
+    let signature = signing_key.sign(&payload);
+    Ok(base64_encode(signature.to_bytes().as_slice()))
+}
+
+pub fn verify_device_revocation(
+    revocation: &DeviceRevocation,
+    signing_key_base64: &str,
+) -> Result<()> {
+    validate_crockford_base32_lower(&revocation.iid)?;
+    validate_crockford_base32_lower(&revocation.did)?;
+    let payload = device_revocation_signature_input(revocation)?;
+    verify_signature_with_key(&payload, &revocation.signature_by_identity, signing_key_base64)
+}
+
 pub fn verify_key_revocation(revocation: &KeyRevocation) -> Result<()> {
     validate_crockford_base32_lower(&revocation.iid)?;
     if revocation.replacement_document.iid != revocation.iid {
@@ -565,6 +605,46 @@ pub async fn publish_revocation(
     let key = dht_key_revocation(iid);
     dht.put(&key, canonical.into_bytes(), ttl).await?;
     Ok(())
+}
+
+pub async fn publish_device_revocation(
+    dht: &dyn Dht,
+    revocation: &DeviceRevocation,
+) -> Result<()> {
+    let canonical = canonical_json_from(revocation)?;
+    let ttl = Duration::from_secs(60 * 60 * 24 * 365);
+    let key = dht_key_device_revocation(&revocation.did);
+    dht.put(&key, canonical.into_bytes(), ttl).await?;
+    Ok(())
+}
+
+pub async fn fetch_device_revocation(
+    dht: &dyn Dht,
+    did: &str,
+    signing_key_base64: &str,
+) -> Result<Option<DeviceRevocation>> {
+    let key = dht_key_device_revocation(did);
+    let values = dht.get_all(&key).await?;
+    let mut chosen: Option<(chrono::DateTime<Utc>, DeviceRevocation)> = None;
+    for value in values {
+        let Ok(doc) = serde_json::from_slice::<DeviceRevocation>(&value) else {
+            continue;
+        };
+        if verify_device_revocation(&doc, signing_key_base64).is_err() {
+            continue;
+        }
+        let Ok(ts) = parse_rfc3339(&doc.revoked_at) else {
+            continue;
+        };
+        let replace = match &chosen {
+            Some((current, _)) => ts < *current,
+            None => true,
+        };
+        if replace {
+            chosen = Some((ts, doc));
+        }
+    }
+    Ok(chosen.map(|(_, doc)| doc))
 }
 
 fn revocation_signature_payload(
@@ -821,6 +901,45 @@ mod tests {
                 .unwrap();
             assert_eq!(fetched.iid, replacement.iid);
             assert_eq!(fetched.keys.signing.current, replacement.keys.signing.current);
+        });
+    }
+
+    #[test]
+    fn device_revocation_selects_earliest() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dht = MemoryDht::new();
+        rt.block_on(async {
+            let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let signing_key_b64 = base64_encode(signing_key.verifying_key().as_bytes());
+            let did = "42kbzq2tyab939amybd76bm8kfpzgn95";
+            let iid = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+
+            let mut first = DeviceRevocation {
+                did: did.to_string(),
+                iid: iid.to_string(),
+                revoked_at: "2025-01-10T00:00:00Z".to_string(),
+                reason: "lost".to_string(),
+                signature_by_identity: String::new(),
+            };
+            first.signature_by_identity = sign_device_revocation(&first, &signing_key).unwrap();
+
+            let mut second = DeviceRevocation {
+                did: did.to_string(),
+                iid: iid.to_string(),
+                revoked_at: "2025-01-12T00:00:00Z".to_string(),
+                reason: "stolen".to_string(),
+                signature_by_identity: String::new(),
+            };
+            second.signature_by_identity = sign_device_revocation(&second, &signing_key).unwrap();
+
+            publish_device_revocation(&dht, &second).await.unwrap();
+            publish_device_revocation(&dht, &first).await.unwrap();
+
+            let chosen = fetch_device_revocation(&dht, did, &signing_key_b64)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(chosen.revoked_at, "2025-01-10T00:00:00Z");
         });
     }
 
