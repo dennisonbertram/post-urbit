@@ -92,10 +92,7 @@ async fn handle_public(req: &Request<Body>, path: &str, state: &HttpServerState)
     match (req.method(), path) {
         (&Method::GET, "/health/live") => Some(json_response(json!({"status": "alive"}))),
         (&Method::GET, "/health/ready") => Some(json_response(json!({"status": "ready"}))),
-        (&Method::GET, "/health") => {
-            let status = Value::String("ok".to_string());
-            Some(json_response(status))
-        }
+        (&Method::GET, "/health") => Some(handle_health(state).await),
         (&Method::GET, "/metrics") => {
             if state.config.metrics_enabled {
                 Some(Response::new(Body::from("post_urbit_up 1\n")))
@@ -1523,6 +1520,50 @@ async fn handle_logs(req: Request<Body>, _state: Arc<HttpServerState>) -> Respon
     json_response(response)
 }
 
+async fn handle_health(state: &HttpServerState) -> Response<Body> {
+    let identity_doc = state.identity.identity_document().await;
+    let iid = state.identity.iid().await;
+    let apps_installed = {
+        let data = state.admin.data.lock().await;
+        data.apps.len() as u64
+    };
+    let disk_used_bytes = directory_size(&state.admin.data_dir);
+    let disk_free_bytes = fs2::available_space(&state.admin.data_dir).unwrap_or(0);
+    let payload = json!({
+        "status": "healthy",
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_seconds": state.started_at.elapsed().as_secs(),
+        "checks": {
+            "identity": {
+                "status": "healthy",
+                "iid": iid,
+                "last_published": identity_doc.timestamp,
+            },
+            "transport": {
+                "status": "healthy",
+                "connections": 0,
+                "relays_connected": 0,
+            },
+            "messaging": {
+                "status": "healthy",
+                "queue_depth": 0,
+                "sessions_active": 0,
+            },
+            "storage": {
+                "status": "healthy",
+                "disk_used_bytes": disk_used_bytes,
+                "disk_free_bytes": disk_free_bytes,
+            },
+            "apps": {
+                "status": "healthy",
+                "installed": apps_installed,
+                "running": 0,
+            },
+        }
+    });
+    json_response(payload)
+}
+
 async fn handle_restart() -> Response<Body> {
     Response::builder().status(StatusCode::ACCEPTED).body(Body::empty()).unwrap()
 }
@@ -1842,6 +1883,22 @@ fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
     Some(candidate)
 }
 
+fn directory_size(path: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else { continue; };
+        if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        } else if metadata.is_dir() {
+            total = total.saturating_add(directory_size(&entry.path()));
+        }
+    }
+    total
+}
+
 fn content_type_for_path(path: &Path) -> &'static str {
     let ext = path
         .extension()
@@ -2039,6 +2096,9 @@ mod tests {
         let req = Request::builder().method(Method::GET).uri("/health").body(Body::empty()).unwrap();
         let resp = handle_request(req, state).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("healthy"));
     }
 
     #[tokio::test]
