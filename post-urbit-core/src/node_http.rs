@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -82,14 +83,25 @@ async fn handle_request(req: Request<Body>, state: Arc<HttpServerState>) -> Resp
         return resp;
     }
 
-    if path.starts_with("/admin/v1/") {
-        return handle_admin(req, &path, state).await;
+    let admin_path = normalize_admin_path(&path);
+    if admin_path.starts_with("/admin/v1/") {
+        return handle_admin(req, admin_path.as_ref(), state).await;
     }
 
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body(Body::empty())
         .unwrap()
+}
+
+fn normalize_admin_path(path: &str) -> Cow<'_, str> {
+    if let Some(stripped) = path.strip_prefix("/api/v1/") {
+        return Cow::Owned(format!("/admin/v1/{}", stripped));
+    }
+    if path == "/api/v1" {
+        return Cow::Owned("/admin/v1".to_string());
+    }
+    Cow::Borrowed(path)
 }
 
 async fn handle_public(req: &Request<Body>, path: &str, state: &HttpServerState) -> Option<Response<Body>> {
@@ -2627,6 +2639,40 @@ mod tests {
         let payload: LogsResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(!payload.entries.is_empty());
         assert_eq!(payload.entries[0].message, "test log entry");
+    }
+
+    #[tokio::test]
+    async fn api_v1_aliases_admin_routes() {
+        let state = test_state().await;
+        let key = ApiKey {
+            id: "key-1".to_string(),
+            name: "api".to_string(),
+            permissions: vec![Permission::ReadIdentity],
+            created_at: Utc::now().to_rfc3339(),
+            expires_at: None,
+            last_used: None,
+        };
+        let record = ApiKeyRecord {
+            key: key.clone(),
+            key_hash: hash_token("secret"),
+        };
+        {
+            let mut data = state.admin.data.lock().await;
+            data.api_keys.push(record);
+        }
+        let state = Arc::new(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/identity")
+            .header(hyper::header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let payload: IdentityInfo = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(payload.iid, state.identity.iid().await);
     }
 
     #[tokio::test]
