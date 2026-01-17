@@ -290,6 +290,7 @@ pub fn read_frame<R: Read>(r: &mut R, max_size: u32) -> Result<Vec<u8>> {
 }
 
 const HANDSHAKE_DOMAIN: &[u8] = b"post-urbit-handshake-v1";
+const DEVICE_HANDSHAKE_DOMAIN: &[u8] = b"post-urbit-device-v1";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -515,6 +516,100 @@ pub fn verify_challenge_signature(
         .map_err(|_| PostUrbitError::Crypto("challenge signature invalid"))
 }
 
+pub fn verify_device_signature(
+    signature_base64: &str,
+    device_signing_key_base64: &str,
+    client_nonce: &str,
+    server_nonce: &str,
+    tls_binding: &str,
+    server_iid: &str,
+    server_did: &str,
+) -> Result<()> {
+    validate_crockford_base32_lower(server_iid)?;
+    validate_crockford_base32_lower(server_did)?;
+
+    let client_nonce = base64_decode(client_nonce)?;
+    let server_nonce = base64_decode(server_nonce)?;
+    let tls_binding = base64_decode(tls_binding)?;
+    if client_nonce.len() != 32 || server_nonce.len() != 32 || tls_binding.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("nonce or tls_binding length"));
+    }
+
+    let server_iid_raw = crockford_base32_decode(server_iid)?;
+    let server_did_raw = crockford_base32_decode(server_did)?;
+    if server_iid_raw.len() != 20 || server_did_raw.len() != 20 {
+        return Err(PostUrbitError::InvalidInput("iid length"));
+    }
+
+    let mut data = Vec::with_capacity(156);
+    data.extend_from_slice(DEVICE_HANDSHAKE_DOMAIN);
+    data.extend_from_slice(&client_nonce);
+    data.extend_from_slice(&server_nonce);
+    data.extend_from_slice(&tls_binding);
+    data.extend_from_slice(&server_iid_raw);
+    data.extend_from_slice(&server_did_raw);
+
+    let digest = Sha256::digest(&data);
+    let signature_bytes = base64_decode(signature_base64)?;
+    if signature_bytes.len() != 64 {
+        return Err(PostUrbitError::InvalidInput("device signature length"));
+    }
+    let key_bytes = base64_decode(device_signing_key_base64)?;
+    if key_bytes.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("device signing key length"));
+    }
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(
+        key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("device signing key length"))?,
+    )
+    .map_err(|_| PostUrbitError::InvalidInput("device signing key parse"))?;
+    let signature = ed25519_dalek::Signature::from_bytes(
+        signature_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("signature length"))?,
+    );
+    verifying_key
+        .verify_strict(&digest, &signature)
+        .map_err(|_| PostUrbitError::Crypto("device signature invalid"))
+}
+
+pub fn validate_client_hello(msg: &ClientHello, now: DateTime<Utc>) -> Result<()> {
+    validate_crockford_base32_lower(&msg.client_iid)?;
+    if let Some(did) = &msg.client_did {
+        validate_crockford_base32_lower(did)?;
+    }
+    if let Some(expected) = &msg.expected_server_iid {
+        validate_crockford_base32_lower(expected)?;
+    }
+    validate_handshake_timestamp_with_now(&msg.timestamp, now)?;
+    let client_nonce = base64_decode(&msg.client_nonce)?;
+    let tls_binding = base64_decode(&msg.tls_binding)?;
+    if client_nonce.len() != 32 || tls_binding.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("nonce or tls binding length"));
+    }
+    Ok(())
+}
+
+pub fn validate_server_hello(msg: &ServerHello, now: DateTime<Utc>) -> Result<()> {
+    validate_crockford_base32_lower(&msg.server_iid)?;
+    if let Some(did) = &msg.server_did {
+        validate_crockford_base32_lower(did)?;
+        if msg.device_document.is_none() || msg.device_signature.is_none() {
+            return Err(PostUrbitError::InvalidInput("device fields missing"));
+        }
+    }
+    validate_handshake_timestamp_with_now(&msg.timestamp, now)?;
+    let server_nonce = base64_decode(&msg.server_nonce)?;
+    let tls_binding = base64_decode(&msg.tls_binding)?;
+    if server_nonce.len() != 32 || tls_binding.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("nonce or tls binding length"));
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum IdentityStreamMessage {
@@ -733,6 +828,74 @@ mod tests {
             true,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn device_signature_round_trip() {
+        let client_nonce = base64_encode(&[1u8; 32]);
+        let server_nonce = base64_encode(&[2u8; 32]);
+        let tls_binding = base64_encode(&[3u8; 32]);
+        let server_iid = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let server_did = "42kbzq2tyab939amybd76bm8kfpzgn95";
+
+        let device_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let mut data = Vec::new();
+        data.extend_from_slice(DEVICE_HANDSHAKE_DOMAIN);
+        data.extend_from_slice(&base64_decode(&client_nonce).unwrap());
+        data.extend_from_slice(&base64_decode(&server_nonce).unwrap());
+        data.extend_from_slice(&base64_decode(&tls_binding).unwrap());
+        data.extend_from_slice(&crockford_base32_decode(server_iid).unwrap());
+        data.extend_from_slice(&crockford_base32_decode(server_did).unwrap());
+        let digest = Sha256::digest(&data);
+        let signature = device_key.sign(&digest);
+        let signature_base64 = base64_encode(signature.to_bytes().as_slice());
+        let key_b64 = base64_encode(device_key.verifying_key().as_bytes());
+
+        verify_device_signature(
+            &signature_base64,
+            &key_b64,
+            &client_nonce,
+            &server_nonce,
+            &tls_binding,
+            server_iid,
+            server_did,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_client_hello_checks_nonce_length() {
+        let msg = ClientHello {
+            version: 1,
+            client_iid: "b1n7cfscgashm32xx7eaxw0y09gy0y2v".to_string(),
+            client_did: None,
+            expected_server_iid: None,
+            client_nonce: base64_encode(&[0u8; 16]),
+            timestamp: "2025-01-15T00:00:00Z".to_string(),
+            tls_binding: base64_encode(&[1u8; 32]),
+        };
+        let now = "2025-01-15T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let err = validate_client_hello(&msg, now).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn validate_server_hello_requires_device_fields() {
+        let msg = ServerHello {
+            version: 1,
+            server_iid: "b1n7cfscgashm32xx7eaxw0y09gy0y2v".to_string(),
+            server_did: Some("42kbzq2tyab939amybd76bm8kfpzgn95".to_string()),
+            server_nonce: base64_encode(&[2u8; 32]),
+            timestamp: "2025-01-15T00:00:00Z".to_string(),
+            tls_binding: base64_encode(&[3u8; 32]),
+            identity_document: serde_json::json!({}),
+            device_document: None,
+            challenge_signature: base64_encode(&[4u8; 64]),
+            device_signature: None,
+        };
+        let now = "2025-01-15T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let err = validate_server_hello(&msg, now).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
     }
 
     #[test]

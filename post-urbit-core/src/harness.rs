@@ -93,6 +93,7 @@ mod tests {
     use crate::messaging::{build_puse_envelope, decode_puse_envelope, PUSEHeader};
     use crate::encoding::crockford_base32_decode;
     use ed25519_dalek::SigningKey;
+    use crate::sync::{sign_sync_operation, SyncSession, SyncStore};
 
     #[test]
     fn evidence_bundle_writes_files() {
@@ -160,6 +161,79 @@ mod tests {
         assert_eq!(decoded.header.message_id, [7u8; 16]);
 
         bundle.record_event("S2", "retrieve envelope");
+        bundle.finalize("ok").unwrap();
+    }
+
+    #[test]
+    fn harness_two_node_identity_exchange() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut bundle = EvidenceBundle::new(temp.path(), "run-identity-exchange").unwrap();
+        bundle.add_scenario("SCEN-CONN-01");
+        bundle.record_event("S1", "create identities");
+
+        rt.block_on(async {
+            let dht = MemoryDht::new();
+            let node_a = IdentityManager::new(temp.path().to_str().unwrap()).await.unwrap();
+            let node_b = IdentityManager::new(temp.path().to_str().unwrap()).await.unwrap();
+            publish_genesis(&dht, node_a.identity_document()).await.unwrap();
+            publish_genesis(&dht, node_b.identity_document()).await.unwrap();
+
+            let fetched_a = fetch_identity(&dht, node_a.iid()).await.unwrap();
+            let fetched_b = fetch_identity(&dht, node_b.iid()).await.unwrap();
+            assert!(fetched_a.is_some());
+            assert!(fetched_b.is_some());
+        });
+
+        bundle.record_event("S2", "exchange identity docs");
+        bundle.finalize("ok").unwrap();
+    }
+
+    #[test]
+    fn harness_sync_converges() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut bundle = EvidenceBundle::new(temp.path(), "run-sync").unwrap();
+        bundle.add_scenario("SCEN-SYNC-01");
+        bundle.record_event("S1", "prepare sync state");
+
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let keys = vec![signing_key.verifying_key().to_bytes().to_vec()];
+        let document_id = [4u8; 32];
+        let (op_id, signature) = sign_sync_operation(
+            &document_id,
+            &[7u8; 20],
+            10,
+            1,
+            b"op",
+            &[],
+            &signing_key,
+        );
+        let record = crate::sync::SyncOperationRecord {
+            id: op_id,
+            origin: [7u8; 20],
+            document_id,
+            physical_ms: 10,
+            logical: 1,
+            operation: b"op".to_vec(),
+            dependencies: Vec::new(),
+            signature: signature.to_vec(),
+        };
+
+        let mut sender_store = SyncStore::new();
+        sender_store.add_operation(record, &keys).unwrap();
+        let sender = SyncSession::new(document_id, sender_store);
+
+        let receiver_store = SyncStore::new();
+        let mut receiver = SyncSession::new(document_id, receiver_store);
+
+        let request = receiver.request();
+        let offer = sender.handle_request(&request).unwrap();
+        let accept = receiver.handle_offer(&offer).unwrap();
+        let operations = sender.handle_accept(&accept).unwrap();
+        let ack = receiver.handle_operations(&operations, &keys).unwrap();
+        assert_eq!(ack.operation_ids.len(), 1);
+
+        bundle.record_event("S2", "sync converged");
         bundle.finalize("ok").unwrap();
     }
 }

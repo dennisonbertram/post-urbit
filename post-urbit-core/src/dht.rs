@@ -88,6 +88,10 @@ pub fn dht_key_devices(iid: &str) -> [u8; 32] {
     dht_key_with_prefix(b"post-urbit:devices-for:", iid)
 }
 
+pub fn dht_key_device(did: &str) -> [u8; 32] {
+    dht_key_with_prefix(b"post-urbit:device:", did)
+}
+
 pub fn dht_key_revocation(iid: &str) -> [u8; 32] {
     dht_key_with_prefix(b"post-urbit:revocation:", iid)
 }
@@ -169,5 +173,7 @@ mod tests {
     fn dht_key_helpers_length() {
         let key = dht_key_identity("b1anasr5h0bj3832xqexwy0f0987e1xb");
         assert_eq!(key.len(), 32);
+        let device_key = dht_key_device("42kbzq2tyab939amybd76bm8kfpzgn95");
+        assert_eq!(device_key.len(), 32);
     }
 }

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,7 +9,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::canonical_json::canonical_json_from;
 use crate::dht::{
-    dht_key_device_revocation, dht_key_genesis, dht_key_identity, dht_key_revocation, Dht,
+    dht_key_device, dht_key_device_revocation, dht_key_devices, dht_key_genesis,
+    dht_key_identity, dht_key_revocation, Dht,
 };
 use crate::encoding::{base64_decode, base64_encode, crockford_base32_encode, validate_crockford_base32_lower};
 use crate::error::{PostUrbitError, Result};
@@ -20,6 +21,8 @@ const IDOC_DOMAIN_SEPARATOR: &[u8] = b"post-urbit:idoc:v1:";
 const KEY_REVOCATION_DOMAIN: &[u8] = b"post-urbit:key-revocation:v1:";
 const IDENTITY_REVOCATION_DOMAIN: &[u8] = b"post-urbit:identity-revocation:v1:";
 const DEVICE_REVOCATION_DOMAIN: &[u8] = b"post-urbit:device-revocation:v1:";
+const DEVICE_DOC_DOMAIN: &[u8] = b"post-urbit:device-doc:v1:";
+const DEVICE_INDEX_DOMAIN: &[u8] = b"post-urbit:device-index:v1:";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IdentityDocument {
@@ -156,6 +159,39 @@ pub struct DeviceRevocation {
     pub revoked_at: String,
     pub reason: String,
     pub signature_by_identity: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeviceDocument {
+    pub version: u8,
+    pub did: String,
+    pub iid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    pub device_signing_key: String,
+    pub endpoints: Vec<Endpoint>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    pub capabilities: Vec<String>,
+    pub signature_by_identity: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeviceIndexEntry {
+    pub did: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    pub last_seen: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DeviceIndex {
+    pub iid: String,
+    pub devices: Vec<DeviceIndexEntry>,
+    pub updated_at: String,
+    pub signature: String,
 }
 
 pub struct IdentityManager {
@@ -592,6 +628,188 @@ pub fn verify_identity_revocation(
     verify_signature_with_key(&payload, &revocation.signature, signing_key)
 }
 
+pub fn derive_device_did(device_signing_key_b64: &str) -> Result<String> {
+    let key_bytes = base64_decode(device_signing_key_b64)?;
+    if key_bytes.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("device signing key length"));
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(&key_bytes);
+    let hash = hasher.finalize();
+    Ok(crockford_base32_encode(&hash[..20]).to_lowercase())
+}
+
+pub fn device_document_signature_input(doc: &DeviceDocument) -> Result<Vec<u8>> {
+    let mut value = serde_json::to_value(doc)
+        .map_err(|_| PostUrbitError::InvalidInput("serialize device doc"))?;
+    if let serde_json::Value::Object(ref mut map) = value {
+        map.remove("signature_by_identity");
+    }
+    revocation_signature_payload(&value, DEVICE_DOC_DOMAIN)
+}
+
+pub fn sign_device_document(doc: &DeviceDocument, signing_key: &SigningKey) -> Result<String> {
+    let payload = device_document_signature_input(doc)?;
+    let signature = signing_key.sign(&payload);
+    Ok(base64_encode(signature.to_bytes().as_slice()))
+}
+
+pub fn verify_device_document_with_keys(
+    doc: &DeviceDocument,
+    signing_keys: &[String],
+    now: DateTime<Utc>,
+) -> Result<()> {
+    validate_crockford_base32_lower(&doc.did)?;
+    validate_crockford_base32_lower(&doc.iid)?;
+    let derived = derive_device_did(&doc.device_signing_key)?;
+    if derived != doc.did {
+        return Err(PostUrbitError::InvalidInput("device did mismatch"));
+    }
+    if let Some(expires_at) = &doc.expires_at {
+        let expires = parse_rfc3339(expires_at)?;
+        if expires < now {
+            return Err(PostUrbitError::InvalidInput("device doc expired"));
+        }
+    }
+    let payload = device_document_signature_input(doc)?;
+    for key in signing_keys {
+        if verify_signature_with_key(&payload, &doc.signature_by_identity, key).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(PostUrbitError::Crypto("device doc signature invalid"))
+}
+
+pub fn verify_device_document(
+    doc: &DeviceDocument,
+    identity: &IdentityDocument,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let mut keys = Vec::new();
+    keys.push(identity.keys.signing.current.clone());
+    if let Some(prev) = identity.keys.signing.previous.clone() {
+        keys.push(prev);
+    }
+    for hist in &identity.keys.signing.history {
+        keys.push(hist.key.clone());
+    }
+    verify_device_document_with_keys(doc, &keys, now)
+}
+
+pub fn device_index_signature_input(index: &DeviceIndex) -> Result<Vec<u8>> {
+    let mut value = serde_json::to_value(index)
+        .map_err(|_| PostUrbitError::InvalidInput("serialize device index"))?;
+    if let serde_json::Value::Object(ref mut map) = value {
+        map.remove("signature");
+    }
+    revocation_signature_payload(&value, DEVICE_INDEX_DOMAIN)
+}
+
+pub fn sign_device_index(index: &DeviceIndex, signing_key: &SigningKey) -> Result<String> {
+    let payload = device_index_signature_input(index)?;
+    let signature = signing_key.sign(&payload);
+    Ok(base64_encode(signature.to_bytes().as_slice()))
+}
+
+pub fn verify_device_index_with_keys(
+    index: &DeviceIndex,
+    signing_keys: &[String],
+    now: DateTime<Utc>,
+) -> Result<()> {
+    validate_crockford_base32_lower(&index.iid)?;
+    let _ = parse_rfc3339(&index.updated_at)?;
+    for entry in &index.devices {
+        validate_crockford_base32_lower(&entry.did)?;
+        let last_seen = parse_rfc3339(&entry.last_seen)?;
+        if last_seen > now + chrono::Duration::minutes(5) {
+            return Err(PostUrbitError::InvalidInput("device index future"));
+        }
+    }
+    let payload = device_index_signature_input(index)?;
+    for key in signing_keys {
+        if verify_signature_with_key(&payload, &index.signature, key).is_ok() {
+            return Ok(());
+        }
+    }
+    Err(PostUrbitError::Crypto("device index signature invalid"))
+}
+
+pub async fn publish_device_document(dht: &dyn Dht, doc: &DeviceDocument) -> Result<()> {
+    let canonical = canonical_json_from(doc)?;
+    let ttl = Duration::from_secs(60 * 60 * 24);
+    let key = dht_key_device(&doc.did);
+    dht.put(&key, canonical.into_bytes(), ttl).await?;
+    Ok(())
+}
+
+pub async fn publish_device_index(dht: &dyn Dht, index: &DeviceIndex) -> Result<()> {
+    let canonical = canonical_json_from(index)?;
+    let ttl = Duration::from_secs(60 * 60 * 24);
+    let key = dht_key_devices(&index.iid);
+    dht.put(&key, canonical.into_bytes(), ttl).await?;
+    Ok(())
+}
+
+pub async fn fetch_device_document(
+    dht: &dyn Dht,
+    did: &str,
+    signing_keys: &[String],
+    now: DateTime<Utc>,
+) -> Result<Option<DeviceDocument>> {
+    let key = dht_key_device(did);
+    let values = dht.get_all(&key).await?;
+    let mut chosen: Option<(DateTime<Utc>, DeviceDocument)> = None;
+    for value in values {
+        let Ok(doc) = serde_json::from_slice::<DeviceDocument>(&value) else {
+            continue;
+        };
+        if verify_device_document_with_keys(&doc, signing_keys, now).is_err() {
+            continue;
+        }
+        let Ok(updated_at) = parse_rfc3339(&doc.updated_at) else {
+            continue;
+        };
+        let replace = match &chosen {
+            Some((current, _)) => updated_at > *current,
+            None => true,
+        };
+        if replace {
+            chosen = Some((updated_at, doc));
+        }
+    }
+    Ok(chosen.map(|(_, doc)| doc))
+}
+
+pub async fn fetch_device_index(
+    dht: &dyn Dht,
+    iid: &str,
+    signing_keys: &[String],
+    now: DateTime<Utc>,
+) -> Result<Option<DeviceIndex>> {
+    let key = dht_key_devices(iid);
+    let values = dht.get_all(&key).await?;
+    let mut chosen: Option<(DateTime<Utc>, DeviceIndex)> = None;
+    for value in values {
+        let Ok(index) = serde_json::from_slice::<DeviceIndex>(&value) else {
+            continue;
+        };
+        if verify_device_index_with_keys(&index, signing_keys, now).is_err() {
+            continue;
+        }
+        let Ok(updated_at) = parse_rfc3339(&index.updated_at) else {
+            continue;
+        };
+        let replace = match &chosen {
+            Some((current, _)) => updated_at > *current,
+            None => true,
+        };
+        if replace {
+            chosen = Some((updated_at, index));
+        }
+    }
+    Ok(chosen.map(|(_, doc)| doc))
+}
+
 pub async fn publish_revocation(
     dht: &dyn Dht,
     revocation: &RevocationDocument,
@@ -967,6 +1185,133 @@ mod tests {
 
             let err = fetch_identity(&dht, doc.iid.as_str()).await.unwrap_err();
             assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+        });
+    }
+
+    #[test]
+    fn device_document_signature_round_trip() {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let doc = rt
+            .block_on(async {
+                let tmp = tempfile::tempdir().unwrap();
+                IdentityManager::create_genesis_document(
+                    &signing_key,
+                    &enc_key,
+                    &tmp.path().join("idoc.json"),
+                )
+                .await
+            })
+            .unwrap();
+
+        let device_signing = SigningKey::generate(&mut rand::rngs::OsRng);
+        let device_key_b64 = base64_encode(device_signing.verifying_key().as_bytes());
+        let did = derive_device_did(&device_key_b64).unwrap();
+
+        let mut device_doc = DeviceDocument {
+            version: 1,
+            did: did.clone(),
+            iid: doc.iid.clone(),
+            device_name: Some("laptop".to_string()),
+            device_signing_key: device_key_b64,
+            endpoints: Vec::new(),
+            created_at: "2025-01-15T00:00:00Z".to_string(),
+            updated_at: "2025-01-15T00:00:00Z".to_string(),
+            expires_at: None,
+            capabilities: vec!["messaging".to_string()],
+            signature_by_identity: String::new(),
+        };
+        device_doc.signature_by_identity = sign_device_document(&device_doc, &signing_key).unwrap();
+        verify_device_document(&device_doc, &doc, "2025-01-15T00:00:00Z".parse().unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn device_index_signature_round_trip() {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let doc = rt
+            .block_on(async {
+                let tmp = tempfile::tempdir().unwrap();
+                IdentityManager::create_genesis_document(
+                    &signing_key,
+                    &enc_key,
+                    &tmp.path().join("idoc.json"),
+                )
+                .await
+            })
+            .unwrap();
+
+        let mut index = DeviceIndex {
+            iid: doc.iid.clone(),
+            devices: vec![DeviceIndexEntry {
+                did: "42kbzq2tyab939amybd76bm8kfpzgn95".to_string(),
+                device_name: Some("phone".to_string()),
+                last_seen: "2025-01-15T00:00:00Z".to_string(),
+            }],
+            updated_at: "2025-01-15T00:00:00Z".to_string(),
+            signature: String::new(),
+        };
+        index.signature = sign_device_index(&index, &signing_key).unwrap();
+        let keys = vec![doc.keys.signing.current.clone()];
+        verify_device_index_with_keys(&index, &keys, "2025-01-15T00:00:00Z".parse().unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn fetch_device_document_prefers_latest_updated_at() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dht = MemoryDht::new();
+        rt.block_on(async {
+            let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+            let tmp = tempfile::tempdir().unwrap();
+            let identity = IdentityManager::create_genesis_document(
+                &signing_key,
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+            .unwrap();
+            let keys = vec![identity.keys.signing.current.clone()];
+
+            let device_signing = SigningKey::generate(&mut rand::rngs::OsRng);
+            let device_key_b64 = base64_encode(device_signing.verifying_key().as_bytes());
+            let did = derive_device_did(&device_key_b64).unwrap();
+
+            let mut older = DeviceDocument {
+                version: 1,
+                did: did.clone(),
+                iid: identity.iid.clone(),
+                device_name: None,
+                device_signing_key: device_key_b64.clone(),
+                endpoints: Vec::new(),
+                created_at: "2025-01-10T00:00:00Z".to_string(),
+                updated_at: "2025-01-10T00:00:00Z".to_string(),
+                expires_at: None,
+                capabilities: Vec::new(),
+                signature_by_identity: String::new(),
+            };
+            older.signature_by_identity = sign_device_document(&older, &signing_key).unwrap();
+            publish_device_document(&dht, &older).await.unwrap();
+
+            let mut newer = older.clone();
+            newer.updated_at = "2025-01-12T00:00:00Z".to_string();
+            newer.signature_by_identity = sign_device_document(&newer, &signing_key).unwrap();
+            publish_device_document(&dht, &newer).await.unwrap();
+
+            let fetched = fetch_device_document(
+                &dht,
+                &did,
+                &keys,
+                "2025-01-15T00:00:00Z".parse().unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(fetched.updated_at, "2025-01-12T00:00:00Z");
         });
     }
 }
