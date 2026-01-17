@@ -1,9 +1,8 @@
 use std::borrow::Cow;
 use std::convert::Infallible;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use chrono::{DateTime, Duration, Utc};
@@ -11,7 +10,7 @@ use futures::{SinkExt, StreamExt};
 use hyper::{Body, Method, Request, Response, StatusCode};
 use hyper::header::{HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use hyper::service::{make_service_fn, service_fn};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::admin_auth::{
@@ -30,7 +29,10 @@ use crate::error::{PostUrbitError, Result};
 use crate::app_store::{fetch_repository, install_package, parse_postapp, verify_package_with_dht, verify_repository, RepositoryManifest};
 use crate::dht::Dht;
 use crate::event_bus::EventBus;
+use crate::health::HealthState;
+use crate::logging::log_entry;
 use crate::identity::{IdentityManager, Recovery};
+use crate::metrics;
 use crate::node_backup::{create_backup, restore_backup};
 use crate::node_config::default_node_settings;
 use sha2::Digest;
@@ -40,67 +42,6 @@ pub struct HttpServerConfig {
     pub metrics_enabled: bool,
     pub max_request_body_bytes: usize,
     pub session_cookie_secure: bool,
-}
-
-#[derive(Clone)]
-pub struct HealthState {
-    ready: Arc<AtomicBool>,
-    shutting_down: Arc<AtomicBool>,
-    details: Arc<tokio::sync::RwLock<ReadinessDetails>>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ReadinessDetails {
-    pub identity: String,
-    pub transport: String,
-    pub messaging: String,
-    pub apps: String,
-}
-
-impl Default for ReadinessDetails {
-    fn default() -> Self {
-        Self {
-            identity: "loaded".to_string(),
-            transport: "starting".to_string(),
-            messaging: "waiting".to_string(),
-            apps: "waiting".to_string(),
-        }
-    }
-}
-
-impl HealthState {
-    pub fn new() -> Self {
-        Self {
-            ready: Arc::new(AtomicBool::new(true)),
-            shutting_down: Arc::new(AtomicBool::new(false)),
-            details: Arc::new(tokio::sync::RwLock::new(ReadinessDetails::default())),
-        }
-    }
-
-    pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::SeqCst)
-    }
-
-    pub fn is_shutting_down(&self) -> bool {
-        self.shutting_down.load(Ordering::SeqCst)
-    }
-
-    pub fn set_ready(&self, ready: bool) {
-        self.ready.store(ready, Ordering::SeqCst);
-    }
-
-    pub fn set_shutting_down(&self, shutting_down: bool) {
-        self.shutting_down.store(shutting_down, Ordering::SeqCst);
-    }
-
-    pub async fn readiness_details(&self) -> ReadinessDetails {
-        self.details.read().await.clone()
-    }
-
-    pub async fn set_readiness_details(&self, details: ReadinessDetails) {
-        *self.details.write().await = details;
-    }
 }
 
 #[derive(Clone)]
@@ -174,7 +115,7 @@ async fn handle_public(req: &Request<Body>, path: &str, state: &HttpServerState)
         (&Method::GET, "/health") => Some(handle_health(state).await),
         (&Method::GET, "/metrics") => {
             if state.config.metrics_enabled {
-                let payload = render_metrics(state).await;
+                let payload = metrics::render_metrics(&state.admin, &state.identity, state.started_at).await;
                 Some(Response::builder()
                     .status(StatusCode::OK)
                     .header(CONTENT_TYPE, "text/plain; version=0.0.4")
@@ -560,7 +501,8 @@ async fn handle_login(req: Request<Body>, state: Arc<HttpServerState>) -> Respon
         )
         .await;
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "warn",
             "postnode::admin",
             "admin login failed",
@@ -605,7 +547,8 @@ async fn handle_login(req: Request<Body>, state: Arc<HttpServerState>) -> Respon
     )
     .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::admin",
         "admin login",
@@ -666,7 +609,8 @@ async fn handle_logout(req: Request<Body>, state: Arc<HttpServerState>) -> Respo
                     )
                     .await;
                     log_entry(
-                        &state,
+                        &state.admin,
+                        Some(&state.event_bus),
                         "info",
                         "postnode::admin",
                         "admin logout",
@@ -830,7 +774,8 @@ async fn handle_rotate_signing(req: Request<Body>, state: Arc<HttpServerState>) 
     )
     .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::identity",
         "signing key rotated",
@@ -856,7 +801,8 @@ async fn handle_rotate_encryption(req: Request<Body>, state: Arc<HttpServerState
     )
     .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::identity",
         "encryption key rotated",
@@ -881,7 +827,8 @@ async fn handle_update_recovery(req: Request<Body>, state: Arc<HttpServerState>)
     }
     let _ = state.admin.persist().await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::identity",
         "recovery updated",
@@ -953,7 +900,8 @@ async fn handle_add_device(req: Request<Body>, state: Arc<HttpServerState>) -> R
     )
     .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::identity",
         "device added",
@@ -982,7 +930,8 @@ async fn handle_remove_device(req: Request<Body>, path: &str, state: Arc<HttpSer
         )
         .await;
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::identity",
             "device removed",
@@ -1046,7 +995,8 @@ async fn handle_add_contact(req: Request<Body>, state: Arc<HttpServerState>) -> 
     drop(data);
     let _ = state.admin.persist().await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::contacts",
         "contact added",
@@ -1081,7 +1031,8 @@ async fn handle_update_contact(req: Request<Body>, path: &str, state: Arc<HttpSe
         drop(data);
         let _ = state.admin.persist().await;
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::contacts",
             "contact updated",
@@ -1101,7 +1052,8 @@ async fn handle_delete_contact(path: &str, state: Arc<HttpServerState>) -> Respo
         drop(data);
         let _ = state.admin.persist().await;
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::contacts",
             "contact removed",
@@ -1121,7 +1073,8 @@ async fn handle_block_contact(path: &str, state: Arc<HttpServerState>, block: bo
         drop(data);
         let _ = state.admin.persist().await;
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::contacts",
             if block { "contact blocked" } else { "contact unblocked" },
@@ -1230,7 +1183,8 @@ async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> 
         )
         .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::apps",
         "app installed",
@@ -1314,7 +1268,8 @@ async fn handle_install_upload(req: Request<Body>, state: Arc<HttpServerState>) 
         )
         .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::apps",
         "app installed",
@@ -1430,7 +1385,8 @@ async fn handle_update_app(path: &str, state: Arc<HttpServerState>) -> Response<
             )
             .await;
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::apps",
             "app updated",
@@ -1474,7 +1430,8 @@ async fn handle_delete_app(req: Request<Body>, path: &str, state: Arc<HttpServer
         )
         .await;
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::apps",
             "app uninstalled",
@@ -1548,7 +1505,8 @@ async fn handle_patch_app_permissions(req: Request<Body>, path: &str, state: Arc
             .await;
         }
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::apps",
             "app permissions updated",
@@ -1573,7 +1531,8 @@ async fn handle_clear_app_data(path: &str, state: Arc<HttpServerState>) -> Respo
     }
     let _ = state.admin.persist().await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::apps",
         "app data cleared",
@@ -1657,7 +1616,8 @@ async fn handle_patch_settings(req: Request<Body>, state: Arc<HttpServerState>) 
     )
     .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::admin",
         "settings updated",
@@ -1701,7 +1661,8 @@ async fn handle_reset_settings(req: Request<Body>, state: Arc<HttpServerState>) 
     )
     .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::admin",
         "settings reset",
@@ -1776,7 +1737,8 @@ async fn handle_create_backup(req: Request<Body>, state: Arc<HttpServerState>) -
     )
     .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::admin",
         "backup created",
@@ -1816,7 +1778,8 @@ async fn handle_upload_backup(req: Request<Body>, state: Arc<HttpServerState>) -
     }
     let _ = state.admin.persist().await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::admin",
         "backup uploaded",
@@ -1881,7 +1844,8 @@ async fn handle_restore_backup(req: Request<Body>, path: &str, state: Arc<HttpSe
     )
     .await;
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::admin",
         "backup restored",
@@ -1900,7 +1864,8 @@ async fn handle_delete_backup(path: &str, state: Arc<HttpServerState>) -> Respon
         let _ = tokio::fs::remove_file(entry.path).await;
         let _ = state.admin.persist().await;
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::admin",
             "backup deleted",
@@ -1946,7 +1911,8 @@ async fn handle_create_api_key(req: Request<Body>, state: Arc<HttpServerState>) 
 
     let response = CreateApiKeyResponse { key, secret };
     log_entry(
-        &state,
+        &state.admin,
+        Some(&state.event_bus),
         "info",
         "postnode::admin",
         "api key created",
@@ -1964,7 +1930,8 @@ async fn handle_delete_api_key(path: &str, state: Arc<HttpServerState>) -> Respo
         drop(data);
         let _ = state.admin.persist().await;
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::admin",
             "api key revoked",
@@ -2131,96 +2098,14 @@ async fn audit_event(
     }
     let level = if result == "success" { "info" } else { "warn" };
     log_entry(
-        state,
+        &state.admin,
+        Some(&state.event_bus),
         level,
         "postnode::audit",
         event,
         Some(Value::Object(fields)),
     )
     .await;
-}
-
-fn redact_token(value: &str) -> String {
-    let prefix: String = value.chars().take(8).collect();
-    if prefix.len() < value.len() {
-        format!("{}...", prefix)
-    } else {
-        value.to_string()
-    }
-}
-
-fn redact_ip(value: &str) -> String {
-    if value == "unknown" || value.is_empty() {
-        return value.to_string();
-    }
-    match value.parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) => {
-            let octets = ip.octets();
-            format!("{}.{}.x.x", octets[0], octets[1])
-        }
-        Ok(IpAddr::V6(_)) => "redacted".to_string(),
-        Err(_) => "redacted".to_string(),
-    }
-}
-
-fn redact_value(key: Option<&str>, value: Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut redacted = serde_json::Map::new();
-            for (k, v) in map {
-                redacted.insert(k.clone(), redact_value(Some(&k), v));
-            }
-            Value::Object(redacted)
-        }
-        Value::Array(values) => Value::Array(values.into_iter().map(|v| redact_value(key, v)).collect()),
-        Value::String(value) => {
-            if let Some(key) = key {
-                let key = key.to_ascii_lowercase();
-                if key.contains("iid") || key.contains("message_id") || key.contains("messageid") {
-                    return Value::String(redact_token(&value));
-                }
-                if key.contains("ip") {
-                    return Value::String(redact_ip(&value));
-                }
-            }
-            Value::String(value)
-        }
-        other => other,
-    }
-}
-
-fn redact_log_fields(fields: Option<Value>) -> Option<Value> {
-    fields.map(|value| redact_value(None, value))
-}
-
-async fn log_entry(
-    state: &HttpServerState,
-    level: &str,
-    target: &str,
-    message: &str,
-    fields: Option<Value>,
-) {
-    let entry = LogEntry {
-        timestamp: Utc::now().to_rfc3339(),
-        level: level.to_string(),
-        target: target.to_string(),
-        message: message.to_string(),
-        fields: redact_log_fields(fields),
-    };
-    state.admin.append_log(entry.clone(), 1000).await;
-    let _ = state
-        .event_bus
-        .emit(
-            "log_entry",
-            json!({
-                "timestamp": entry.timestamp,
-                "level": entry.level,
-                "target": entry.target,
-                "message": entry.message,
-                "fields": entry.fields,
-            }),
-        )
-        .await;
 }
 
 async fn handle_health(state: &HttpServerState) -> Response<Body> {
@@ -2270,58 +2155,6 @@ async fn handle_health(state: &HttpServerState) -> Response<Body> {
     } else {
         json_response_with_status(payload, StatusCode::SERVICE_UNAVAILABLE)
     }
-}
-
-async fn render_metrics(state: &HttpServerState) -> String {
-    use std::fmt::Write;
-
-    let iid = state.identity.iid().await;
-    let uptime_seconds = state.started_at.elapsed().as_secs();
-    let apps_installed = {
-        let data = state.admin.data.lock().await;
-        data.apps.len() as u64
-    };
-    let apps_running = 0u64;
-    let identity_bytes = directory_size(&state.admin.data_dir.join("identity"));
-    let messages_bytes = directory_size(&state.admin.data_dir.join("messages"));
-    let sync_bytes = directory_size(&state.admin.data_dir.join("sync"));
-    let apps_bytes = directory_size(&state.admin.data_dir.join("apps"));
-    let runtime_bytes = directory_size(&state.admin.data_dir.join("runtime"));
-
-    let mut out = String::new();
-    let _ = writeln!(out, "postnode_uptime_seconds {}", uptime_seconds);
-    let _ = writeln!(
-        out,
-        "postnode_info{{version=\"{}\", iid=\"{}\"}} 1",
-        env!("CARGO_PKG_VERSION"),
-        iid
-    );
-    let _ = writeln!(out, "postnode_memory_bytes{{type=\"heap\"}} 0");
-    let _ = writeln!(out, "postnode_memory_bytes{{type=\"resident\"}} 0");
-    let _ = writeln!(out, "postnode_cpu_seconds_total 0");
-    let _ = writeln!(out, "postnode_open_file_descriptors 0");
-    let _ = writeln!(out, "postnode_connections_total{{type=\"direct\"}} 0");
-    let _ = writeln!(out, "postnode_connections_total{{type=\"relay\"}} 0");
-    let _ = writeln!(out, "postnode_connections_active 0");
-    let _ = writeln!(out, "postnode_connection_events_total{{event=\"opened\"}} 0");
-    let _ = writeln!(out, "postnode_connection_events_total{{event=\"closed\"}} 0");
-    let _ = writeln!(out, "postnode_connection_events_total{{event=\"failed\"}} 0");
-    let _ = writeln!(out, "postnode_bytes_sent_total 0");
-    let _ = writeln!(out, "postnode_bytes_received_total 0");
-    let _ = writeln!(out, "postnode_messages_sent_total{{type=\"direct\"}} 0");
-    let _ = writeln!(out, "postnode_messages_sent_total{{type=\"group\"}} 0");
-    let _ = writeln!(out, "postnode_messages_received_total{{type=\"direct\"}} 0");
-    let _ = writeln!(out, "postnode_messages_received_total{{type=\"group\"}} 0");
-    let _ = writeln!(out, "postnode_message_queue_depth{{queue=\"outgoing\"}} 0");
-    let _ = writeln!(out, "postnode_message_queue_depth{{queue=\"incoming\"}} 0");
-    let _ = writeln!(out, "postnode_apps_installed_total {}", apps_installed);
-    let _ = writeln!(out, "postnode_apps_running {}", apps_running);
-    let _ = writeln!(out, "postnode_storage_bytes{{database=\"identity\"}} {}", identity_bytes);
-    let _ = writeln!(out, "postnode_storage_bytes{{database=\"messages\"}} {}", messages_bytes);
-    let _ = writeln!(out, "postnode_storage_bytes{{database=\"sync\"}} {}", sync_bytes);
-    let _ = writeln!(out, "postnode_storage_bytes{{database=\"apps\"}} {}", apps_bytes);
-    let _ = writeln!(out, "postnode_storage_bytes{{database=\"runtime\"}} {}", runtime_bytes);
-    out
 }
 
 async fn handle_restart(state: &HttpServerState) -> Response<Body> {
@@ -3088,7 +2921,8 @@ mod tests {
         state.auth.admin_token_hash = Some(hash_token("token"));
         let state = Arc::new(state);
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::admin",
             "test log entry",
@@ -3161,7 +2995,8 @@ mod tests {
     async fn log_redaction_masks_iid_and_ip() {
         let state = Arc::new(test_state().await);
         log_entry(
-            &state,
+            &state.admin,
+            Some(&state.event_bus),
             "info",
             "postnode::admin",
             "test",

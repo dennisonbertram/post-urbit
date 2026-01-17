@@ -7,10 +7,12 @@ use serde_json::json;
 use crate::dht::MemoryDht;
 use crate::admin_auth::{AuthConfig, generate_token_hex};
 use crate::admin_state::AdminState;
+use crate::diagnostics;
 use crate::event_bus::EventBus;
 use crate::identity::{publish_genesis, publish_identity, IdentityManager};
 use crate::node_config::default_node_settings;
-use crate::node_http::{run_http_server, HealthState, HttpServerConfig, HttpServerState};
+use crate::health::HealthState;
+use crate::node_http::{run_http_server, HttpServerConfig, HttpServerState};
 use crate::scheduler::Scheduler;
 use crate::transport::QuicTransport;
 use crate::error::{PostUrbitError, Result};
@@ -142,13 +144,14 @@ impl PostUrbitNode {
             })
             .await;
         let health = HealthState::new();
+        let started_at = std::time::Instant::now();
         let http_state = HttpServerState {
             admin: self.admin.clone(),
             auth,
             identity: self.identity.clone(),
             dht: self.dht.clone(),
             event_bus: self.event_bus.clone(),
-            started_at: std::time::Instant::now(),
+            started_at,
             config: HttpServerConfig {
                 metrics_enabled: self.config.metrics_enabled,
                 max_request_body_bytes: 100 * 1024 * 1024,
@@ -160,6 +163,21 @@ impl PostUrbitNode {
         let http_addr = self.config.http_addr;
         let http_handle = tokio::spawn(async move { run_http_server(http_addr, http_state).await });
 
+        #[cfg(unix)]
+        let diag_handle = {
+            let admin = self.admin.clone();
+            let identity = self.identity.clone();
+            let health = health.clone();
+            tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                if let Ok(mut stream) = signal(SignalKind::user_defined1()) {
+                    while stream.recv().await.is_some() {
+                        diagnostics::write_snapshot_log(&admin, &identity, Some(&health), started_at).await;
+                    }
+                }
+            })
+        };
+
         tokio::signal::ctrl_c().await?;
         info!("Shutdown signal received");
 
@@ -168,6 +186,8 @@ impl PostUrbitNode {
 
         transport_handle.abort();
         http_handle.abort();
+        #[cfg(unix)]
+        diag_handle.abort();
         Ok(())
     }
 }
