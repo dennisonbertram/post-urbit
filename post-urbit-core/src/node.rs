@@ -141,6 +141,7 @@ impl PostUrbitNode {
                 }
             })
             .await;
+        let health = HealthState::new();
         let http_state = HttpServerState {
             admin: self.admin.clone(),
             auth,
@@ -153,7 +154,7 @@ impl PostUrbitNode {
                 max_request_body_bytes: 100 * 1024 * 1024,
                 session_cookie_secure: false,
             },
-            health: HealthState::new(),
+            health: health.clone(),
             apps_dir: self.apps_dir.clone(),
         };
         let http_addr = self.config.http_addr;
@@ -161,6 +162,9 @@ impl PostUrbitNode {
 
         tokio::signal::ctrl_c().await?;
         info!("Shutdown signal received");
+
+        health.set_ready(false);
+        health.set_shutting_down(true);
 
         transport_handle.abort();
         http_handle.abort();
