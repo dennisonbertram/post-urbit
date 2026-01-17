@@ -543,6 +543,14 @@ async fn handle_logout(req: Request<Body>, state: Arc<HttpServerState>) -> Respo
             if let Some(session_value) = extract_cookie(value, "postnode_session") {
                 if let Ok(session_id) = verify_session_cookie(session_value, &state.auth.session_secret) {
                     state.admin.remove_session(&session_id).await;
+                    log_entry(
+                        &state,
+                        "info",
+                        "postnode::admin",
+                        "admin logout",
+                        Some(json!({"session_id": session_id})),
+                    )
+                    .await;
                 }
             }
         }
@@ -691,6 +699,14 @@ async fn handle_rotate_signing(state: Arc<HttpServerState>) -> Response<Body> {
     };
     state.admin.data.lock().await.last_key_rotation = Some(result.rotated_at.clone());
     let _ = state.admin.persist().await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::identity",
+        "signing key rotated",
+        Some(json!({"rotated_at": result.rotated_at})),
+    )
+    .await;
     json_response(result)
 }
 
@@ -701,6 +717,14 @@ async fn handle_rotate_encryption(state: Arc<HttpServerState>) -> Response<Body>
     };
     state.admin.data.lock().await.last_key_rotation = Some(result.rotated_at.clone());
     let _ = state.admin.persist().await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::identity",
+        "encryption key rotated",
+        Some(json!({"rotated_at": result.rotated_at})),
+    )
+    .await;
     json_response(result)
 }
 
@@ -718,6 +742,14 @@ async fn handle_update_recovery(req: Request<Body>, state: Arc<HttpServerState>)
         return api_error_response(ApiErrorCode::InternalError, "recovery update failed", StatusCode::INTERNAL_SERVER_ERROR);
     }
     let _ = state.admin.persist().await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::identity",
+        "recovery updated",
+        Some(json!({"method": recovery.method})),
+    )
+    .await;
     json_response(recovery)
 }
 
@@ -773,6 +805,14 @@ async fn handle_add_device(req: Request<Body>, state: Arc<HttpServerState>) -> R
         activation_code,
         expires_at,
     };
+    log_entry(
+        &state,
+        "info",
+        "postnode::identity",
+        "device added",
+        Some(json!({"device_name": name})),
+    )
+    .await;
     json_response(result)
 }
 
@@ -783,9 +823,17 @@ async fn handle_remove_device(path: &str, state: Arc<HttpServerState>) -> Respon
         if data.devices[pos].is_current {
             return api_error_response(ApiErrorCode::Conflict, "cannot remove current device", StatusCode::CONFLICT);
         }
-        data.devices.remove(pos);
+        let device = data.devices.remove(pos);
         drop(data);
         let _ = state.admin.persist().await;
+        log_entry(
+            &state,
+            "info",
+            "postnode::identity",
+            "device removed",
+            Some(json!({"device_id": device.did})),
+        )
+        .await;
         return Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap();
     }
     api_error_response(ApiErrorCode::NotFound, "device not found", StatusCode::NOT_FOUND)
@@ -842,6 +890,14 @@ async fn handle_add_contact(req: Request<Body>, state: Arc<HttpServerState>) -> 
     data.contacts.push(contact.clone());
     drop(data);
     let _ = state.admin.persist().await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::contacts",
+        "contact added",
+        Some(json!({"iid": contact.iid})),
+    )
+    .await;
     json_response(contact)
 }
 
@@ -869,6 +925,14 @@ async fn handle_update_contact(req: Request<Body>, path: &str, state: Arc<HttpSe
         let updated = contact.clone();
         drop(data);
         let _ = state.admin.persist().await;
+        log_entry(
+            &state,
+            "info",
+            "postnode::contacts",
+            "contact updated",
+            Some(json!({"iid": iid})),
+        )
+        .await;
         return json_response(updated);
     }
     api_error_response(ApiErrorCode::NotFound, "contact not found", StatusCode::NOT_FOUND)
@@ -878,9 +942,17 @@ async fn handle_delete_contact(path: &str, state: Arc<HttpServerState>) -> Respo
     let iid = path.trim_start_matches("/admin/v1/contacts/");
     let mut data = state.admin.data.lock().await;
     if let Some(pos) = data.contacts.iter().position(|c| c.iid == iid) {
-        data.contacts.remove(pos);
+        let contact = data.contacts.remove(pos);
         drop(data);
         let _ = state.admin.persist().await;
+        log_entry(
+            &state,
+            "info",
+            "postnode::contacts",
+            "contact removed",
+            Some(json!({"iid": contact.iid})),
+        )
+        .await;
         return Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap();
     }
     api_error_response(ApiErrorCode::NotFound, "contact not found", StatusCode::NOT_FOUND)
@@ -893,6 +965,14 @@ async fn handle_block_contact(path: &str, state: Arc<HttpServerState>, block: bo
         contact.is_blocked = block;
         drop(data);
         let _ = state.admin.persist().await;
+        log_entry(
+            &state,
+            "info",
+            "postnode::contacts",
+            if block { "contact blocked" } else { "contact unblocked" },
+            Some(json!({"iid": iid})),
+        )
+        .await;
         return Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap();
     }
     api_error_response(ApiErrorCode::NotFound, "contact not found", StatusCode::NOT_FOUND)
@@ -1538,6 +1618,14 @@ async fn handle_delete_backup(path: &str, state: Arc<HttpServerState>) -> Respon
         drop(data);
         let _ = tokio::fs::remove_file(entry.path).await;
         let _ = state.admin.persist().await;
+        log_entry(
+            &state,
+            "info",
+            "postnode::admin",
+            "backup deleted",
+            Some(json!({"backup_id": entry.id})),
+        )
+        .await;
         return Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap();
     }
     api_error_response(ApiErrorCode::NotFound, "backup not found", StatusCode::NOT_FOUND)
@@ -1576,6 +1664,14 @@ async fn handle_create_api_key(req: Request<Body>, state: Arc<HttpServerState>) 
     let _ = state.admin.persist().await;
 
     let response = CreateApiKeyResponse { key, secret };
+    log_entry(
+        &state,
+        "info",
+        "postnode::admin",
+        "api key created",
+        Some(json!({"api_key_id": response.key.id})),
+    )
+    .await;
     json_response(response)
 }
 
@@ -1583,9 +1679,17 @@ async fn handle_delete_api_key(path: &str, state: Arc<HttpServerState>) -> Respo
     let id = path.trim_start_matches("/admin/v1/api-keys/");
     let mut data = state.admin.data.lock().await;
     if let Some(pos) = data.api_keys.iter().position(|record| record.key.id == id) {
-        data.api_keys.remove(pos);
+        let record = data.api_keys.remove(pos);
         drop(data);
         let _ = state.admin.persist().await;
+        log_entry(
+            &state,
+            "info",
+            "postnode::admin",
+            "api key revoked",
+            Some(json!({"api_key_id": record.key.id})),
+        )
+        .await;
         return Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap();
     }
     api_error_response(ApiErrorCode::NotFound, "api key not found", StatusCode::NOT_FOUND)
