@@ -8,13 +8,15 @@ use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::canonical_json::canonical_json_from;
-use crate::dht::{dht_key_genesis, dht_key_identity, Dht};
+use crate::dht::{dht_key_genesis, dht_key_identity, dht_key_revocation, Dht};
 use crate::encoding::{base64_decode, base64_encode, crockford_base32_encode, validate_crockford_base32_lower};
 use crate::error::{PostUrbitError, Result};
 
 const IDOC_MAGIC: &[u8; 4] = b"IDOC";
 const IDOC_VERSION: u8 = 1;
 const IDOC_DOMAIN_SEPARATOR: &[u8] = b"post-urbit:idoc:v1:";
+const KEY_REVOCATION_DOMAIN: &[u8] = b"post-urbit:key-revocation:v1:";
+const IDENTITY_REVOCATION_DOMAIN: &[u8] = b"post-urbit:identity-revocation:v1:";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IdentityDocument {
@@ -105,6 +107,43 @@ pub struct Recovery {
 pub struct Signatures {
     pub current: String,
     pub previous: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type")]
+pub enum RevocationDocument {
+    #[serde(rename = "key_revocation")]
+    Key(KeyRevocation),
+    #[serde(rename = "identity_revocation")]
+    Identity(IdentityRevocation),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KeyRevocation {
+    pub iid: String,
+    pub revoked_key: String,
+    pub revoked_key_type: String,
+    pub reason: String,
+    pub effective_at: String,
+    pub replacement_document: IdentityDocument,
+    pub signatures: KeyRevocationSignatures,
+    pub recovery_proof: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct KeyRevocationSignatures {
+    pub by_current_signing_key: Option<String>,
+    pub by_new_signing_key: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct IdentityRevocation {
+    pub iid: String,
+    pub reason: String,
+    pub message: Option<String>,
+    pub effective_at: String,
+    pub successor_iid: Option<String>,
+    pub signature: String,
 }
 
 pub struct IdentityManager {
@@ -324,7 +363,62 @@ pub async fn fetch_identity(dht: &dyn Dht, iid: &str) -> Result<Option<IdentityD
         }
     }
 
-    Ok(best)
+    let Some(best_doc) = best else {
+        return Ok(None);
+    };
+
+    let revocations = fetch_revocations(dht, iid).await?;
+    let mut chosen: Option<(chrono::DateTime<Utc>, RevocationDocument)> = None;
+    for revocation in revocations {
+        let result = match &revocation {
+            RevocationDocument::Key(doc) => verify_key_revocation(doc),
+            RevocationDocument::Identity(doc) => {
+                verify_identity_revocation(doc, &best_doc.keys.signing.current)
+            }
+        };
+        if result.is_err() {
+            continue;
+        }
+        let effective_at = match &revocation {
+            RevocationDocument::Key(doc) => parse_rfc3339(&doc.effective_at),
+            RevocationDocument::Identity(doc) => parse_rfc3339(&doc.effective_at),
+        };
+        let Ok(effective_at) = effective_at else {
+            continue;
+        };
+        let replace = match &chosen {
+            Some((current, _)) => effective_at < *current,
+            None => true,
+        };
+        if replace {
+            chosen = Some((effective_at, revocation));
+        }
+    }
+
+    if let Some((_ts, revocation)) = chosen {
+        match revocation {
+            RevocationDocument::Identity(_) => {
+                return Err(PostUrbitError::InvalidInput("identity revoked"));
+            }
+            RevocationDocument::Key(doc) => {
+                return Ok(Some(doc.replacement_document.clone()));
+            }
+        }
+    }
+
+    Ok(Some(best_doc))
+}
+
+async fn fetch_revocations(dht: &dyn Dht, iid: &str) -> Result<Vec<RevocationDocument>> {
+    let key = dht_key_revocation(iid);
+    let values = dht.get_all(&key).await?;
+    let mut out = Vec::new();
+    for value in values {
+        if let Ok(doc) = serde_json::from_slice::<RevocationDocument>(&value) {
+            out.push(doc);
+        }
+    }
+    Ok(out)
 }
 
 pub fn encode_idoc_envelope(document: &IdentityDocument) -> Result<Vec<u8>> {
@@ -382,6 +476,143 @@ fn signature_payload(document: &IdentityDocument) -> Result<Vec<u8>> {
     out.extend_from_slice(IDOC_DOMAIN_SEPARATOR);
     out.extend_from_slice(canonical.as_bytes());
     Ok(out)
+}
+
+pub fn key_revocation_signature_input(revocation: &KeyRevocation) -> Result<Vec<u8>> {
+    let mut value = serde_json::to_value(revocation)
+        .map_err(|_| PostUrbitError::InvalidInput("serialize revocation"))?;
+    if let serde_json::Value::Object(ref mut map) = value {
+        map.remove("signatures");
+    }
+    revocation_signature_payload(&value, KEY_REVOCATION_DOMAIN)
+}
+
+pub fn identity_revocation_signature_input(revocation: &IdentityRevocation) -> Result<Vec<u8>> {
+    let mut value = serde_json::to_value(revocation)
+        .map_err(|_| PostUrbitError::InvalidInput("serialize revocation"))?;
+    if let serde_json::Value::Object(ref mut map) = value {
+        map.remove("signature");
+    }
+    revocation_signature_payload(&value, IDENTITY_REVOCATION_DOMAIN)
+}
+
+pub fn sign_key_revocation(revocation: &KeyRevocation, signing_key: &SigningKey) -> Result<String> {
+    let payload = key_revocation_signature_input(revocation)?;
+    let signature = signing_key.sign(&payload);
+    Ok(base64_encode(signature.to_bytes().as_slice()))
+}
+
+pub fn sign_identity_revocation(
+    revocation: &IdentityRevocation,
+    signing_key: &SigningKey,
+) -> Result<String> {
+    let payload = identity_revocation_signature_input(revocation)?;
+    let signature = signing_key.sign(&payload);
+    Ok(base64_encode(signature.to_bytes().as_slice()))
+}
+
+pub fn verify_key_revocation(revocation: &KeyRevocation) -> Result<()> {
+    validate_crockford_base32_lower(&revocation.iid)?;
+    if revocation.replacement_document.iid != revocation.iid {
+        return Err(PostUrbitError::InvalidInput("revocation iid mismatch"));
+    }
+    IdentityManager::verify_document(&revocation.replacement_document)?;
+
+    let payload = key_revocation_signature_input(revocation)?;
+    let new_key = revocation.replacement_document.keys.signing.current.clone();
+
+    if revocation.revoked_key_type == "signing" {
+        let Some(sig_new) = &revocation.signatures.by_new_signing_key else {
+            return Err(PostUrbitError::InvalidInput("missing new signature"));
+        };
+        verify_signature_with_key(&payload, sig_new, &new_key)?;
+        if let Some(sig_old) = &revocation.signatures.by_current_signing_key {
+            verify_signature_with_key(&payload, sig_old, &revocation.revoked_key)?;
+        }
+        return Ok(());
+    }
+
+    if revocation.revoked_key_type == "encryption" {
+        let Some(sig_current) = &revocation.signatures.by_current_signing_key else {
+            return Err(PostUrbitError::InvalidInput("missing current signature"));
+        };
+        verify_signature_with_key(&payload, sig_current, &new_key)?;
+        return Ok(());
+    }
+
+    Err(PostUrbitError::InvalidInput("revocation key type"))
+}
+
+pub fn verify_identity_revocation(
+    revocation: &IdentityRevocation,
+    signing_key: &str,
+) -> Result<()> {
+    validate_crockford_base32_lower(&revocation.iid)?;
+    let payload = identity_revocation_signature_input(revocation)?;
+    verify_signature_with_key(&payload, &revocation.signature, signing_key)
+}
+
+pub async fn publish_revocation(
+    dht: &dyn Dht,
+    revocation: &RevocationDocument,
+) -> Result<()> {
+    let canonical = canonical_json_from(revocation)?;
+    let ttl = Duration::from_secs(60 * 60 * 24 * 365);
+    let iid = match revocation {
+        RevocationDocument::Key(doc) => doc.iid.as_str(),
+        RevocationDocument::Identity(doc) => doc.iid.as_str(),
+    };
+    let key = dht_key_revocation(iid);
+    dht.put(&key, canonical.into_bytes(), ttl).await?;
+    Ok(())
+}
+
+fn revocation_signature_payload(
+    value: &serde_json::Value,
+    domain: &[u8],
+) -> Result<Vec<u8>> {
+    let canonical = crate::canonical_json::canonical_json_value(value)?;
+    let mut out = Vec::with_capacity(domain.len() + canonical.len());
+    out.extend_from_slice(domain);
+    out.extend_from_slice(canonical.as_bytes());
+    Ok(out)
+}
+
+fn verify_signature_with_key(
+    payload: &[u8],
+    signature_base64: &str,
+    key_base64: &str,
+) -> Result<()> {
+    let signature_bytes = base64_decode(signature_base64)?;
+    if signature_bytes.len() != 64 {
+        return Err(PostUrbitError::InvalidInput("signature length"));
+    }
+    let key_bytes = base64_decode(key_base64)?;
+    if key_bytes.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("signing key length"));
+    }
+    let signature = Signature::from_bytes(
+        signature_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("signature length"))?,
+    );
+    let verifying_key = VerifyingKey::from_bytes(
+        key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("signing key length"))?,
+    )
+    .map_err(|_| PostUrbitError::InvalidInput("signing key parse"))?;
+    verifying_key
+        .verify_strict(payload, &signature)
+        .map_err(|_| PostUrbitError::Crypto("signature invalid"))
+}
+
+fn parse_rfc3339(value: &str) -> Result<chrono::DateTime<Utc>> {
+    value
+        .parse::<chrono::DateTime<Utc>>()
+        .map_err(|_| PostUrbitError::InvalidInput("timestamp parse"))
 }
 
 fn empty_object() -> serde_json::Value {
@@ -527,6 +758,69 @@ mod tests {
             altered.timestamp = "2025-01-16T00:00:00Z".to_string();
             let err = publish_genesis(&dht, &altered).await.unwrap_err();
             assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+        });
+    }
+
+    #[test]
+    fn fetch_identity_applies_key_revocation() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dht = MemoryDht::new();
+        rt.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+            let doc = IdentityManager::create_genesis_document(
+                &signing_key,
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+            .unwrap();
+
+            publish_identity(&dht, &doc).await.unwrap();
+
+            let new_signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let new_enc = StaticSecret::random_from_rng(rand::rngs::OsRng);
+            let new_enc_pub = PublicKey::from(&new_enc);
+
+            let mut replacement = doc.clone();
+            replacement.sequence = "1".to_string();
+            replacement.timestamp = "2025-01-16T00:00:00Z".to_string();
+            replacement.keys.signing.previous = Some(replacement.keys.signing.current.clone());
+            replacement.keys.signing.current =
+                base64_encode(new_signing_key.verifying_key().as_bytes());
+            replacement.keys.encryption.current = base64_encode(new_enc_pub.as_bytes());
+            replacement.signatures.current = sign_idoc(&replacement, &new_signing_key).unwrap();
+
+            let mut revocation = KeyRevocation {
+                iid: doc.iid.clone(),
+                revoked_key: doc.keys.signing.current.clone(),
+                revoked_key_type: "signing".to_string(),
+                reason: "compromised".to_string(),
+                effective_at: "2025-01-16T00:00:00Z".to_string(),
+                replacement_document: replacement.clone(),
+                signatures: KeyRevocationSignatures {
+                    by_current_signing_key: None,
+                    by_new_signing_key: None,
+                },
+                recovery_proof: None,
+            };
+
+            let sig_old = sign_key_revocation(&revocation, &signing_key).unwrap();
+            let sig_new = sign_key_revocation(&revocation, &new_signing_key).unwrap();
+            revocation.signatures.by_current_signing_key = Some(sig_old);
+            revocation.signatures.by_new_signing_key = Some(sig_new);
+
+            publish_revocation(&dht, &RevocationDocument::Key(revocation))
+                .await
+                .unwrap();
+
+            let fetched = fetch_identity(&dht, doc.iid.as_str())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(fetched.iid, replacement.iid);
+            assert_eq!(fetched.keys.signing.current, replacement.keys.signing.current);
         });
     }
 

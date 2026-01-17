@@ -88,6 +88,14 @@ pub fn dht_key_devices(iid: &str) -> [u8; 32] {
     dht_key_with_prefix(b"post-urbit:devices-for:", iid)
 }
 
+pub fn dht_key_revocation(iid: &str) -> [u8; 32] {
+    dht_key_with_prefix(b"post-urbit:revocation:", iid)
+}
+
+pub fn dht_key_device_revocation(did: &str) -> [u8; 32] {
+    dht_key_with_prefix(b"post-urbit:device-revocation:", did)
+}
+
 fn dht_key_with_prefix(prefix: &[u8], iid: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(prefix);
