@@ -754,6 +754,9 @@ fn messaging_send(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvel
     let Some(message_type) = map_string_field(&args, "message_type") else {
         return ResultEnvelope::error("INVALID_MESSAGE_TYPE", "Missing message type");
     };
+    if message_type.trim().is_empty() {
+        return ResultEnvelope::error("INVALID_MESSAGE_TYPE", "Invalid message type");
+    }
     let Some(content) = map_bytes_field(&args, "content") else {
         return ResultEnvelope::error("INVALID_REQUEST", "Missing content");
     };
@@ -793,12 +796,22 @@ fn messaging_send(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvel
 }
 
 fn messaging_send_group(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    if !state
+        .capabilities
+        .iter()
+        .any(|cap| cap == "messaging:group")
+    {
+        return ResultEnvelope::error("PERMISSION_DENIED", "Capability denied");
+    }
     let Some(group_id) = map_string_field(&args, "group_id") else {
         return ResultEnvelope::error("INVALID_REQUEST", "Missing group_id");
     };
     let Some(message_type) = map_string_field(&args, "message_type") else {
         return ResultEnvelope::error("INVALID_MESSAGE_TYPE", "Missing message type");
     };
+    if message_type.trim().is_empty() {
+        return ResultEnvelope::error("INVALID_MESSAGE_TYPE", "Invalid message type");
+    }
     let Some(content) = map_bytes_field(&args, "content") else {
         return ResultEnvelope::error("INVALID_REQUEST", "Missing content");
     };
@@ -1102,6 +1115,14 @@ fn notifications_show(args: serde_cbor::Value, state: &mut HostState) -> ResultE
     let id = map_string_field(&args, "id").unwrap_or_else(|| Uuid::new_v4().to_string());
     let icon = map_string_field(&args, "icon");
     let sound = map_bool_field(&args, "sound").unwrap_or(false);
+    if sound
+        && !state
+            .capabilities
+            .iter()
+            .any(|cap| cap == "notifications:sound")
+    {
+        return ResultEnvelope::error("PERMISSION_DENIED", "Capability denied");
+    }
     if let Some(notifications) = state.notifications.as_ref() {
         if let Ok(mut data) = notifications.lock() {
             data.notifications
@@ -1645,5 +1666,31 @@ mod tests {
             _ => None,
         });
         assert_eq!(payload, Some(b"payload".to_vec()));
+    }
+
+    #[test]
+    fn host_messaging_send_group_requires_group_capability() {
+        let mut state = build_state(vec!["messaging:send".to_string()]);
+        let args = cbor_map_test(vec![
+            ("group_id", CborValue::Text("group-1".to_string())),
+            ("message_type", CborValue::Text("note".to_string())),
+            ("content", CborValue::Bytes(b"hi".to_vec())),
+        ]);
+        let result = handle_host_call("messaging.send_group", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn host_notifications_sound_requires_capability() {
+        let mut state = build_state(vec!["notifications:show".to_string()]);
+        let args = cbor_map_test(vec![
+            ("title", CborValue::Text("Hi".to_string())),
+            ("body", CborValue::Text("Sound".to_string())),
+            ("sound", CborValue::Bool(true)),
+        ]);
+        let result = handle_host_call("notifications.show", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
     }
 }
