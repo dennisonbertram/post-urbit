@@ -121,8 +121,9 @@ mod tests {
             let identity = IdentityManager::new(temp.path().to_str().unwrap())
                 .await
                 .unwrap();
-            publish_genesis(&dht, identity.identity_document()).await.unwrap();
-            let fetched = fetch_identity(&dht, identity.iid()).await.unwrap();
+            let idoc = identity.identity_document().await;
+            publish_genesis(&dht, &idoc).await.unwrap();
+            let fetched = fetch_identity(&dht, &identity.iid().await).await.unwrap();
             assert!(fetched.is_some());
         });
 
@@ -176,11 +177,13 @@ mod tests {
             let dht = MemoryDht::new();
             let node_a = IdentityManager::new(temp.path().to_str().unwrap()).await.unwrap();
             let node_b = IdentityManager::new(temp.path().to_str().unwrap()).await.unwrap();
-            publish_genesis(&dht, node_a.identity_document()).await.unwrap();
-            publish_genesis(&dht, node_b.identity_document()).await.unwrap();
+            let idoc_a = node_a.identity_document().await;
+            let idoc_b = node_b.identity_document().await;
+            publish_genesis(&dht, &idoc_a).await.unwrap();
+            publish_genesis(&dht, &idoc_b).await.unwrap();
 
-            let fetched_a = fetch_identity(&dht, node_a.iid()).await.unwrap();
-            let fetched_b = fetch_identity(&dht, node_b.iid()).await.unwrap();
+            let fetched_a = fetch_identity(&dht, &node_a.iid().await).await.unwrap();
+            let fetched_b = fetch_identity(&dht, &node_b.iid().await).await.unwrap();
             assert!(fetched_a.is_some());
             assert!(fetched_b.is_some());
         });

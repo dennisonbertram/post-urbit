@@ -2,30 +2,39 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::admin_types::NodeSettings;
 use crate::error::{PostUrbitError, Result};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NodeSettings {
+pub struct DaemonConfig {
     pub port: u16,
     pub data_dir: String,
     pub metrics_enabled: bool,
-    pub admin_token: Option<String>,
+    pub admin_password_hash: Option<String>,
+    pub admin_token_hash: Option<String>,
+    pub session_secret: Option<String>,
+    pub session_timeout_hours: u32,
+    pub http_addr: Option<String>,
 }
 
-impl Default for NodeSettings {
+impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             port: 4433,
             data_dir: "./data".to_string(),
             metrics_enabled: true,
-            admin_token: None,
+            admin_password_hash: None,
+            admin_token_hash: None,
+            session_secret: None,
+            session_timeout_hours: 24,
+            http_addr: None,
         }
     }
 }
 
-pub fn load_config(path: Option<&str>, overrides: HashMap<String, String>) -> Result<NodeSettings> {
+pub fn load_config(path: Option<&str>, overrides: HashMap<String, String>) -> Result<DaemonConfig> {
     let mut builder = config::Config::builder();
-    builder = builder.add_source(config::Config::try_from(&NodeSettings::default())
+    builder = builder.add_source(config::Config::try_from(&DaemonConfig::default())
         .map_err(|_| PostUrbitError::InvalidInput("config defaults"))?);
 
     if let Some(path) = path {
@@ -49,6 +58,50 @@ pub fn load_config(path: Option<&str>, overrides: HashMap<String, String>) -> Re
     settings
         .try_deserialize()
         .map_err(|_| PostUrbitError::InvalidInput("config deserialize"))
+}
+
+pub fn default_node_settings(data_dir: &str, log_dir: &str) -> NodeSettings {
+    NodeSettings {
+        network: crate::admin_types::NetworkSettings {
+            listen_addr: "0.0.0.0:4433".to_string(),
+            admin_listen_addr: "127.0.0.1:8080".to_string(),
+            enable_upnp: true,
+            external_addr: None,
+            relay_servers: Vec::new(),
+            bandwidth_limit_mbps: None,
+        },
+        admin: crate::admin_types::AdminSettings {
+            enabled: true,
+            require_tls: false,
+            session_timeout_hours: 24,
+            ip_allowlist: Vec::new(),
+        },
+        apps: crate::admin_types::AppSettings {
+            auto_update: true,
+            allow_sideload: true,
+            default_storage_quota: "100MB".to_string(),
+            trusted_repositories: Vec::new(),
+        },
+        privacy: crate::admin_types::PrivacySettings {
+            publish_identity_hours: 24,
+            show_online_status: true,
+            send_read_receipts: true,
+            share_analytics: false,
+        },
+        storage: crate::admin_types::StorageSettings {
+            data_dir: data_dir.to_string(),
+            log_dir: log_dir.to_string(),
+            backup_enabled: true,
+            backup_schedule: None,
+            backup_retention_days: 30,
+        },
+        notifications: crate::admin_types::NotificationSettings {
+            enabled: true,
+            sound_enabled: true,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+        },
+    }
 }
 
 #[cfg(test)]

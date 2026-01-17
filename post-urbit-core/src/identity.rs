@@ -14,6 +14,7 @@ use crate::dht::{
 };
 use crate::encoding::{base64_decode, base64_encode, crockford_base32_encode, validate_crockford_base32_lower};
 use crate::error::{PostUrbitError, Result};
+use crate::admin_types::KeyRotationResult;
 
 const IDOC_MAGIC: &[u8; 4] = b"IDOC";
 const IDOC_VERSION: u8 = 1;
@@ -195,10 +196,8 @@ pub struct DeviceIndex {
 }
 
 pub struct IdentityManager {
-    document: IdentityDocument,
-    signing_key: SigningKey,
-    encryption_key: StaticSecret,
     data_dir: String,
+    inner: tokio::sync::RwLock<IdentityState>,
 }
 
 impl IdentityManager {
@@ -240,11 +239,28 @@ impl IdentityManager {
             Self::create_genesis_document(&signing_key, &encryption_key, &doc_path).await?
         };
 
-        Ok(Self {
+        let meta_path = Path::new(data_dir).join("identity_meta.json");
+        let (signing_key_valid_from, encryption_key_valid_from) = if meta_path.exists() {
+            let meta_json = tokio::fs::read_to_string(&meta_path).await?;
+            let meta: IdentityMeta = serde_json::from_str(&meta_json)
+                .map_err(|_| PostUrbitError::InvalidInput("identity meta json"))?;
+            (meta.signing_key_valid_from, meta.encryption_key_valid_from)
+        } else {
+            let seq = parse_sequence(&document.sequence)? as u64;
+            (seq, seq)
+        };
+
+        let state = IdentityState {
             document,
             signing_key,
             encryption_key,
+            signing_key_valid_from,
+            encryption_key_valid_from,
+        };
+
+        Ok(Self {
             data_dir: data_dir.to_string(),
+            inner: tokio::sync::RwLock::new(state),
         })
     }
 
@@ -298,12 +314,111 @@ impl IdentityManager {
         Ok(document)
     }
 
-    pub fn iid(&self) -> &str {
-        &self.document.iid
+    pub async fn iid(&self) -> String {
+        self.inner.read().await.document.iid.clone()
     }
 
-    pub fn identity_document(&self) -> &IdentityDocument {
-        &self.document
+    pub async fn identity_document(&self) -> IdentityDocument {
+        self.inner.read().await.document.clone()
+    }
+
+    pub async fn update_claims(
+        &self,
+        name: Option<String>,
+        avatar: Option<String>,
+        bio: Option<String>,
+    ) -> Result<IdentityDocument> {
+        let mut state = self.inner.write().await;
+        let mut document = state.document.clone();
+        let next_sequence = parse_sequence(&document.sequence)? + 1;
+        document.sequence = next_sequence.to_string();
+        document.timestamp = Utc::now().to_rfc3339();
+        document.claims.name = name;
+        document.claims.avatar = avatar;
+        document.claims.bio = bio;
+        document.signatures.current = sign_idoc(&document, &state.signing_key)?;
+        document.signatures.previous = None;
+        state.document = document.clone();
+        self.persist_state(&state).await?;
+        Ok(document)
+    }
+
+    pub async fn update_recovery(&self, recovery: Recovery) -> Result<IdentityDocument> {
+        let mut state = self.inner.write().await;
+        let mut document = state.document.clone();
+        let next_sequence = parse_sequence(&document.sequence)? + 1;
+        document.sequence = next_sequence.to_string();
+        document.timestamp = Utc::now().to_rfc3339();
+        document.recovery = recovery;
+        document.signatures.current = sign_idoc(&document, &state.signing_key)?;
+        document.signatures.previous = None;
+        state.document = document.clone();
+        self.persist_state(&state).await?;
+        Ok(document)
+    }
+
+    pub async fn rotate_signing_key(&self) -> Result<KeyRotationResult> {
+        let mut state = self.inner.write().await;
+        let mut document = state.document.clone();
+        let old_signing_key = state.signing_key.clone();
+        let previous_key = document.keys.signing.current.clone();
+
+        let new_signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let new_public = new_signing_key.verifying_key();
+        let next_sequence = parse_sequence(&document.sequence)? + 1;
+        document.sequence = next_sequence.to_string();
+        document.timestamp = Utc::now().to_rfc3339();
+        document.keys.signing.previous = Some(previous_key.clone());
+        document.keys.signing.current = base64_encode(new_public.as_bytes());
+        document.signatures.current = sign_idoc(&document, &new_signing_key)?;
+        document.signatures.previous = Some(sign_idoc(&document, &old_signing_key)?);
+
+        state.signing_key = new_signing_key;
+        state.signing_key_valid_from = next_sequence as u64;
+        state.document = document.clone();
+        self.persist_state(&state).await?;
+
+        Ok(KeyRotationResult {
+            success: true,
+            new_key_fingerprint: fingerprint_key(&document.keys.signing.current)?,
+            previous_key_fingerprint: fingerprint_key(&previous_key)?,
+            rotated_at: document.timestamp.clone(),
+        })
+    }
+
+    pub async fn rotate_encryption_key(&self) -> Result<KeyRotationResult> {
+        let mut state = self.inner.write().await;
+        let mut document = state.document.clone();
+        let previous_key = document.keys.encryption.current.clone();
+
+        let new_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let new_public = PublicKey::from(&new_secret);
+        let next_sequence = parse_sequence(&document.sequence)? + 1;
+        document.sequence = next_sequence.to_string();
+        document.timestamp = Utc::now().to_rfc3339();
+
+        let expires_at = (Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+        document.keys.encryption.previous.push(EncryptionKeyHistory {
+            key: previous_key.clone(),
+            valid_from: state.encryption_key_valid_from.to_string(),
+            valid_until: next_sequence.to_string(),
+            expires_at,
+        });
+        document.keys.encryption.current = base64_encode(new_public.as_bytes());
+        document.signatures.current = sign_idoc(&document, &state.signing_key)?;
+        document.signatures.previous = None;
+
+        state.encryption_key = new_secret;
+        state.encryption_key_valid_from = next_sequence as u64;
+        state.document = document.clone();
+        self.persist_state(&state).await?;
+
+        Ok(KeyRotationResult {
+            success: true,
+            new_key_fingerprint: fingerprint_key(&document.keys.encryption.current)?,
+            previous_key_fingerprint: fingerprint_key(&previous_key)?,
+            rotated_at: document.timestamp.clone(),
+        })
     }
 
     pub fn verify_document(document: &IdentityDocument) -> Result<()> {
@@ -338,12 +453,43 @@ impl IdentityManager {
     }
 
     pub async fn persist(&self) -> Result<()> {
+        let state = self.inner.read().await;
+        self.persist_state(&state).await
+    }
+
+    async fn persist_state(&self, state: &IdentityState) -> Result<()> {
         let doc_path = Path::new(&self.data_dir).join("identity.json");
-        let doc_json = serde_json::to_string_pretty(&self.document)
+        let doc_json = serde_json::to_string_pretty(&state.document)
             .map_err(|_| PostUrbitError::InvalidInput("serialize identity document"))?;
         tokio::fs::write(&doc_path, &doc_json).await?;
+        let signing_path = Path::new(&self.data_dir).join("identity_signing.key");
+        tokio::fs::write(&signing_path, state.signing_key.to_bytes()).await?;
+        let enc_path = Path::new(&self.data_dir).join("identity_encryption.key");
+        tokio::fs::write(&enc_path, state.encryption_key.to_bytes()).await?;
+        let meta = IdentityMeta {
+            signing_key_valid_from: state.signing_key_valid_from,
+            encryption_key_valid_from: state.encryption_key_valid_from,
+        };
+        let meta_path = Path::new(&self.data_dir).join("identity_meta.json");
+        let meta_json = serde_json::to_string_pretty(&meta)
+            .map_err(|_| PostUrbitError::InvalidInput("serialize identity meta"))?;
+        tokio::fs::write(&meta_path, &meta_json).await?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IdentityMeta {
+    signing_key_valid_from: u64,
+    encryption_key_valid_from: u64,
+}
+
+struct IdentityState {
+    document: IdentityDocument,
+    signing_key: SigningKey,
+    encryption_key: StaticSecret,
+    signing_key_valid_from: u64,
+    encryption_key_valid_from: u64,
 }
 
 pub fn derive_iid(verifying_key: &VerifyingKey) -> String {
@@ -355,6 +501,15 @@ pub fn derive_iid(verifying_key: &VerifyingKey) -> String {
 
 pub fn derive_did(verifying_key: &VerifyingKey) -> String {
     derive_iid(verifying_key)
+}
+
+fn fingerprint_key(base64_key: &str) -> Result<String> {
+    let raw = base64_decode(base64_key)?;
+    if raw.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("key length"));
+    }
+    let hash = Sha256::digest(raw.as_slice());
+    Ok(format!("sha256:{}", hex::encode(hash)))
 }
 
 pub async fn publish_identity(dht: &dyn Dht, document: &IdentityDocument) -> Result<()> {

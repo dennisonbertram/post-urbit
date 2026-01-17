@@ -39,6 +39,12 @@
 //!         port: 4433,
 //!         data_dir: "./data".to_string(),
 //!         bootstrap_peers: vec![],
+//!         http_addr: "127.0.0.1:8080".parse().unwrap(),
+//!         metrics_enabled: true,
+//!         admin_password_hash: None,
+//!         admin_token_hash: None,
+//!         session_secret: None,
+//!         session_timeout_hours: 24,
 //!     };
 //!
 //!     let node = PostUrbitNode::new(config).await?;
@@ -73,5 +79,8 @@ pub mod nat;
 pub mod relay;
 pub mod relay_client;
 pub mod group;
+pub mod admin_types;
+pub mod admin_state;
+pub mod admin_auth;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};

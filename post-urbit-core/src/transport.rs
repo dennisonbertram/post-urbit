@@ -139,7 +139,7 @@ impl QuicTransport {
         // 4. Verify peer's response
 
         // For now, just echo identity info
-        let identity_info = format!("IID: {}", identity.iid());
+        let identity_info = format!("IID: {}", identity.iid().await);
         send.write_all(identity_info.as_bytes())
             .await
             .map_err(|err| PostUrbitError::Io(err.to_string()))?;
@@ -974,7 +974,7 @@ mod tests {
         let doc = rt
             .block_on(async {
                 let manager = IdentityManager::new(temp.path().to_str().unwrap()).await?;
-                Ok::<_, PostUrbitError>(manager.identity_document().clone())
+                Ok::<_, PostUrbitError>(manager.identity_document().await)
             })
             .unwrap();
         let idoc = encode_idoc_envelope(&doc).unwrap();
