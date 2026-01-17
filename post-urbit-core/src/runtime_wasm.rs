@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -141,9 +141,11 @@ struct HostState {
     notifications: Option<Arc<Mutex<NotificationState>>>,
     sync_state: Option<Arc<Mutex<SyncState>>>,
     messaging: Option<Arc<Mutex<MessagingState>>>,
+    installed_apps: Option<Arc<Mutex<HashSet<String>>>>,
     registry: Option<Arc<CapabilityRegistry>>,
     identity_iid: Option<String>,
     boot_time: Option<std::time::Instant>,
+    call_depth: u8,
 }
 
 impl HostState {
@@ -157,6 +159,7 @@ impl HostState {
         notifications: Arc<Mutex<NotificationState>>,
         sync_state: Arc<Mutex<SyncState>>,
         messaging: Arc<Mutex<MessagingState>>,
+        installed_apps: Arc<Mutex<HashSet<String>>>,
         registry: Arc<CapabilityRegistry>,
         identity_iid: Option<String>,
     ) -> Self {
@@ -172,9 +175,11 @@ impl HostState {
             notifications: Some(notifications),
             sync_state: Some(sync_state),
             messaging: Some(messaging),
+            installed_apps: Some(installed_apps),
             registry: Some(registry),
             identity_iid,
             boot_time: Some(std::time::Instant::now()),
+            call_depth: 0,
         }
     }
 }
@@ -187,6 +192,7 @@ pub struct RuntimeManager {
     notifications: Arc<Mutex<NotificationState>>,
     sync_state: Arc<Mutex<SyncState>>,
     messaging: Arc<Mutex<MessagingState>>,
+    installed_apps: Arc<Mutex<HashSet<String>>>,
     registry: Arc<CapabilityRegistry>,
     identity_iid: Option<String>,
 }
@@ -201,6 +207,7 @@ impl RuntimeManager {
             notifications: Arc::new(Mutex::new(NotificationState::default())),
             sync_state: Arc::new(Mutex::new(SyncState::default())),
             messaging: Arc::new(Mutex::new(MessagingState::default())),
+            installed_apps: Arc::new(Mutex::new(HashSet::new())),
             registry: Arc::new(default_registry()),
             identity_iid: None,
         }
@@ -235,6 +242,9 @@ impl RuntimeManager {
                 instance: None,
             },
         );
+        if let Ok(mut installed) = self.installed_apps.lock() {
+            installed.insert(app_id.to_string());
+        }
         Ok(())
     }
 
@@ -268,6 +278,7 @@ impl RuntimeManager {
                 self.notifications.clone(),
                 self.sync_state.clone(),
                 self.messaging.clone(),
+                self.installed_apps.clone(),
                 self.registry.clone(),
                 self.identity_iid.clone(),
             ),
@@ -298,6 +309,9 @@ impl RuntimeManager {
         self.apps
             .remove(app_id)
             .ok_or(PostUrbitError::InvalidInput("app not installed"))?;
+        if let Ok(mut installed) = self.installed_apps.lock() {
+            installed.remove(app_id);
+        }
         Ok(())
     }
 
@@ -403,6 +417,10 @@ fn handle_host_call(
     let Some(registry) = state.registry.as_ref() else {
         return ResultEnvelope::error("NOT_IMPLEMENTED", "Runtime registry missing");
     };
+
+    if method == "app.invoke" {
+        return app_invoke(args, state);
+    }
 
     if let Some(capability) = registry.capability_for(method) {
         if !capability.is_empty() && !state.capabilities.iter().any(|c| c == capability) {
@@ -698,6 +716,35 @@ fn system_get_app_info(state: &HostState) -> ResultEnvelope {
             ),
         ),
     ]))
+}
+
+fn app_invoke(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let Some(target_app) = map_string_field(&args, "target_app") else {
+        return ResultEnvelope::error("APP_NOT_FOUND", "Missing target app");
+    };
+    let Some(_method) = map_string_field(&args, "method") else {
+        return ResultEnvelope::error("METHOD_NOT_FOUND", "Missing method");
+    };
+    let args_bytes = map_bytes_field(&args, "args").unwrap_or_default();
+
+    if state.call_depth >= 8 {
+        return ResultEnvelope::error("CALL_DEPTH_EXCEEDED", "Call depth exceeded");
+    }
+
+    if !has_app_invoke_capability(&state.capabilities, &target_app) {
+        return ResultEnvelope::error("PERMISSION_DENIED", "Capability denied");
+    }
+
+    if let Some(installed) = state.installed_apps.as_ref().and_then(|set| set.lock().ok()) {
+        if !installed.contains(&target_app) {
+            return ResultEnvelope::error("APP_NOT_INSTALLED", "Target app not installed");
+        }
+    }
+
+    ResultEnvelope::ok(cbor_map(vec![(
+        serde_cbor::Value::Text("result".to_string()),
+        serde_cbor::Value::Bytes(args_bytes),
+    )]))
 }
 
 fn messaging_send(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
@@ -1114,6 +1161,11 @@ fn map_access_field(value: &serde_cbor::Value, key: &str) -> Option<DocumentAcce
     Some(DocumentAccess { owner, readers, writers })
 }
 
+fn has_app_invoke_capability(capabilities: &[String], target_app: &str) -> bool {
+    let target = format!("app:invoke:{target_app}");
+    capabilities.iter().any(|cap| cap == "app:invoke:any" || cap == &target)
+}
+
 fn map_string_field(value: &serde_cbor::Value, key: &str) -> Option<String> {
     let serde_cbor::Value::Map(entries) = value else {
         return None;
@@ -1412,6 +1464,7 @@ mod tests {
             Arc::new(Mutex::new(NotificationState::default())),
             Arc::new(Mutex::new(SyncState::default())),
             Arc::new(Mutex::new(MessagingState::default())),
+            Arc::new(Mutex::new(HashSet::new())),
             Arc::new(default_registry()),
             Some("iid-test".to_string()),
         )
@@ -1494,6 +1547,7 @@ mod tests {
             Arc::new(Mutex::new(NotificationState::default())),
             Arc::new(Mutex::new(SyncState::default())),
             Arc::new(Mutex::new(MessagingState::default())),
+            Arc::new(Mutex::new(HashSet::new())),
             Arc::new(default_registry()),
             Some("iid-test".to_string()),
         );
@@ -1553,5 +1607,43 @@ mod tests {
         ]);
         let apply_result = handle_host_call("sync.apply_operation", apply_args, &mut state);
         assert!(apply_result.ok);
+    }
+
+    #[test]
+    fn host_app_invoke_requires_capability() {
+        let mut state = build_state(Vec::new());
+        let args = cbor_map_test(vec![
+            ("target_app", CborValue::Text("app.target".to_string())),
+            ("method", CborValue::Text("ping".to_string())),
+            ("args", CborValue::Bytes(b"payload".to_vec())),
+        ]);
+        let result = handle_host_call("app.invoke", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn host_app_invoke_returns_result() {
+        let mut state = build_state(vec!["app:invoke:any".to_string()]);
+        if let Some(installed) = state.installed_apps.as_ref() {
+            if let Ok(mut apps) = installed.lock() {
+                apps.insert("app.target".to_string());
+            }
+        }
+        let args = cbor_map_test(vec![
+            ("target_app", CborValue::Text("app.target".to_string())),
+            ("method", CborValue::Text("ping".to_string())),
+            ("args", CborValue::Bytes(b"payload".to_vec())),
+        ]);
+        let result = handle_host_call("app.invoke", args, &mut state);
+        assert!(result.ok);
+        let Some(CborValue::Map(map)) = result.value else {
+            panic!("missing value");
+        };
+        let payload = map.iter().find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(name), CborValue::Bytes(value)) if name == "result" => Some(value.clone()),
+            _ => None,
+        });
+        assert_eq!(payload, Some(b"payload".to_vec()));
     }
 }
