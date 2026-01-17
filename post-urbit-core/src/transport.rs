@@ -297,6 +297,89 @@ pub struct HandshakeComplete {
     pub success: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeRole {
+    Client,
+    Server,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeState {
+    Start,
+    ClientHelloSent,
+    ClientHelloReceived,
+    ServerHelloSent,
+    ServerHelloReceived,
+    ClientAuthSent,
+    ClientAuthReceived,
+    Complete,
+}
+
+#[derive(Debug)]
+pub struct HandshakeFsm {
+    role: HandshakeRole,
+    state: HandshakeState,
+}
+
+impl HandshakeFsm {
+    pub fn new(role: HandshakeRole) -> Self {
+        Self {
+            role,
+            state: HandshakeState::Start,
+        }
+    }
+
+    pub fn state(&self) -> HandshakeState {
+        self.state
+    }
+
+    pub fn on_send(&mut self, msg: &HandshakeMessage) -> Result<()> {
+        use HandshakeMessage::*;
+        match (self.role, self.state, msg) {
+            (HandshakeRole::Client, HandshakeState::Start, ClientHello(_)) => {
+                self.state = HandshakeState::ClientHelloSent;
+                Ok(())
+            }
+            (HandshakeRole::Client, HandshakeState::ServerHelloReceived, ClientAuth(_)) => {
+                self.state = HandshakeState::ClientAuthSent;
+                Ok(())
+            }
+            (HandshakeRole::Server, HandshakeState::ClientHelloReceived, ServerHello(_)) => {
+                self.state = HandshakeState::ServerHelloSent;
+                Ok(())
+            }
+            (HandshakeRole::Server, HandshakeState::ClientAuthReceived, HandshakeComplete(_)) => {
+                self.state = HandshakeState::Complete;
+                Ok(())
+            }
+            _ => Err(PostUrbitError::InvalidInput("handshake send order")),
+        }
+    }
+
+    pub fn on_receive(&mut self, msg: &HandshakeMessage) -> Result<()> {
+        use HandshakeMessage::*;
+        match (self.role, self.state, msg) {
+            (HandshakeRole::Client, HandshakeState::ClientHelloSent, ServerHello(_)) => {
+                self.state = HandshakeState::ServerHelloReceived;
+                Ok(())
+            }
+            (HandshakeRole::Client, HandshakeState::ClientAuthSent, HandshakeComplete(_)) => {
+                self.state = HandshakeState::Complete;
+                Ok(())
+            }
+            (HandshakeRole::Server, HandshakeState::Start, ClientHello(_)) => {
+                self.state = HandshakeState::ClientHelloReceived;
+                Ok(())
+            }
+            (HandshakeRole::Server, HandshakeState::ServerHelloSent, ClientAuth(_)) => {
+                self.state = HandshakeState::ClientAuthReceived;
+                Ok(())
+            }
+            _ => Err(PostUrbitError::InvalidInput("handshake receive order")),
+        }
+    }
+}
+
 pub fn canonical_handshake_json(msg: &HandshakeMessage) -> Result<String> {
     canonical_json_from(msg)
 }
@@ -480,5 +563,66 @@ mod tests {
             true,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn handshake_fsm_client_flow() {
+        let mut fsm = HandshakeFsm::new(HandshakeRole::Client);
+        let client_hello = HandshakeMessage::ClientHello(ClientHello {
+            version: 1,
+            client_iid: "b1n7cfscgashm32xx7eaxw0y09gy0y2v".to_string(),
+            client_did: None,
+            expected_server_iid: None,
+            client_nonce: base64_encode(&[0u8; 32]),
+            timestamp: "2025-01-15T00:00:00Z".to_string(),
+            tls_binding: base64_encode(&[1u8; 32]),
+        });
+        fsm.on_send(&client_hello).unwrap();
+
+        let server_hello = HandshakeMessage::ServerHello(ServerHello {
+            version: 1,
+            server_iid: "2f0fcybfpmka5vf7ge737ex07crgnxsw".to_string(),
+            server_did: None,
+            server_nonce: base64_encode(&[2u8; 32]),
+            timestamp: "2025-01-15T00:00:01Z".to_string(),
+            tls_binding: base64_encode(&[3u8; 32]),
+            identity_document: serde_json::json!({}),
+            device_document: None,
+            challenge_signature: base64_encode(&[4u8; 64]),
+            device_signature: None,
+        });
+        fsm.on_receive(&server_hello).unwrap();
+
+        let client_auth = HandshakeMessage::ClientAuth(ClientAuth {
+            version: 1,
+            identity_document: serde_json::json!({}),
+            device_document: None,
+            challenge_signature: base64_encode(&[5u8; 64]),
+            device_signature: None,
+            tls_binding: base64_encode(&[6u8; 32]),
+        });
+        fsm.on_send(&client_auth).unwrap();
+
+        let complete = HandshakeMessage::HandshakeComplete(HandshakeComplete {
+            version: 1,
+            success: true,
+        });
+        fsm.on_receive(&complete).unwrap();
+        assert_eq!(fsm.state(), HandshakeState::Complete);
+    }
+
+    #[test]
+    fn handshake_fsm_rejects_out_of_order() {
+        let mut fsm = HandshakeFsm::new(HandshakeRole::Server);
+        let bad = HandshakeMessage::ClientAuth(ClientAuth {
+            version: 1,
+            identity_document: serde_json::json!({}),
+            device_document: None,
+            challenge_signature: base64_encode(&[5u8; 64]),
+            device_signature: None,
+            tls_binding: base64_encode(&[6u8; 32]),
+        });
+        let err = fsm.on_receive(&bad).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
     }
 }
