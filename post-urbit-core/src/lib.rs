@@ -83,5 +83,7 @@ pub mod admin_types;
 pub mod admin_state;
 pub mod admin_auth;
 pub mod app_store;
+pub mod event_bus;
+pub mod scheduler;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};

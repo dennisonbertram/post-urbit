@@ -2,13 +2,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracing::info;
+use serde_json::json;
 
 use crate::dht::MemoryDht;
 use crate::admin_auth::{AuthConfig, generate_token_hex};
 use crate::admin_state::AdminState;
+use crate::event_bus::EventBus;
 use crate::identity::{publish_genesis, publish_identity, IdentityManager};
 use crate::node_config::default_node_settings;
 use crate::node_http::{run_http_server, HttpServerConfig, HttpServerState};
+use crate::scheduler::Scheduler;
 use crate::transport::QuicTransport;
 use crate::error::{PostUrbitError, Result};
 
@@ -32,6 +35,7 @@ pub struct PostUrbitNode {
     dht: Arc<MemoryDht>,
     admin: AdminState,
     apps_dir: std::path::PathBuf,
+    event_bus: Arc<EventBus>,
 }
 
 impl PostUrbitNode {
@@ -63,6 +67,7 @@ impl PostUrbitNode {
         );
         let admin = AdminState::load(&config.data_dir, settings).await?;
         let apps_dir = Path::new(&config.data_dir).join("apps").join("installed");
+        let event_bus = Arc::new(EventBus::new());
 
         Ok(Self {
             config,
@@ -71,6 +76,7 @@ impl PostUrbitNode {
             dht,
             admin,
             apps_dir,
+            event_bus,
         })
     }
 
@@ -89,11 +95,58 @@ impl PostUrbitNode {
             session_secret,
             session_timeout_hours: self.config.session_timeout_hours,
         };
+        let scheduler = Scheduler::new();
+        let identity = self.identity.clone();
+        let dht = self.dht.clone();
+        let admin_sessions = self.admin.clone();
+        let admin_repo = self.admin.clone();
+        let event_bus = self.event_bus.clone();
+        scheduler
+            .schedule("identity_publish", std::time::Duration::from_secs(60 * 60 * 24), move || {
+                let identity = identity.clone();
+                let dht = dht.clone();
+                async move {
+                    let doc = identity.identity_document().await;
+                    publish_identity(dht.as_ref(), &doc).await.map_err(|err| format!("{err:?}"))?;
+                    Ok(())
+                }
+            })
+            .await;
+        scheduler
+            .schedule("session_cleanup", std::time::Duration::from_secs(60 * 60), move || {
+                let admin = admin_sessions.clone();
+                async move {
+                    admin.prune_sessions().await;
+                    let _ = admin.persist().await;
+                    Ok(())
+                }
+            })
+            .await;
+        scheduler
+            .schedule("repo_cache_cleanup", std::time::Duration::from_secs(60 * 60), move || {
+                let admin = admin_repo.clone();
+                async move {
+                    admin.prune_repo_cache(chrono::Duration::hours(1)).await;
+                    let _ = admin.persist().await;
+                    Ok(())
+                }
+            })
+            .await;
+        scheduler
+            .schedule("health_self_check", std::time::Duration::from_secs(60), move || {
+                let event_bus = event_bus.clone();
+                async move {
+                    event_bus.emit("status_change", json!({"status": "healthy"})).await;
+                    Ok(())
+                }
+            })
+            .await;
         let http_state = HttpServerState {
             admin: self.admin.clone(),
             auth,
             identity: self.identity.clone(),
             dht: self.dht.clone(),
+            event_bus: self.event_bus.clone(),
             started_at: std::time::Instant::now(),
             config: HttpServerConfig {
                 metrics_enabled: self.config.metrics_enabled,

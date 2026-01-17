@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -137,6 +137,16 @@ impl AdminState {
         data.sessions.retain(|_, session| {
             DateTime::parse_from_rfc3339(&session.expires_at)
                 .map(|ts| ts.with_timezone(&Utc) > now)
+                .unwrap_or(false)
+        });
+    }
+
+    pub async fn prune_repo_cache(&self, max_age: Duration) {
+        let now = Utc::now();
+        let mut data = self.data.lock().await;
+        data.repo_cache.retain(|_, cached| {
+            DateTime::parse_from_rfc3339(&cached.fetched_at)
+                .map(|ts| ts.with_timezone(&Utc) + max_age > now)
                 .unwrap_or(false)
         });
     }

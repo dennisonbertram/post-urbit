@@ -5,11 +5,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Duration, Utc};
+use futures::{SinkExt, StreamExt};
 use hyper::{Body, Method, Request, Response, StatusCode};
 use hyper::header::{HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use hyper::service::{make_service_fn, service_fn};
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::admin_auth::{
     AuthConfig, create_session_cookie, generate_token_hex, hash_token, verify_password,
@@ -26,6 +27,7 @@ use crate::admin_types::{
 use crate::error::{PostUrbitError, Result};
 use crate::app_store::{fetch_repository, install_package, parse_postapp, verify_package_with_dht, verify_repository, RepositoryManifest};
 use crate::dht::Dht;
+use crate::event_bus::EventBus;
 use crate::identity::{IdentityManager, Recovery};
 use crate::node_backup::{create_backup, restore_backup};
 use crate::node_config::default_node_settings;
@@ -44,6 +46,7 @@ pub struct HttpServerState {
     pub auth: AuthConfig,
     pub identity: Arc<IdentityManager>,
     pub dht: Arc<dyn Dht + Send + Sync>,
+    pub event_bus: Arc<EventBus>,
     pub started_at: Instant,
     pub config: HttpServerConfig,
     pub apps_dir: PathBuf,
@@ -117,6 +120,7 @@ async fn handle_admin(req: Request<Body>, path: &str, state: Arc<HttpServerState
         (Method::POST, "/admin/v1/auth/logout") => handle_logout(req, state).await,
         (Method::POST, "/admin/v1/auth/refresh") => handle_refresh(req, state).await,
         (Method::POST, "/admin/v1/auth/reauth") => handle_reauth(req, state).await,
+        (Method::GET, "/admin/v1/events") => handle_events(req, state).await,
         _ => handle_admin_authed(req, path, state).await,
     }
 }
@@ -964,6 +968,13 @@ async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> 
         data.app_sources.insert(app.id.clone(), request.source.clone());
     }
     let _ = state.admin.persist().await;
+    state
+        .event_bus
+        .emit(
+            "app_installed",
+            json!({ "app_id": app.id, "version": app.version }),
+        )
+        .await;
     let mut permissions_requested = required.clone();
     permissions_requested.extend(optional.clone());
     let result = InstallResult {
@@ -1024,6 +1035,13 @@ async fn handle_install_upload(req: Request<Body>, state: Arc<HttpServerState>) 
         });
     }
     let _ = state.admin.persist().await;
+    state
+        .event_bus
+        .emit(
+            "app_installed",
+            json!({ "app_id": app.id, "version": app.version }),
+        )
+        .await;
     let mut permissions_requested = required.clone();
     permissions_requested.extend(optional);
     let result = InstallResult {
@@ -1117,6 +1135,13 @@ async fn handle_update_app(path: &str, state: Arc<HttpServerState>) -> Response<
             previous_version: previous,
             new_permissions: optional,
         };
+        state
+            .event_bus
+            .emit(
+                "app_updated",
+                json!({ "app_id": result.app.id, "version": result.app.version }),
+            )
+            .await;
         return json_response(result);
     }
 
@@ -1470,6 +1495,136 @@ async fn handle_shutdown() -> Response<Body> {
     Response::builder().status(StatusCode::ACCEPTED).body(Body::empty()).unwrap()
 }
 
+async fn handle_events(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    if !hyper_tungstenite::is_upgrade_request(&req) {
+        return Response::builder().status(StatusCode::BAD_REQUEST).body(Body::empty()).unwrap();
+    }
+
+    if !authenticate_events(&req, &state).await {
+        return api_error_response(ApiErrorCode::Unauthorized, "unauthorized", StatusCode::UNAUTHORIZED);
+    }
+
+    let params = parse_query(req.uri().query().unwrap_or(""));
+    let last_id = params.get("lastEventId").and_then(|value| value.parse::<u64>().ok());
+
+    let (response, websocket) = match hyper_tungstenite::upgrade(req, None) {
+        Ok(parts) => parts,
+        Err(_) => return api_error_response(ApiErrorCode::InternalError, "websocket upgrade failed", StatusCode::INTERNAL_SERVER_ERROR),
+    };
+
+    let bus = state.event_bus.clone();
+    tokio::spawn(async move {
+        if let Ok(stream) = websocket.await {
+            handle_event_socket(stream, bus, last_id).await;
+        }
+    });
+
+    response
+}
+
+async fn authenticate_events(req: &Request<Body>, state: &HttpServerState) -> bool {
+    let params = parse_query(req.uri().query().unwrap_or(""));
+    if let Some(token) = params.get("token") {
+        return token_matches(token, state).await;
+    }
+    authenticate(req, state).await.is_ok()
+}
+
+async fn token_matches(token: &str, state: &HttpServerState) -> bool {
+    let token_hash = hash_token(token);
+    if let Some(admin_hash) = state.auth.admin_token_hash.as_ref() {
+        if constant_time_eq(token_hash.as_bytes(), admin_hash.as_bytes()) {
+            return true;
+        }
+    }
+    let data = state.admin.data.lock().await;
+    data.api_keys.iter().any(|record| record.key_hash == token_hash)
+}
+
+async fn handle_event_socket(
+    mut ws: hyper_tungstenite::WebSocketStream<hyper::upgrade::Upgraded>,
+    bus: Arc<EventBus>,
+    last_id: Option<u64>,
+) {
+    let mut subscriptions = default_subscriptions();
+    let mut receiver = bus.subscribe();
+
+    for msg in bus.replay_since(last_id).await {
+        if subscriptions.contains(&msg.r#type) {
+            if let Ok(payload) = serde_json::to_string(&msg) {
+                let _ = ws.send(hyper_tungstenite::tungstenite::Message::Text(payload)).await;
+            }
+        }
+    }
+
+    loop {
+        tokio::select! {
+            inbound = ws.next() => {
+                match inbound {
+                    Some(Ok(message)) => {
+                        if message.is_text() {
+                            if let Ok(value) = serde_json::from_str::<Value>(message.to_text().unwrap_or("")) {
+                                apply_subscription_update(&mut subscriptions, &value);
+                            }
+                        } else if message.is_close() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            event = receiver.recv() => {
+                if let Ok(msg) = event {
+                    if subscriptions.contains(&msg.r#type) {
+                        if let Ok(payload) = serde_json::to_string(&msg) {
+                            let _ = ws.send(hyper_tungstenite::tungstenite::Message::Text(payload)).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn default_subscriptions() -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for event in [
+        "status_change",
+        "contact_online",
+        "message_received",
+        "app_installed",
+        "app_updated",
+        "app_error",
+        "sync_progress",
+        "error",
+    ] {
+        set.insert(event.to_string());
+    }
+    set
+}
+
+fn apply_subscription_update(subscriptions: &mut std::collections::HashSet<String>, value: &Value) {
+    let Some(kind) = value.get("type").and_then(|v| v.as_str()) else { return; };
+    let Some(events) = value.get("events").and_then(|v| v.as_array()) else { return; };
+    let items: Vec<String> = events
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    match kind {
+        "subscribe" => {
+            for item in items {
+                subscriptions.insert(item);
+            }
+        }
+        "unsubscribe" => {
+            for item in items {
+                subscriptions.remove(&item);
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn fetch_bytes(url: &str) -> std::result::Result<Vec<u8>, Response<Body>> {
     let response = reqwest::get(url).await
         .map_err(|_| api_error_response(ApiErrorCode::InvalidRequest, "download failed", StatusCode::BAD_REQUEST))?;
@@ -1811,6 +1966,7 @@ mod tests {
             },
             identity,
             dht: Arc::new(MemoryDht::new()),
+            event_bus: Arc::new(EventBus::new()),
             started_at: Instant::now(),
             config: HttpServerConfig {
                 metrics_enabled: true,
