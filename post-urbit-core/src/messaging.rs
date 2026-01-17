@@ -27,6 +27,83 @@ pub struct PUSEEnvelope {
     pub signature: [u8; 64],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderExtension {
+    Initial { ephemeral: [u8; 32] },
+    Ratchet { dh_public: [u8; 32], pn: u32, n: u32 },
+    Group { key_id: [u8; 16], iteration: u32 },
+}
+
+pub fn build_initial_extension(ephemeral: [u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(33);
+    out.push(0x00);
+    out.extend_from_slice(&ephemeral);
+    out
+}
+
+pub fn build_ratchet_extension(dh_public: [u8; 32], pn: u32, n: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(41);
+    out.push(0x01);
+    out.extend_from_slice(&dh_public);
+    out.extend_from_slice(&pn.to_be_bytes());
+    out.extend_from_slice(&n.to_be_bytes());
+    out
+}
+
+pub fn build_group_extension(key_id: [u8; 16], iteration: u32) -> Result<Vec<u8>> {
+    if iteration == 0 {
+        return Err(PostUrbitError::InvalidInput("group iteration"));
+    }
+    let mut out = Vec::with_capacity(21);
+    out.push(0x02);
+    out.extend_from_slice(&key_id);
+    out.extend_from_slice(&iteration.to_be_bytes());
+    Ok(out)
+}
+
+pub fn parse_header_extension(extension: &[u8]) -> Result<HeaderExtension> {
+    validate_header_extension(extension)?;
+    match extension[0] {
+        0x00 => {
+            let mut ephemeral = [0u8; 32];
+            ephemeral.copy_from_slice(&extension[1..33]);
+            Ok(HeaderExtension::Initial { ephemeral })
+        }
+        0x01 => {
+            let mut dh_public = [0u8; 32];
+            dh_public.copy_from_slice(&extension[1..33]);
+            let pn = u32::from_be_bytes([
+                extension[33],
+                extension[34],
+                extension[35],
+                extension[36],
+            ]);
+            let n = u32::from_be_bytes([
+                extension[37],
+                extension[38],
+                extension[39],
+                extension[40],
+            ]);
+            Ok(HeaderExtension::Ratchet { dh_public, pn, n })
+        }
+        0x02 => {
+            let mut key_id = [0u8; 16];
+            key_id.copy_from_slice(&extension[1..17]);
+            let iteration = u32::from_be_bytes([
+                extension[17],
+                extension[18],
+                extension[19],
+                extension[20],
+            ]);
+            if iteration == 0 {
+                return Err(PostUrbitError::InvalidInput("group iteration"));
+            }
+            Ok(HeaderExtension::Group { key_id, iteration })
+        }
+        _ => Err(PostUrbitError::InvalidInput("unknown header extension")),
+    }
+}
+
 pub fn encode_puse_header(header: &PUSEHeader) -> Result<Vec<u8>> {
     validate_header_extension(&header.header_extension)?;
     let ext_len: u16 = header
@@ -251,6 +328,15 @@ fn validate_header_extension(extension: &[u8]) -> Result<()> {
             if extension.len() != 21 {
                 return Err(PostUrbitError::InvalidInput("group extension length"));
             }
+            let iteration = u32::from_be_bytes([
+                extension[17],
+                extension[18],
+                extension[19],
+                extension[20],
+            ]);
+            if iteration == 0 {
+                return Err(PostUrbitError::InvalidInput("group iteration"));
+            }
         }
         _ => {}
     }
@@ -424,5 +510,26 @@ mod tests {
             hex::encode(envelope),
             "505553450100586a763f2c82b31a0c5de9dcaef01e0261e0785bd15c5160257b140ed4bf313fbf92eef8a266de56550e8400e29b41d4a71644665544000100290189fe87345d1c24ed5fc16df9080eef9345a824cddf37b5fec4be62790452221700000000000000016560a3c111121314151617180000001b32c8241cd1dd0baff3719c390843c0b056443cc1c0686b5f3c0126094b4d9c3ca5e0229d6f40a94b13492ff290bf812fbc203dcae818912457fc4befc0af1e857baab75d0ca434de46205b2f64262d1fed5f5963d33f43cb54c60c"
         );
+    }
+
+    #[test]
+    fn group_extension_round_trip() {
+        let key_id = [7u8; 16];
+        let extension = build_group_extension(key_id, 1).unwrap();
+        let parsed = parse_header_extension(&extension).unwrap();
+        assert_eq!(
+            parsed,
+            HeaderExtension::Group {
+                key_id,
+                iteration: 1
+            }
+        );
+    }
+
+    #[test]
+    fn group_extension_rejects_zero_iteration() {
+        let key_id = [7u8; 16];
+        let err = build_group_extension(key_id, 0).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
     }
 }
