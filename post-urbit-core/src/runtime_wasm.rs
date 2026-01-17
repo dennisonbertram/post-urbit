@@ -13,6 +13,7 @@ pub struct RuntimeApp {
     instance: Option<RuntimeInstance>,
 }
 
+#[allow(dead_code)]
 struct RuntimeInstance {
     store: Store<HostState>,
     instance: wasmtime::Instance,
