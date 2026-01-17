@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::admin_types::{
-    ApiKey, AppSource, BackupListEntry, Contact, Device, InstalledApp, NodeSettings,
+    ApiKey, AppSource, BackupListEntry, Contact, Device, InstalledApp, LogEntry, NodeSettings,
 };
 use crate::error::{PostUrbitError, Result};
 
@@ -46,6 +46,8 @@ pub struct AdminData {
     pub backups: Vec<BackupListEntry>,
     pub devices: Vec<Device>,
     pub last_key_rotation: Option<String>,
+    #[serde(default)]
+    pub logs: Vec<LogEntry>,
 }
 
 impl AdminData {
@@ -62,6 +64,7 @@ impl AdminData {
             backups: Vec::new(),
             devices: Vec::new(),
             last_key_rotation: None,
+            logs: Vec::new(),
         }
     }
 }
@@ -149,5 +152,14 @@ impl AdminState {
                 .map(|ts| ts.with_timezone(&Utc) + max_age > now)
                 .unwrap_or(false)
         });
+    }
+
+    pub async fn append_log(&self, entry: LogEntry, max_entries: usize) {
+        let mut data = self.data.lock().await;
+        data.logs.push(entry);
+        if data.logs.len() > max_entries {
+            let excess = data.logs.len() - max_entries;
+            data.logs.drain(0..excess);
+        }
     }
 }

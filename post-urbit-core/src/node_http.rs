@@ -20,9 +20,9 @@ use crate::admin_state::{AdminState, ApiKeyRecord, CachedRepository, SessionReco
 use crate::admin_types::{
     api_error, AddContactRequest, ApiErrorCode, ApiKey, BackupListEntry, BackupResult, Contact,
     ContactUpdate, CreateApiKeyRequest, CreateApiKeyResponse, Device, DeviceAddResult, IdentityInfo,
-    InstalledApp, InstallRequest, InstallResult, LoginRequest, LoginResponse, LogsResponse,
-    NodeStatus, PaginatedResult, Permission, PermissionPatch, PublicProfile, RestoreResult, Session,
-    UpdateResult,
+    InstalledApp, InstallRequest, InstallResult, LogEntry, LoginRequest, LoginResponse,
+    LogsResponse, NodeStatus, PaginatedResult, Permission, PermissionPatch, PublicProfile,
+    RestoreResult, Session, UpdateResult,
 };
 use crate::error::{PostUrbitError, Result};
 use crate::app_store::{fetch_repository, install_package, parse_postapp, verify_package_with_dht, verify_repository, RepositoryManifest};
@@ -497,6 +497,14 @@ async fn handle_login(req: Request<Body>, state: Arc<HttpServerState>) -> Respon
         data.sessions.insert(session_id.clone(), session_record.clone());
     }
     let _ = state.admin.persist().await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::admin",
+        "admin login",
+        Some(json!({"device_id": session_record.device_id})),
+    )
+    .await;
 
     let session_cookie = match create_session_cookie(&session_id, &state.auth.session_secret) {
         Ok(cookie) => cookie,
@@ -981,6 +989,14 @@ async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> 
             json!({ "app_id": app.id, "version": app.version }),
         )
         .await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::apps",
+        "app installed",
+        Some(json!({"app_id": app.id, "version": app.version})),
+    )
+    .await;
     let mut permissions_requested = required.clone();
     permissions_requested.extend(optional.clone());
     let result = InstallResult {
@@ -1048,6 +1064,14 @@ async fn handle_install_upload(req: Request<Body>, state: Arc<HttpServerState>) 
             json!({ "app_id": app.id, "version": app.version }),
         )
         .await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::apps",
+        "app installed",
+        Some(json!({"app_id": app.id, "version": app.version})),
+    )
+    .await;
     let mut permissions_requested = required.clone();
     permissions_requested.extend(optional);
     let result = InstallResult {
@@ -1148,6 +1172,14 @@ async fn handle_update_app(path: &str, state: Arc<HttpServerState>) -> Response<
                 json!({ "app_id": result.app.id, "version": result.app.version }),
             )
             .await;
+        log_entry(
+            &state,
+            "info",
+            "postnode::apps",
+            "app updated",
+            Some(json!({"app_id": result.app.id, "version": result.app.version})),
+        )
+        .await;
         return json_response(result);
     }
 
@@ -1332,6 +1364,14 @@ async fn handle_create_backup(_req: Request<Body>, state: Arc<HttpServerState>) 
         path: entry.path,
         encrypted: true,
     };
+    log_entry(
+        &state,
+        "info",
+        "postnode::admin",
+        "backup created",
+        Some(json!({"backup_id": result.id, "size": result.size})),
+    )
+    .await;
     json_response(result)
 }
 
@@ -1364,6 +1404,14 @@ async fn handle_upload_backup(req: Request<Body>, state: Arc<HttpServerState>) -
         data.backups.push(entry.clone());
     }
     let _ = state.admin.persist().await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::admin",
+        "backup uploaded",
+        Some(json!({"backup_id": entry.id, "size": entry.size})),
+    )
+    .await;
     json_response(entry)
 }
 
@@ -1412,6 +1460,14 @@ async fn handle_restore_backup(req: Request<Body>, path: &str, state: Arc<HttpSe
         apps_restored: 0,
         warnings: Vec::new(),
     };
+    log_entry(
+        &state,
+        "info",
+        "postnode::admin",
+        "backup restored",
+        Some(json!({"backup_id": id})),
+    )
+    .await;
     json_response(result)
 }
 
@@ -1516,13 +1572,95 @@ async fn handle_logs(req: Request<Body>, _state: Arc<HttpServerState>) -> Respon
     let query = req.uri().query().unwrap_or("");
     let params = parse_query(query);
     let limit = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100usize);
-    let entries = Vec::new();
-    let response = LogsResponse {
-        entries: entries.into_iter().take(limit).collect(),
-        cursor: None,
-        has_more: false,
+    let cursor = params.get("cursor").cloned();
+    let level_filter = params.get("level").cloned();
+    let target_filter = params.get("target").cloned();
+    let search_filter = params.get("search").cloned();
+    let since = params
+        .get("since")
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|ts| ts.with_timezone(&Utc));
+    let until = params
+        .get("until")
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|ts| ts.with_timezone(&Utc));
+
+    let data = _state.admin.data.lock().await;
+    let mut filtered: Vec<&LogEntry> = data
+        .logs
+        .iter()
+        .filter(|entry| match &level_filter {
+            Some(level) => entry.level.eq_ignore_ascii_case(level),
+            None => true,
+        })
+        .filter(|entry| match &target_filter {
+            Some(target) => entry.target == *target,
+            None => true,
+        })
+        .filter(|entry| match &search_filter {
+            Some(search) => entry.message.contains(search),
+            None => true,
+        })
+        .filter(|entry| match since {
+            Some(since) => DateTime::parse_from_rfc3339(&entry.timestamp)
+                .map(|ts| ts.with_timezone(&Utc) >= since)
+                .unwrap_or(false),
+            None => true,
+        })
+        .filter(|entry| match until {
+            Some(until) => DateTime::parse_from_rfc3339(&entry.timestamp)
+                .map(|ts| ts.with_timezone(&Utc) <= until)
+                .unwrap_or(false),
+            None => true,
+        })
+        .collect();
+
+    filtered.sort_by_key(|entry| entry.timestamp.clone());
+
+    let start_index = cursor
+        .as_ref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let total = filtered.len();
+    let end_index = std::cmp::min(start_index + limit, total);
+    let entries: Vec<LogEntry> = filtered[start_index..end_index].iter().map(|entry| (*entry).clone()).collect();
+    let next_cursor = if end_index < total { Some(end_index.to_string()) } else { None };
+
+    json_response(LogsResponse {
+        entries,
+        cursor: next_cursor,
+        has_more: end_index < total,
+    })
+}
+
+async fn log_entry(
+    state: &HttpServerState,
+    level: &str,
+    target: &str,
+    message: &str,
+    fields: Option<Value>,
+) {
+    let entry = LogEntry {
+        timestamp: Utc::now().to_rfc3339(),
+        level: level.to_string(),
+        target: target.to_string(),
+        message: message.to_string(),
+        fields,
     };
-    json_response(response)
+    state.admin.append_log(entry.clone(), 1000).await;
+    let _ = state
+        .event_bus
+        .emit(
+            "log_entry",
+            json!({
+                "timestamp": entry.timestamp,
+                "level": entry.level,
+                "target": entry.target,
+                "message": entry.message,
+                "fields": entry.fields,
+            }),
+        )
+        .await;
 }
 
 async fn handle_health(state: &HttpServerState) -> Response<Body> {
@@ -2226,5 +2364,33 @@ mod tests {
         assert_eq!(entry.size, 6);
         assert_eq!(entry.r#type, "full");
         assert!(std::fs::metadata(entry.path).is_ok());
+    }
+
+    #[tokio::test]
+    async fn logs_query_returns_entries() {
+        let mut state = test_state().await;
+        state.auth.admin_token_hash = Some(hash_token("token"));
+        let state = Arc::new(state);
+        log_entry(
+            &state,
+            "info",
+            "postnode::admin",
+            "test log entry",
+            Some(json!({"detail": "ok"})),
+        )
+        .await;
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/admin/v1/logs?limit=10")
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let payload: LogsResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(!payload.entries.is_empty());
+        assert_eq!(payload.entries[0].message, "test log entry");
     }
 }
