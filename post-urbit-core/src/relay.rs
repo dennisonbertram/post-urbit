@@ -11,6 +11,16 @@ const PURL_MAGIC: &[u8; 4] = b"PURL";
 const PURL_VERSION: u8 = 1;
 const RELAY_ALLOC_DOMAIN: &[u8] = b"post-urbit-relay-alloc-v1";
 const RELAY_REBIND_DOMAIN: &[u8] = b"post-urbit-rebind-v1";
+const PURL_MAX_PAYLOAD: usize = 1200;
+
+pub const PURL_TYPE_DATA: u8 = 0x01;
+pub const PURL_TYPE_PING: u8 = 0x02;
+pub const PURL_TYPE_PONG: u8 = 0x03;
+pub const PURL_TYPE_REFRESH: u8 = 0x05;
+pub const PURL_TYPE_RELEASE: u8 = 0x06;
+pub const PURL_TYPE_ERROR: u8 = 0x07;
+pub const PURL_TYPE_REBIND: u8 = 0x08;
+pub const PURL_TYPE_COORDINATE: u8 = 0x09;
 
 #[derive(Debug, Clone)]
 pub struct PurlPacket {
@@ -21,6 +31,7 @@ pub struct PurlPacket {
 }
 
 pub fn encode_purl(packet: &PurlPacket) -> Result<Vec<u8>> {
+    validate_purl_packet(packet)?;
     let len: u16 = packet
         .payload
         .len()
@@ -48,6 +59,7 @@ pub fn decode_purl(bytes: &[u8]) -> Result<PurlPacket> {
         return Err(PostUrbitError::InvalidInput("purl version"));
     }
     let packet_type = bytes[5];
+    validate_purl_type(packet_type)?;
     let mut idx = 6;
 
     let mut allocation_token = [0u8; 16];
@@ -60,17 +72,22 @@ pub fn decode_purl(bytes: &[u8]) -> Result<PurlPacket> {
 
     let payload_len = u16::from_be_bytes([bytes[idx], bytes[idx + 1]]) as usize;
     idx += 2;
+    if payload_len > PURL_MAX_PAYLOAD {
+        return Err(PostUrbitError::InvalidInput("purl payload too large"));
+    }
     if bytes.len() != idx + payload_len {
         return Err(PostUrbitError::InvalidInput("purl payload length"));
     }
     let payload = bytes[idx..].to_vec();
 
-    Ok(PurlPacket {
+    let packet = PurlPacket {
         packet_type,
         allocation_token,
         destination_iid,
         payload,
-    })
+    };
+    validate_purl_packet(&packet)?;
+    Ok(packet)
 }
 
 pub fn sign_relay_allocation(
@@ -223,6 +240,48 @@ fn validate_timestamp(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_purl_type(packet_type: u8) -> Result<()> {
+    match packet_type {
+        PURL_TYPE_DATA
+        | PURL_TYPE_PING
+        | PURL_TYPE_PONG
+        | PURL_TYPE_REFRESH
+        | PURL_TYPE_RELEASE
+        | PURL_TYPE_ERROR
+        | PURL_TYPE_REBIND
+        | PURL_TYPE_COORDINATE => Ok(()),
+        _ => Err(PostUrbitError::InvalidInput("purl packet type")),
+    }
+}
+
+fn validate_purl_packet(packet: &PurlPacket) -> Result<()> {
+    validate_purl_type(packet.packet_type)?;
+    if packet.payload.len() > PURL_MAX_PAYLOAD {
+        return Err(PostUrbitError::InvalidInput("purl payload too large"));
+    }
+    let dest_zero = packet.destination_iid.iter().all(|b| *b == 0);
+    if is_control_packet(packet.packet_type) {
+        if !dest_zero {
+            return Err(PostUrbitError::InvalidInput("purl control destination"));
+        }
+    } else if dest_zero {
+        return Err(PostUrbitError::InvalidInput("purl data destination"));
+    }
+    Ok(())
+}
+
+fn is_control_packet(packet_type: u8) -> bool {
+    matches!(
+        packet_type,
+        PURL_TYPE_PING
+            | PURL_TYPE_PONG
+            | PURL_TYPE_REFRESH
+            | PURL_TYPE_RELEASE
+            | PURL_TYPE_ERROR
+            | PURL_TYPE_REBIND
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,20 +289,44 @@ mod tests {
     #[test]
     fn purl_round_trip() {
         let packet = PurlPacket {
-            packet_type: 0x01,
+            packet_type: PURL_TYPE_DATA,
             allocation_token: [7u8; 16],
             destination_iid: [9u8; 20],
             payload: vec![1, 2, 3],
         };
         let encoded = encode_purl(&packet).unwrap();
         let decoded = decode_purl(&encoded).unwrap();
-        assert_eq!(decoded.packet_type, 0x01);
+        assert_eq!(decoded.packet_type, PURL_TYPE_DATA);
         assert_eq!(decoded.payload, vec![1, 2, 3]);
     }
 
     #[test]
     fn purl_rejects_bad_magic() {
         let err = decode_purl(b"PURX").unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn purl_rejects_oversize_payload() {
+        let packet = PurlPacket {
+            packet_type: PURL_TYPE_DATA,
+            allocation_token: [1u8; 16],
+            destination_iid: [2u8; 20],
+            payload: vec![0u8; PURL_MAX_PAYLOAD + 1],
+        };
+        let err = encode_purl(&packet).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn purl_control_requires_zero_destination() {
+        let packet = PurlPacket {
+            packet_type: PURL_TYPE_PING,
+            allocation_token: [1u8; 16],
+            destination_iid: [9u8; 20],
+            payload: vec![],
+        };
+        let err = encode_purl(&packet).unwrap_err();
         assert!(matches!(err, PostUrbitError::InvalidInput(_)));
     }
 
