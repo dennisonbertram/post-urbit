@@ -95,7 +95,12 @@ async fn handle_public(req: &Request<Body>, path: &str, state: &HttpServerState)
         (&Method::GET, "/health") => Some(handle_health(state).await),
         (&Method::GET, "/metrics") => {
             if state.config.metrics_enabled {
-                Some(Response::new(Body::from("post_urbit_up 1\n")))
+                let payload = render_metrics(state).await;
+                Some(Response::builder()
+                    .status(StatusCode::OK)
+                    .header(CONTENT_TYPE, "text/plain; version=0.0.4")
+                    .body(Body::from(payload))
+                    .unwrap())
             } else {
                 Some(Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap())
             }
@@ -1564,6 +1569,58 @@ async fn handle_health(state: &HttpServerState) -> Response<Body> {
     json_response(payload)
 }
 
+async fn render_metrics(state: &HttpServerState) -> String {
+    use std::fmt::Write;
+
+    let iid = state.identity.iid().await;
+    let uptime_seconds = state.started_at.elapsed().as_secs();
+    let apps_installed = {
+        let data = state.admin.data.lock().await;
+        data.apps.len() as u64
+    };
+    let apps_running = 0u64;
+    let identity_bytes = directory_size(&state.admin.data_dir.join("identity"));
+    let messages_bytes = directory_size(&state.admin.data_dir.join("messages"));
+    let sync_bytes = directory_size(&state.admin.data_dir.join("sync"));
+    let apps_bytes = directory_size(&state.admin.data_dir.join("apps"));
+    let runtime_bytes = directory_size(&state.admin.data_dir.join("runtime"));
+
+    let mut out = String::new();
+    let _ = writeln!(out, "postnode_uptime_seconds {}", uptime_seconds);
+    let _ = writeln!(
+        out,
+        "postnode_info{{version=\"{}\", iid=\"{}\"}} 1",
+        env!("CARGO_PKG_VERSION"),
+        iid
+    );
+    let _ = writeln!(out, "postnode_memory_bytes{{type=\"heap\"}} 0");
+    let _ = writeln!(out, "postnode_memory_bytes{{type=\"resident\"}} 0");
+    let _ = writeln!(out, "postnode_cpu_seconds_total 0");
+    let _ = writeln!(out, "postnode_open_file_descriptors 0");
+    let _ = writeln!(out, "postnode_connections_total{{type=\"direct\"}} 0");
+    let _ = writeln!(out, "postnode_connections_total{{type=\"relay\"}} 0");
+    let _ = writeln!(out, "postnode_connections_active 0");
+    let _ = writeln!(out, "postnode_connection_events_total{{event=\"opened\"}} 0");
+    let _ = writeln!(out, "postnode_connection_events_total{{event=\"closed\"}} 0");
+    let _ = writeln!(out, "postnode_connection_events_total{{event=\"failed\"}} 0");
+    let _ = writeln!(out, "postnode_bytes_sent_total 0");
+    let _ = writeln!(out, "postnode_bytes_received_total 0");
+    let _ = writeln!(out, "postnode_messages_sent_total{{type=\"direct\"}} 0");
+    let _ = writeln!(out, "postnode_messages_sent_total{{type=\"group\"}} 0");
+    let _ = writeln!(out, "postnode_messages_received_total{{type=\"direct\"}} 0");
+    let _ = writeln!(out, "postnode_messages_received_total{{type=\"group\"}} 0");
+    let _ = writeln!(out, "postnode_message_queue_depth{{queue=\"outgoing\"}} 0");
+    let _ = writeln!(out, "postnode_message_queue_depth{{queue=\"incoming\"}} 0");
+    let _ = writeln!(out, "postnode_apps_installed_total {}", apps_installed);
+    let _ = writeln!(out, "postnode_apps_running {}", apps_running);
+    let _ = writeln!(out, "postnode_storage_bytes{{database=\"identity\"}} {}", identity_bytes);
+    let _ = writeln!(out, "postnode_storage_bytes{{database=\"messages\"}} {}", messages_bytes);
+    let _ = writeln!(out, "postnode_storage_bytes{{database=\"sync\"}} {}", sync_bytes);
+    let _ = writeln!(out, "postnode_storage_bytes{{database=\"apps\"}} {}", apps_bytes);
+    let _ = writeln!(out, "postnode_storage_bytes{{database=\"runtime\"}} {}", runtime_bytes);
+    out
+}
+
 async fn handle_restart() -> Response<Body> {
     Response::builder().status(StatusCode::ACCEPTED).body(Body::empty()).unwrap()
 }
@@ -2109,6 +2166,18 @@ mod tests {
         let req = Request::builder().method(Method::GET).uri("/metrics").body(Body::empty()).unwrap();
         let resp = handle_request(req, state).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn metrics_enabled_payload() {
+        let state = Arc::new(test_state().await);
+        let req = Request::builder().method(Method::GET).uri("/metrics").body(Body::empty()).unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("postnode_uptime_seconds"));
+        assert!(body.contains("postnode_info"));
     }
 
     #[tokio::test]
