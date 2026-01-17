@@ -436,11 +436,15 @@ async fn authenticate(req: &Request<Body>, state: &HttpServerState) -> std::resu
                         });
                     }
                 }
-                let data = state.admin.data.lock().await;
-                if let Some(record) = data.api_keys.iter().find(|record| record.key_hash == token_hash) {
+                let mut data = state.admin.data.lock().await;
+                if let Some(record) = data.api_keys.iter_mut().find(|record| record.key_hash == token_hash) {
+                    record.key.last_used = Some(Utc::now().to_rfc3339());
+                    let permissions = record.key.permissions.clone();
+                    drop(data);
+                    let _ = state.admin.persist().await;
                     return Ok(AuthContext {
                         requires_csrf: false,
-                        permissions: record.key.permissions.clone(),
+                        permissions,
                         session_id: None,
                         fresh_auth_at: Some(Utc::now()),
                     });
@@ -2903,6 +2907,41 @@ mod tests {
         let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
         let payload: IdentityInfo = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(payload.iid, state.identity.iid().await);
+    }
+
+    #[tokio::test]
+    async fn api_key_updates_last_used() {
+        let state = test_state().await;
+        let key = ApiKey {
+            id: "key-1".to_string(),
+            name: "api".to_string(),
+            permissions: vec![Permission::ReadIdentity],
+            created_at: Utc::now().to_rfc3339(),
+            expires_at: None,
+            last_used: None,
+        };
+        let record = ApiKeyRecord {
+            key: key.clone(),
+            key_hash: hash_token("secret"),
+        };
+        {
+            let mut data = state.admin.data.lock().await;
+            data.api_keys.push(record);
+        }
+        let state = Arc::new(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/admin/v1/identity")
+            .header(hyper::header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let data = state.admin.data.lock().await;
+        let updated = data.api_keys.iter().find(|record| record.key.id == "key-1").unwrap();
+        assert!(updated.key.last_used.is_some());
     }
 
     #[tokio::test]
