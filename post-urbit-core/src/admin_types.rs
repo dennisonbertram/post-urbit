@@ -393,6 +393,7 @@ pub struct LogEntry {
 pub struct LogsResponse {
     pub entries: Vec<LogEntry>,
     pub cursor: Option<String>,
+    #[serde(rename = "hasMore", alias = "has_more")]
     pub has_more: bool,
 }
 

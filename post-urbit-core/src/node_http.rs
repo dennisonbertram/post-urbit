@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -231,12 +231,12 @@ async fn handle_admin_authed(req: Request<Body>, path: &str, state: Arc<HttpServ
         (&Method::POST, "/admin/v1/identity/rotate/signing") => {
             if let Err(resp) = require_permission(&auth, Permission::WriteIdentity) { return resp; }
             if let Err(resp) = require_fresh_auth(&auth) { return resp; }
-            handle_rotate_signing(state).await
+            handle_rotate_signing(req, state).await
         }
         (&Method::POST, "/admin/v1/identity/rotate/encryption") => {
             if let Err(resp) = require_permission(&auth, Permission::WriteIdentity) { return resp; }
             if let Err(resp) = require_fresh_auth(&auth) { return resp; }
-            handle_rotate_encryption(state).await
+            handle_rotate_encryption(req, state).await
         }
         (&Method::GET, "/admin/v1/identity/recovery") => {
             if let Err(resp) = require_permission(&auth, Permission::ReadIdentity) { return resp; }
@@ -263,7 +263,7 @@ async fn handle_admin_authed(req: Request<Body>, path: &str, state: Arc<HttpServ
         (&Method::DELETE, path) if path.starts_with("/admin/v1/devices/") => {
             if let Err(resp) = require_permission(&auth, Permission::WriteIdentity) { return resp; }
             if let Err(resp) = require_fresh_auth(&auth) { return resp; }
-            handle_remove_device(path, state).await
+            handle_remove_device(req, path, state).await
         }
         (&Method::GET, "/admin/v1/contacts") => {
             if let Err(resp) = require_permission(&auth, Permission::ReadContacts) { return resp; }
@@ -551,6 +551,14 @@ async fn handle_login(req: Request<Body>, state: Arc<HttpServerState>) -> Respon
         return api_error_response(ApiErrorCode::Unauthorized, "password authentication disabled", StatusCode::UNAUTHORIZED);
     };
     if verify_password(hash, &body.password).is_err() {
+        audit_event(
+            &state,
+            "admin_login_failed",
+            Some(audit_actor(&user_agent, &ip_address)),
+            "failure",
+            None,
+        )
+        .await;
         log_entry(
             &state,
             "warn",
@@ -588,6 +596,14 @@ async fn handle_login(req: Request<Body>, state: Arc<HttpServerState>) -> Respon
         data.sessions.insert(session_id.clone(), session_record.clone());
     }
     let _ = state.admin.persist().await;
+    audit_event(
+        &state,
+        "admin_login",
+        Some(audit_actor(&user_agent, &ip_address)),
+        "success",
+        Some(json!({"session_id": session_id, "device_id": session_record.device_id})),
+    )
+    .await;
     log_entry(
         &state,
         "info",
@@ -625,11 +641,30 @@ async fn handle_login(req: Request<Body>, state: Arc<HttpServerState>) -> Respon
 }
 
 async fn handle_logout(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let user_agent = req
+        .headers()
+        .get(hyper::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let ip_address = req
+        .extensions()
+        .get::<SocketAddr>()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     if let Some(cookie) = req.headers().get(COOKIE) {
         if let Ok(value) = cookie.to_str() {
             if let Some(session_value) = extract_cookie(value, "postnode_session") {
                 if let Ok(session_id) = verify_session_cookie(session_value, &state.auth.session_secret) {
                     state.admin.remove_session(&session_id).await;
+                    audit_event(
+                        &state,
+                        "admin_logout",
+                        Some(audit_actor(&user_agent, &ip_address)),
+                        "success",
+                        Some(json!({"session_id": session_id})),
+                    )
+                    .await;
                     log_entry(
                         &state,
                         "info",
@@ -779,13 +814,21 @@ async fn handle_identity_profile(req: Request<Body>, state: Arc<HttpServerState>
     json_response(info)
 }
 
-async fn handle_rotate_signing(state: Arc<HttpServerState>) -> Response<Body> {
+async fn handle_rotate_signing(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
     let result = match state.identity.rotate_signing_key().await {
         Ok(result) => result,
         Err(_) => return api_error_response(ApiErrorCode::InternalError, "rotation failed", StatusCode::INTERNAL_SERVER_ERROR),
     };
     state.admin.data.lock().await.last_key_rotation = Some(result.rotated_at.clone());
     let _ = state.admin.persist().await;
+    audit_event(
+        &state,
+        "key_rotation",
+        Some(audit_actor_from_request(&req)),
+        "success",
+        Some(json!({"key_type": "signing", "rotated_at": result.rotated_at})),
+    )
+    .await;
     log_entry(
         &state,
         "info",
@@ -797,13 +840,21 @@ async fn handle_rotate_signing(state: Arc<HttpServerState>) -> Response<Body> {
     json_response(result)
 }
 
-async fn handle_rotate_encryption(state: Arc<HttpServerState>) -> Response<Body> {
+async fn handle_rotate_encryption(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
     let result = match state.identity.rotate_encryption_key().await {
         Ok(result) => result,
         Err(_) => return api_error_response(ApiErrorCode::InternalError, "rotation failed", StatusCode::INTERNAL_SERVER_ERROR),
     };
     state.admin.data.lock().await.last_key_rotation = Some(result.rotated_at.clone());
     let _ = state.admin.persist().await;
+    audit_event(
+        &state,
+        "key_rotation",
+        Some(audit_actor_from_request(&req)),
+        "success",
+        Some(json!({"key_type": "encryption", "rotated_at": result.rotated_at})),
+    )
+    .await;
     log_entry(
         &state,
         "info",
@@ -859,6 +910,7 @@ async fn handle_devices(state: Arc<HttpServerState>) -> Response<Body> {
 }
 
 async fn handle_add_device(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let actor = audit_actor_from_request(&req);
     let body = match read_json::<Value>(req, state.config.max_request_body_bytes).await {
         Ok(body) => body,
         Err(resp) => return resp,
@@ -892,6 +944,14 @@ async fn handle_add_device(req: Request<Body>, state: Arc<HttpServerState>) -> R
         activation_code,
         expires_at,
     };
+    audit_event(
+        &state,
+        "device_add",
+        Some(actor),
+        "success",
+        Some(json!({"device_id": device.did, "device_name": device.name})),
+    )
+    .await;
     log_entry(
         &state,
         "info",
@@ -903,7 +963,7 @@ async fn handle_add_device(req: Request<Body>, state: Arc<HttpServerState>) -> R
     json_response(result)
 }
 
-async fn handle_remove_device(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+async fn handle_remove_device(req: Request<Body>, path: &str, state: Arc<HttpServerState>) -> Response<Body> {
     let did = path.trim_start_matches("/admin/v1/devices/");
     let mut data = state.admin.data.lock().await;
     if let Some(pos) = data.devices.iter().position(|device| device.did == did) {
@@ -913,6 +973,14 @@ async fn handle_remove_device(path: &str, state: Arc<HttpServerState>) -> Respon
         let device = data.devices.remove(pos);
         drop(data);
         let _ = state.admin.persist().await;
+        audit_event(
+            &state,
+            "device_remove",
+            Some(audit_actor_from_request(&req)),
+            "success",
+            Some(json!({"device_id": device.did})),
+        )
+        .await;
         log_entry(
             &state,
             "info",
@@ -1080,6 +1148,7 @@ async fn handle_get_app(path: &str, state: Arc<HttpServerState>) -> Response<Bod
 }
 
 async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let actor = audit_actor_from_request(&req);
     let request = match read_json::<InstallRequest>(req, state.config.max_request_body_bytes).await {
         Ok(body) => body,
         Err(resp) => return resp,
@@ -1168,6 +1237,14 @@ async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> 
         Some(json!({"app_id": app.id, "version": app.version})),
     )
     .await;
+    audit_event(
+        &state,
+        "app_install",
+        Some(actor),
+        "success",
+        Some(json!({"app_id": app.id, "version": app.version, "source": request.source})),
+    )
+    .await;
     let mut permissions_requested = required.clone();
     permissions_requested.extend(optional.clone());
     let result = InstallResult {
@@ -1179,6 +1256,7 @@ async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> 
 }
 
 async fn handle_install_upload(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let actor = audit_actor_from_request(&req);
     let bytes = match read_multipart_file(req, state.config.max_request_body_bytes).await {
         Ok(bytes) => bytes,
         Err(resp) => return resp,
@@ -1241,6 +1319,14 @@ async fn handle_install_upload(req: Request<Body>, state: Arc<HttpServerState>) 
         "postnode::apps",
         "app installed",
         Some(json!({"app_id": app.id, "version": app.version})),
+    )
+    .await;
+    audit_event(
+        &state,
+        "app_install",
+        Some(actor),
+        "success",
+        Some(json!({"app_id": app.id, "version": app.version, "source": "file"})),
     )
     .await;
     let mut permissions_requested = required.clone();
@@ -1379,6 +1465,14 @@ async fn handle_delete_app(req: Request<Body>, path: &str, state: Arc<HttpServer
             let _ = std::fs::remove_dir_all(storage_dir);
         }
         let _ = state.admin.persist().await;
+        audit_event(
+            &state,
+            "app_uninstall",
+            Some(audit_actor_from_request(&req)),
+            "success",
+            Some(json!({"app_id": app.id, "keep_data": keep_data})),
+        )
+        .await;
         log_entry(
             &state,
             "info",
@@ -1402,6 +1496,7 @@ async fn handle_get_app_permissions(path: &str, state: Arc<HttpServerState>) -> 
 }
 
 async fn handle_patch_app_permissions(req: Request<Body>, path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let actor = audit_actor_from_request(&req);
     let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/permissions");
     let patch = match read_json::<PermissionPatch>(req, state.config.max_request_body_bytes).await {
         Ok(body) => body,
@@ -1422,6 +1517,36 @@ async fn handle_patch_app_permissions(req: Request<Body>, path: &str, state: Arc
         let updated = app.permissions.clone();
         drop(data);
         let _ = state.admin.persist().await;
+        if let Some(grant) = patch.grant.as_ref().filter(|items| !items.is_empty()) {
+            audit_event(
+                &state,
+                "permission_grant",
+                Some(actor.clone()),
+                "success",
+                Some(json!({"app_id": app_id, "capabilities": grant})),
+            )
+            .await;
+        }
+        if let Some(deny) = patch.deny.as_ref().filter(|items| !items.is_empty()) {
+            audit_event(
+                &state,
+                "permission_revoke",
+                Some(actor.clone()),
+                "success",
+                Some(json!({"app_id": app_id, "capabilities": deny})),
+            )
+            .await;
+        }
+        if let Some(reset) = patch.reset.as_ref().filter(|items| !items.is_empty()) {
+            audit_event(
+                &state,
+                "permission_revoke",
+                Some(actor),
+                "success",
+                Some(json!({"app_id": app_id, "capabilities": reset, "reason": "reset"})),
+            )
+            .await;
+        }
         log_entry(
             &state,
             "info",
@@ -1508,6 +1633,7 @@ async fn handle_settings_section(path: &str, state: Arc<HttpServerState>) -> Res
 }
 
 async fn handle_patch_settings(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let actor = audit_actor_from_request(&req);
     let patch = match read_json::<Value>(req, state.config.max_request_body_bytes).await {
         Ok(body) => body,
         Err(resp) => return resp,
@@ -1522,6 +1648,14 @@ async fn handle_patch_settings(req: Request<Body>, state: Arc<HttpServerState>) 
     data.settings = settings.clone();
     drop(data);
     let _ = state.admin.persist().await;
+    audit_event(
+        &state,
+        "config_change",
+        Some(actor),
+        "success",
+        Some(json!({"sections": changed_sections})),
+    )
+    .await;
     log_entry(
         &state,
         "info",
@@ -1534,6 +1668,7 @@ async fn handle_patch_settings(req: Request<Body>, state: Arc<HttpServerState>) 
 }
 
 async fn handle_reset_settings(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let actor = audit_actor_from_request(&req);
     let body = match read_json::<Value>(req, state.config.max_request_body_bytes).await {
         Ok(body) => body,
         Err(resp) => return resp,
@@ -1557,6 +1692,14 @@ async fn handle_reset_settings(req: Request<Body>, state: Arc<HttpServerState>) 
     let response = data.settings.clone();
     drop(data);
     let _ = state.admin.persist().await;
+    audit_event(
+        &state,
+        "config_change",
+        Some(actor),
+        "success",
+        Some(json!({"section": section_label})),
+    )
+    .await;
     log_entry(
         &state,
         "info",
@@ -1574,6 +1717,7 @@ async fn handle_list_backups(state: Arc<HttpServerState>) -> Response<Body> {
 }
 
 async fn handle_create_backup(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let actor = audit_actor_from_request(&req);
     let backups_dir = state.admin.data_dir.join("backups");
     if tokio::fs::create_dir_all(&backups_dir).await.is_err() {
         return api_error_response(ApiErrorCode::InternalError, "backup directory error", StatusCode::INTERNAL_SERVER_ERROR);
@@ -1623,6 +1767,14 @@ async fn handle_create_backup(req: Request<Body>, state: Arc<HttpServerState>) -
         path: entry.path,
         encrypted: true,
     };
+    audit_event(
+        &state,
+        "backup_create",
+        Some(actor),
+        "success",
+        Some(json!({"backup_id": result.id, "backup_type": backup_type})),
+    )
+    .await;
     log_entry(
         &state,
         "info",
@@ -1691,6 +1843,7 @@ async fn handle_download_backup(path: &str, state: Arc<HttpServerState>) -> Resp
 }
 
 async fn handle_restore_backup(req: Request<Body>, path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let actor = audit_actor_from_request(&req);
     let id = path.trim_start_matches("/admin/v1/backups/").trim_end_matches("/restore");
     let body = match read_json::<Value>(req, state.config.max_request_body_bytes).await {
         Ok(body) => body,
@@ -1719,6 +1872,14 @@ async fn handle_restore_backup(req: Request<Body>, path: &str, state: Arc<HttpSe
         apps_restored: 0,
         warnings: Vec::new(),
     };
+    audit_event(
+        &state,
+        "backup_restore",
+        Some(actor),
+        "success",
+        Some(json!({"backup_id": id})),
+    )
+    .await;
     log_entry(
         &state,
         "info",
@@ -1818,10 +1979,17 @@ async fn handle_delete_api_key(path: &str, state: Arc<HttpServerState>) -> Respo
 async fn handle_status(state: Arc<HttpServerState>) -> Response<Body> {
     let uptime = state.started_at.elapsed().as_secs();
     let data = state.admin.data.lock().await;
+    let status = if state.health.is_shutting_down() {
+        "unhealthy"
+    } else if state.health.is_ready() {
+        "healthy"
+    } else {
+        "degraded"
+    };
     let status = NodeStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: uptime,
-        status: "healthy".to_string(),
+        status: status.to_string(),
         identity: crate::admin_types::IdentityStatus {
             iid: state.identity.iid().await,
             last_published: None,
@@ -1854,7 +2022,11 @@ async fn handle_status(state: Arc<HttpServerState>) -> Response<Body> {
 async fn handle_logs(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
     let query = req.uri().query().unwrap_or("");
     let params = parse_query(query);
-    let limit = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100usize);
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100usize)
+        .min(1000);
     let cursor = params.get("cursor").cloned();
     let level_filter = params.get("level").cloned();
     let target_filter = params.get("target").cloned();
@@ -1898,7 +2070,7 @@ async fn handle_logs(req: Request<Body>, state: Arc<HttpServerState>) -> Respons
         })
         .collect();
 
-    filtered.sort_by_key(|entry| entry.timestamp.clone());
+    filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     let start_index = cursor
         .as_ref()
@@ -1906,7 +2078,10 @@ async fn handle_logs(req: Request<Body>, state: Arc<HttpServerState>) -> Respons
         .unwrap_or(0);
     let total = filtered.len();
     let end_index = std::cmp::min(start_index + limit, total);
-    let entries: Vec<LogEntry> = filtered[start_index..end_index].iter().map(|entry| (*entry).clone()).collect();
+    let entries: Vec<LogEntry> = filtered[start_index..end_index]
+        .iter()
+        .map(|entry| (*entry).clone())
+        .collect();
     let next_cursor = if end_index < total { Some(end_index.to_string()) } else { None };
 
     json_response(LogsResponse {
@@ -1914,6 +2089,108 @@ async fn handle_logs(req: Request<Body>, state: Arc<HttpServerState>) -> Respons
         cursor: next_cursor,
         has_more: end_index < total,
     })
+}
+
+fn audit_actor(user_agent: &str, ip_address: &str) -> Value {
+    json!({
+        "type": "admin",
+        "ip": ip_address,
+        "user_agent": user_agent,
+    })
+}
+
+fn audit_actor_from_request(req: &Request<Body>) -> Value {
+    let user_agent = req
+        .headers()
+        .get(hyper::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let ip_address = req
+        .extensions()
+        .get::<SocketAddr>()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    audit_actor(user_agent, &ip_address)
+}
+
+async fn audit_event(
+    state: &HttpServerState,
+    event: &str,
+    actor: Option<Value>,
+    result: &str,
+    details: Option<Value>,
+) {
+    let mut fields = serde_json::Map::new();
+    fields.insert("event".to_string(), json!(event));
+    fields.insert("result".to_string(), json!(result));
+    if let Some(actor) = actor {
+        fields.insert("actor".to_string(), actor);
+    }
+    if let Some(details) = details {
+        fields.insert("details".to_string(), details);
+    }
+    let level = if result == "success" { "info" } else { "warn" };
+    log_entry(
+        state,
+        level,
+        "postnode::audit",
+        event,
+        Some(Value::Object(fields)),
+    )
+    .await;
+}
+
+fn redact_token(value: &str) -> String {
+    let prefix: String = value.chars().take(8).collect();
+    if prefix.len() < value.len() {
+        format!("{}...", prefix)
+    } else {
+        value.to_string()
+    }
+}
+
+fn redact_ip(value: &str) -> String {
+    if value == "unknown" || value.is_empty() {
+        return value.to_string();
+    }
+    match value.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => {
+            let octets = ip.octets();
+            format!("{}.{}.x.x", octets[0], octets[1])
+        }
+        Ok(IpAddr::V6(_)) => "redacted".to_string(),
+        Err(_) => "redacted".to_string(),
+    }
+}
+
+fn redact_value(key: Option<&str>, value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut redacted = serde_json::Map::new();
+            for (k, v) in map {
+                redacted.insert(k.clone(), redact_value(Some(&k), v));
+            }
+            Value::Object(redacted)
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(|v| redact_value(key, v)).collect()),
+        Value::String(value) => {
+            if let Some(key) = key {
+                let key = key.to_ascii_lowercase();
+                if key.contains("iid") || key.contains("message_id") || key.contains("messageid") {
+                    return Value::String(redact_token(&value));
+                }
+                if key.contains("ip") {
+                    return Value::String(redact_ip(&value));
+                }
+            }
+            Value::String(value)
+        }
+        other => other,
+    }
+}
+
+fn redact_log_fields(fields: Option<Value>) -> Option<Value> {
+    fields.map(|value| redact_value(None, value))
 }
 
 async fn log_entry(
@@ -1928,7 +2205,7 @@ async fn log_entry(
         level: level.to_string(),
         target: target.to_string(),
         message: message.to_string(),
-        fields,
+        fields: redact_log_fields(fields),
     };
     state.admin.append_log(entry.clone(), 1000).await;
     let _ = state
@@ -1955,8 +2232,9 @@ async fn handle_health(state: &HttpServerState) -> Response<Body> {
     };
     let disk_used_bytes = directory_size(&state.admin.data_dir);
     let disk_free_bytes = fs2::available_space(&state.admin.data_dir).unwrap_or(0);
+    let healthy = state.health.is_ready() && !state.health.is_shutting_down();
     let payload = json!({
-        "status": "healthy",
+        "status": if healthy { "healthy" } else { "unhealthy" },
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": state.started_at.elapsed().as_secs(),
         "checks": {
@@ -1987,7 +2265,11 @@ async fn handle_health(state: &HttpServerState) -> Response<Body> {
             },
         }
     });
-    json_response(payload)
+    if healthy {
+        json_response(payload)
+    } else {
+        json_response_with_status(payload, StatusCode::SERVICE_UNAVAILABLE)
+    }
 }
 
 async fn render_metrics(state: &HttpServerState) -> String {
@@ -2758,6 +3040,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_unhealthy_returns_503() {
+        let state = test_state().await;
+        state.health.set_ready(false);
+        let state = Arc::new(state);
+        let req = Request::builder().method(Method::GET).uri("/health").body(Body::empty()).unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("unhealthy"));
+    }
+
+    #[tokio::test]
     async fn backup_upload_round_trip() {
         let mut state = test_state().await;
         state.auth.admin_token_hash = Some(hash_token("token"));
@@ -2816,6 +3111,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn logs_query_orders_latest_first_and_has_more() {
+        let mut state = test_state().await;
+        state.auth.admin_token_hash = Some(hash_token("token"));
+        {
+            let mut data = state.admin.data.lock().await;
+            data.logs.push(LogEntry {
+                timestamp: "2025-01-15T00:00:00Z".to_string(),
+                level: "info".to_string(),
+                target: "postnode::admin".to_string(),
+                message: "log-1".to_string(),
+                fields: None,
+            });
+            data.logs.push(LogEntry {
+                timestamp: "2025-01-15T01:00:00Z".to_string(),
+                level: "info".to_string(),
+                target: "postnode::admin".to_string(),
+                message: "log-2".to_string(),
+                fields: None,
+            });
+            data.logs.push(LogEntry {
+                timestamp: "2025-01-15T02:00:00Z".to_string(),
+                level: "info".to_string(),
+                target: "postnode::admin".to_string(),
+                message: "log-3".to_string(),
+                fields: None,
+            });
+        }
+        let state = Arc::new(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/admin/v1/logs?limit=2")
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = value.get("entries").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(entries[0].get("message").and_then(|v| v.as_str()), Some("log-3"));
+        assert_eq!(entries[1].get("message").and_then(|v| v.as_str()), Some("log-2"));
+        assert_eq!(value.get("hasMore").and_then(|v| v.as_bool()), Some(true));
+        assert!(value.get("cursor").is_some());
+    }
+
+    #[tokio::test]
+    async fn log_redaction_masks_iid_and_ip() {
+        let state = Arc::new(test_state().await);
+        log_entry(
+            &state,
+            "info",
+            "postnode::admin",
+            "test",
+            Some(json!({"iid": "k5xq7z4mabcdef", "ip_address": "192.168.1.10"})),
+        )
+        .await;
+        let data = state.admin.data.lock().await;
+        let entry = data.logs.last().expect("log entry");
+        let fields = entry.fields.as_ref().expect("fields");
+        assert_eq!(fields.get("iid").and_then(|v| v.as_str()), Some("k5xq7z4m..."));
+        assert_eq!(fields.get("ip_address").and_then(|v| v.as_str()), Some("192.168.x.x"));
+    }
+
+    #[tokio::test]
     async fn patch_settings_writes_audit_log() {
         let mut state = test_state().await;
         state.auth.admin_token_hash = Some(hash_token("token"));
@@ -2834,8 +3194,11 @@ mod tests {
         let resp = handle_request(req, state.clone()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let data = state.admin.data.lock().await;
-        let entry = data.logs.last().expect("log entry");
-        assert_eq!(entry.message, "settings updated");
+        let has_audit = data
+            .logs
+            .iter()
+            .any(|entry| entry.target == "postnode::audit" && entry.message == "config_change");
+        assert!(has_audit);
     }
 
     #[tokio::test]
