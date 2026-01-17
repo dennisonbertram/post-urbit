@@ -90,8 +90,8 @@ async fn handle_request(req: Request<Body>, state: Arc<HttpServerState>) -> Resp
 
 async fn handle_public(req: &Request<Body>, path: &str, state: &HttpServerState) -> Option<Response<Body>> {
     match (req.method(), path) {
-        (&Method::GET, "/health/live") => Some(json_response(Value::String("alive".to_string()))),
-        (&Method::GET, "/health/ready") => Some(json_response(Value::String("ready".to_string()))),
+        (&Method::GET, "/health/live") => Some(json_response(json!({"status": "alive"}))),
+        (&Method::GET, "/health/ready") => Some(json_response(json!({"status": "ready"}))),
         (&Method::GET, "/health") => {
             let status = Value::String("ok".to_string());
             Some(json_response(status))
@@ -282,6 +282,10 @@ async fn handle_admin_authed(req: Request<Body>, path: &str, state: Arc<HttpServ
         (&Method::POST, "/admin/v1/backups") => {
             if let Err(resp) = require_permission(&auth, Permission::WriteSettings) { return resp; }
             handle_create_backup(req, state).await
+        }
+        (&Method::POST, "/admin/v1/backups/upload") => {
+            if let Err(resp) = require_permission(&auth, Permission::WriteSettings) { return resp; }
+            handle_upload_backup(req, state).await
         }
         (&Method::GET, path) if path.starts_with("/admin/v1/backups/") => {
             if let Err(resp) = require_permission(&auth, Permission::ReadSettings) { return resp; }
@@ -1329,6 +1333,38 @@ async fn handle_create_backup(_req: Request<Body>, state: Arc<HttpServerState>) 
     json_response(result)
 }
 
+async fn handle_upload_backup(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let backups_dir = state.admin.data_dir.join("backups");
+    if tokio::fs::create_dir_all(&backups_dir).await.is_err() {
+        return api_error_response(ApiErrorCode::InternalError, "backup directory error", StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let bytes = match read_multipart_file(req, state.config.max_request_body_bytes).await {
+        Ok(bytes) => bytes,
+        Err(resp) => return resp,
+    };
+
+    let backup_id = generate_token_hex(8);
+    let path = backups_dir.join(format!("{}.pusb", backup_id));
+    if tokio::fs::write(&path, &bytes).await.is_err() {
+        return api_error_response(ApiErrorCode::InternalError, "backup write failed", StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let entry = BackupListEntry {
+        id: backup_id.clone(),
+        created_at: Utc::now().to_rfc3339(),
+        size: bytes.len() as u64,
+        path: path.to_string_lossy().to_string(),
+        r#type: "full".to_string(),
+    };
+    {
+        let mut data = state.admin.data.lock().await;
+        data.backups.push(entry.clone());
+    }
+    let _ = state.admin.persist().await;
+    json_response(entry)
+}
+
 async fn handle_download_backup(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
     let id = path.trim_start_matches("/admin/v1/backups/");
     let data = state.admin.data.lock().await;
@@ -1790,7 +1826,7 @@ fn serve_app(path: &str, state: &HttpServerState) -> Response<Body> {
     if let Ok(bytes) = std::fs::read(&full) {
         return Response::builder()
             .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "application/octet-stream")
+            .header(CONTENT_TYPE, content_type_for_path(&full))
             .body(Body::from(bytes))
             .unwrap();
     }
@@ -1804,6 +1840,25 @@ fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
         return None;
     }
     Some(candidate)
+}
+
+fn content_type_for_path(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "html" => "text/html; charset=utf-8",
+        "js" => "application/javascript",
+        "css" => "text/css",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "wasm" => "application/wasm",
+        _ => "application/octet-stream",
+    }
 }
 
 fn json_response<T: serde::Serialize>(payload: T) -> Response<Body> {
@@ -1942,6 +1997,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin_auth::hash_token;
     use crate::dht::MemoryDht;
 
     async fn test_state() -> HttpServerState {
@@ -1993,5 +2049,53 @@ mod tests {
         let req = Request::builder().method(Method::GET).uri("/metrics").body(Body::empty()).unwrap();
         let resp = handle_request(req, state).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn health_live_ready_ok() {
+        let state = Arc::new(test_state().await);
+        let live_req = Request::builder().method(Method::GET).uri("/health/live").body(Body::empty()).unwrap();
+        let live_resp = handle_request(live_req, state.clone()).await;
+        assert_eq!(live_resp.status(), StatusCode::OK);
+        let live_bytes = hyper::body::to_bytes(live_resp.into_body()).await.unwrap();
+        let live_value: Value = serde_json::from_slice(&live_bytes).unwrap();
+        assert_eq!(live_value.get("status").and_then(|v| v.as_str()), Some("alive"));
+
+        let ready_req = Request::builder().method(Method::GET).uri("/health/ready").body(Body::empty()).unwrap();
+        let ready_resp = handle_request(ready_req, state).await;
+        assert_eq!(ready_resp.status(), StatusCode::OK);
+        let ready_bytes = hyper::body::to_bytes(ready_resp.into_body()).await.unwrap();
+        let ready_value: Value = serde_json::from_slice(&ready_bytes).unwrap();
+        assert_eq!(ready_value.get("status").and_then(|v| v.as_str()), Some("ready"));
+    }
+
+    #[tokio::test]
+    async fn backup_upload_round_trip() {
+        let mut state = test_state().await;
+        state.auth.admin_token_hash = Some(hash_token("token"));
+        let state = Arc::new(state);
+
+        let boundary = "----boundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"backup.pusb\"\r\n");
+        body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+        body.extend_from_slice(b"backup");
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/admin/v1/backups/upload")
+            .header(CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let entry: BackupListEntry = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(entry.size, 6);
+        assert_eq!(entry.r#type, "full");
+        assert!(std::fs::metadata(entry.path).is_ok());
     }
 }
