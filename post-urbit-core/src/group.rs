@@ -84,6 +84,231 @@ pub fn validate_group_id(group_id: &str) -> Result<()> {
     validate_crockford_base32_lower(group_id)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupRole {
+    Owner,
+    Admin,
+    Moderator,
+    Member,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupMember {
+    pub iid: String,
+    pub role: GroupRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupAction {
+    AddMember,
+    RemoveMember,
+    PromoteAdmin,
+    DemoteAdmin,
+    UpdateInfo,
+    RotateSenderKey,
+}
+
+impl GroupAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GroupAction::AddMember => "add_member",
+            GroupAction::RemoveMember => "remove_member",
+            GroupAction::PromoteAdmin => "promote_admin",
+            GroupAction::DemoteAdmin => "demote_admin",
+            GroupAction::UpdateInfo => "update_info",
+            GroupAction::RotateSenderKey => "rotate_sender_key",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupStateUpdate {
+    pub action: GroupAction,
+    pub group_id: String,
+    pub target_iid: Option<String>,
+    pub version: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupStateUpdateInternal {
+    pub action: GroupAction,
+    pub group_id: String,
+    pub target_iid: Option<String>,
+    pub version: String,
+    pub actor_iid: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupState {
+    pub group_id: String,
+    pub version: String,
+    pub members: std::collections::HashMap<String, GroupMember>,
+    last_update: Option<GroupStateUpdateInternal>,
+}
+
+impl GroupState {
+    pub fn new(group_id: &str, creator_iid: &str) -> Result<Self> {
+        validate_group_id(group_id)?;
+        validate_crockford_base32_lower(creator_iid)?;
+        let version = format!("0.{}", &creator_iid[..8]);
+        let mut members = std::collections::HashMap::new();
+        members.insert(
+            creator_iid.to_string(),
+            GroupMember {
+                iid: creator_iid.to_string(),
+                role: GroupRole::Owner,
+            },
+        );
+        Ok(Self {
+            group_id: group_id.to_string(),
+            version,
+            members,
+            last_update: None,
+        })
+    }
+
+    pub fn apply_update(&mut self, update: GroupStateUpdateInternal) -> Result<()> {
+        if update.group_id != self.group_id {
+            return Err(PostUrbitError::InvalidInput("group id mismatch"));
+        }
+        validate_group_version(&update.version, &update.actor_iid)?;
+        if let Some(current) = &self.last_update {
+            if compare_updates(&update, current) != std::cmp::Ordering::Greater {
+                return Ok(());
+            }
+        }
+
+        let actor = self
+            .members
+            .get(&update.actor_iid)
+            .ok_or(PostUrbitError::InvalidInput("actor not member"))?;
+        let target_role = update
+            .target_iid
+            .as_ref()
+            .and_then(|iid| self.members.get(iid))
+            .map(|member| member.role.clone());
+
+        match update.action {
+            GroupAction::AddMember => match actor.role {
+                GroupRole::Owner | GroupRole::Admin | GroupRole::Moderator => {}
+                _ => return Err(PostUrbitError::InvalidInput("role not allowed")),
+            },
+            GroupAction::RemoveMember => {
+                let Some(target) = update.target_iid.as_ref() else {
+                    return Err(PostUrbitError::InvalidInput("missing target"));
+                };
+                if target == &update.actor_iid {
+                    // allow self-removal
+                } else {
+                    match actor.role {
+                        GroupRole::Owner | GroupRole::Admin => {}
+                        GroupRole::Moderator => {
+                            if target_role != Some(GroupRole::Member) {
+                                return Err(PostUrbitError::InvalidInput("role not allowed"));
+                            }
+                        }
+                        _ => return Err(PostUrbitError::InvalidInput("role not allowed")),
+                    }
+                }
+            }
+            GroupAction::PromoteAdmin | GroupAction::DemoteAdmin => match actor.role {
+                GroupRole::Owner => {}
+                _ => return Err(PostUrbitError::InvalidInput("role not allowed")),
+            },
+            GroupAction::UpdateInfo | GroupAction::RotateSenderKey => match actor.role {
+                GroupRole::Owner | GroupRole::Admin => {}
+                _ => return Err(PostUrbitError::InvalidInput("role not allowed")),
+            },
+        }
+
+        match update.action {
+            GroupAction::AddMember => {
+                let Some(target) = update.target_iid.clone() else {
+                    return Err(PostUrbitError::InvalidInput("missing target"));
+                };
+                validate_crockford_base32_lower(&target)?;
+                self.members.entry(target.clone()).or_insert(GroupMember {
+                    iid: target,
+                    role: GroupRole::Member,
+                });
+            }
+            GroupAction::RemoveMember => {
+                let Some(target) = update.target_iid.clone() else {
+                    return Err(PostUrbitError::InvalidInput("missing target"));
+                };
+                self.members.remove(&target);
+            }
+            GroupAction::PromoteAdmin => {
+                let Some(target) = update.target_iid.clone() else {
+                    return Err(PostUrbitError::InvalidInput("missing target"));
+                };
+                if let Some(member) = self.members.get_mut(&target) {
+                    member.role = GroupRole::Admin;
+                }
+            }
+            GroupAction::DemoteAdmin => {
+                let Some(target) = update.target_iid.clone() else {
+                    return Err(PostUrbitError::InvalidInput("missing target"));
+                };
+                if let Some(member) = self.members.get_mut(&target) {
+                    member.role = GroupRole::Member;
+                }
+            }
+            GroupAction::UpdateInfo | GroupAction::RotateSenderKey => {}
+        }
+
+        self.version = update.version.clone();
+        self.last_update = Some(update);
+        Ok(())
+    }
+}
+
+pub fn validate_group_version(version: &str, actor_iid: &str) -> Result<()> {
+    let (clock, suffix) = parse_group_version(version)?;
+    if clock == 0 && !version.starts_with("0.") {
+        return Err(PostUrbitError::InvalidInput("version format"));
+    }
+    if !actor_iid.starts_with(&suffix) {
+        return Err(PostUrbitError::InvalidInput("version actor mismatch"));
+    }
+    Ok(())
+}
+
+fn parse_group_version(version: &str) -> Result<(u64, String)> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() != 2 {
+        return Err(PostUrbitError::InvalidInput("version format"));
+    }
+    let clock = parts[0]
+        .parse::<u64>()
+        .map_err(|_| PostUrbitError::InvalidInput("version clock"))?;
+    let suffix = parts[1].to_string();
+    if suffix.len() != 8 {
+        return Err(PostUrbitError::InvalidInput("version suffix"));
+    }
+    Ok((clock, suffix))
+}
+
+fn compare_updates(a: &GroupStateUpdateInternal, b: &GroupStateUpdateInternal) -> std::cmp::Ordering {
+    let (a_clock, a_suffix) = parse_group_version(&a.version).unwrap_or((0, String::new()));
+    let (b_clock, b_suffix) = parse_group_version(&b.version).unwrap_or((0, String::new()));
+    let order = a_clock.cmp(&b_clock);
+    if order != std::cmp::Ordering::Equal {
+        return order;
+    }
+    let order = a_suffix.cmp(&b_suffix);
+    if order != std::cmp::Ordering::Equal {
+        return order;
+    }
+    let order = a.actor_iid.cmp(&b.actor_iid);
+    if order != std::cmp::Ordering::Equal {
+        return order;
+    }
+    a.action.as_str().cmp(b.action.as_str())
+}
+
+ 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +355,52 @@ mod tests {
     fn sender_key_generation_validates_timestamp() {
         let key = generate_sender_key([1u8; 20], "2025-01-13T12:00:00Z").unwrap();
         assert_eq!(key.iteration, 0);
+    }
+
+    #[test]
+    fn group_version_validation_enforces_suffix() {
+        let actor = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        validate_group_version("1.b1n7cfsc", actor).unwrap();
+        let err = validate_group_version("1.deadbeef", actor).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn group_state_rejects_unauthorized_promotion() {
+        let group_id = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let creator = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let mut state = GroupState::new(group_id, creator).unwrap();
+        state.members.insert(
+            "42kbzq2tyab939amybd76bm8kfpzgn95".to_string(),
+            GroupMember {
+                iid: "42kbzq2tyab939amybd76bm8kfpzgn95".to_string(),
+                role: GroupRole::Member,
+            },
+        );
+        let update = GroupStateUpdateInternal {
+            action: GroupAction::PromoteAdmin,
+            group_id: group_id.to_string(),
+            target_iid: Some("42kbzq2tyab939amybd76bm8kfpzgn95".to_string()),
+            version: "1.b1n7cfsc".to_string(),
+            actor_iid: "42kbzq2tyab939amybd76bm8kfpzgn95".to_string(),
+        };
+        let err = state.apply_update(update).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn group_state_applies_add_member() {
+        let group_id = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let creator = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let mut state = GroupState::new(group_id, creator).unwrap();
+        let update = GroupStateUpdateInternal {
+            action: GroupAction::AddMember,
+            group_id: group_id.to_string(),
+            target_iid: Some("42kbzq2tyab939amybd76bm8kfpzgn95".to_string()),
+            version: "1.b1n7cfsc".to_string(),
+            actor_iid: creator.to_string(),
+        };
+        state.apply_update(update).unwrap();
+        assert!(state.members.contains_key("42kbzq2tyab939amybd76bm8kfpzgn95"));
     }
 }
