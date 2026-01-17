@@ -11,7 +11,7 @@ use crate::diagnostics;
 use crate::event_bus::EventBus;
 use crate::identity::{publish_genesis, publish_identity, IdentityManager};
 use crate::node_config::default_node_settings;
-use crate::health::HealthState;
+use crate::health::{HealthState, ReadinessDetails};
 use crate::node_http::{run_http_server, HttpServerConfig, HttpServerState};
 use crate::scheduler::Scheduler;
 use crate::transport::QuicTransport;
@@ -43,6 +43,8 @@ pub struct PostUrbitNode {
 impl PostUrbitNode {
     pub async fn new(config: NodeConfig) -> Result<Self> {
         info!("Initializing Post-Urbit node...");
+
+        ensure_data_directories(Path::new(&config.data_dir)).await?;
 
         let identity_dir = Path::new(&config.data_dir).join("identity");
         let identity = Arc::new(IdentityManager::new(identity_dir.to_string_lossy().as_ref()).await?);
@@ -163,6 +165,16 @@ impl PostUrbitNode {
         let http_addr = self.config.http_addr;
         let http_handle = tokio::spawn(async move { run_http_server(http_addr, http_state).await });
 
+        health
+            .set_readiness_details(ReadinessDetails {
+                identity: "loaded".to_string(),
+                transport: "running".to_string(),
+                messaging: "ready".to_string(),
+                apps: "ready".to_string(),
+            })
+            .await;
+        health.set_ready(true);
+
         #[cfg(unix)]
         let diag_handle = {
             let admin = self.admin.clone();
@@ -192,6 +204,28 @@ impl PostUrbitNode {
     }
 }
 
+async fn ensure_data_directories(base_dir: &Path) -> Result<()> {
+    let paths = [
+        "identity",
+        "messages",
+        "messages/attachments",
+        "sync",
+        "sync/documents",
+        "apps/installed",
+        "apps/storage",
+        "runtime",
+        "runtime/cache",
+        "logs",
+        "logs/apps",
+        "run",
+        "admin",
+    ];
+    for path in paths {
+        tokio::fs::create_dir_all(base_dir.join(path)).await?;
+    }
+    Ok(())
+}
+
 async fn load_or_create_session_secret(config: &NodeConfig) -> Result<Vec<u8>> {
     if let Some(value) = config.session_secret.as_ref() {
         return hex::decode(value)
@@ -209,4 +243,34 @@ async fn load_or_create_session_secret(config: &NodeConfig) -> Result<Vec<u8>> {
     tokio::fs::write(&secret_path, &hex_value).await?;
     hex::decode(hex_value)
         .map_err(|_| PostUrbitError::InvalidInput("session secret"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ensure_data_directories_creates_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        ensure_data_directories(temp.path()).await.unwrap();
+
+        let expected = [
+            "identity",
+            "messages",
+            "messages/attachments",
+            "sync",
+            "sync/documents",
+            "apps/installed",
+            "apps/storage",
+            "runtime",
+            "runtime/cache",
+            "logs",
+            "logs/apps",
+            "run",
+            "admin",
+        ];
+        for path in expected {
+            assert!(temp.path().join(path).exists(), "missing {path}");
+        }
+    }
 }

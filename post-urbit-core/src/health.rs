@@ -33,7 +33,7 @@ pub struct HealthState {
 impl HealthState {
     pub fn new() -> Self {
         Self {
-            ready: Arc::new(AtomicBool::new(true)),
+            ready: Arc::new(AtomicBool::new(false)),
             shutting_down: Arc::new(AtomicBool::new(false)),
             details: Arc::new(tokio::sync::RwLock::new(ReadinessDetails::default())),
         }
@@ -61,5 +61,17 @@ impl HealthState {
 
     pub async fn set_readiness_details(&self, details: ReadinessDetails) {
         *self.details.write().await = details;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_starts_not_ready() {
+        let state = HealthState::new();
+        assert!(!state.is_ready());
+        assert!(!state.is_shutting_down());
     }
 }

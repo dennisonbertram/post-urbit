@@ -2796,7 +2796,9 @@ mod tests {
 
     #[tokio::test]
     async fn health_ok() {
-        let state = Arc::new(test_state().await);
+        let state = test_state().await;
+        state.health.set_ready(true);
+        let state = Arc::new(state);
         let req = Request::builder().method(Method::GET).uri("/health").body(Body::empty()).unwrap();
         let resp = handle_request(req, state).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2829,7 +2831,9 @@ mod tests {
 
     #[tokio::test]
     async fn health_live_ready_ok() {
-        let state = Arc::new(test_state().await);
+        let state = test_state().await;
+        state.health.set_ready(true);
+        let state = Arc::new(state);
         let live_req = Request::builder().method(Method::GET).uri("/health/live").body(Body::empty()).unwrap();
         let live_resp = handle_request(live_req, state.clone()).await;
         assert_eq!(live_resp.status(), StatusCode::OK);
