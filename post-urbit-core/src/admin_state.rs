@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::admin_types::{
-    ApiKey, BackupListEntry, Contact, Device, InstalledApp, NodeSettings,
+    ApiKey, AppSource, BackupListEntry, Contact, Device, InstalledApp, NodeSettings,
 };
 use crate::error::{PostUrbitError, Result};
 
@@ -35,7 +35,12 @@ pub struct AdminData {
     pub contacts: Vec<Contact>,
     pub apps: Vec<InstalledApp>,
     pub settings: NodeSettings,
+    #[serde(default)]
     pub app_settings: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub app_sources: HashMap<String, AppSource>,
+    #[serde(default)]
+    pub repo_cache: HashMap<String, CachedRepository>,
     pub api_keys: Vec<ApiKeyRecord>,
     pub sessions: HashMap<String, SessionRecord>,
     pub backups: Vec<BackupListEntry>,
@@ -50,6 +55,8 @@ impl AdminData {
             apps: Vec::new(),
             settings,
             app_settings: HashMap::new(),
+            app_sources: HashMap::new(),
+            repo_cache: HashMap::new(),
             api_keys: Vec::new(),
             sessions: HashMap::new(),
             backups: Vec::new(),
@@ -57,6 +64,12 @@ impl AdminData {
             last_key_rotation: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedRepository {
+    pub fetched_at: String,
+    pub manifest: serde_json::Value,
 }
 
 #[derive(Clone)]

@@ -188,7 +188,7 @@ pub async fn fetch_repository(url: &str) -> Result<RepositoryManifest> {
     Ok(manifest)
 }
 
-pub async fn verify_repository(dht: &dyn Dht, manifest: &RepositoryManifest) -> Result<()> {
+pub async fn verify_repository(dht: &dyn Dht, manifest: &RepositoryManifest) -> Result<Vec<u8>> {
     let mut value = serde_json::to_value(manifest)
         .map_err(|_| PostUrbitError::InvalidInput("repository json"))?;
     if let serde_json::Value::Object(ref mut map) = value {
@@ -209,20 +209,24 @@ pub async fn verify_repository(dht: &dyn Dht, manifest: &RepositoryManifest) -> 
     let signature = Signature::from_bytes(sig_bytes.as_slice().try_into().map_err(|_| PostUrbitError::InvalidInput("signature length"))?);
 
     let candidates = signing_keys_for_identity(&author);
-    let mut verified = false;
+    let mut verified_key: Option<Vec<u8>> = None;
     for key in candidates {
         if let Ok(verifying) = VerifyingKey::from_bytes(key.as_slice().try_into().map_err(|_| PostUrbitError::InvalidInput("signing key length"))?) {
             if verifying.verify_strict(payload.as_bytes(), &signature).is_ok() {
-                verified = true;
+                verified_key = Some(key);
                 break;
             }
         }
     }
-    if !verified {
+    let Some(verified_key) = verified_key else {
         return Err(PostUrbitError::Crypto("repository signature"));
-    }
+    };
 
-    Ok(())
+    let signed_at = parse_timestamp(&manifest.signature.timestamp)?;
+    let revocations = fetch_revocations(dht, &manifest.signature.operator_iid).await?;
+    check_revocations(&verified_key, signed_at, &revocations)?;
+
+    Ok(verified_key)
 }
 
 fn signing_keys_for_identity(identity: &crate::identity::IdentityDocument) -> Vec<Vec<u8>> {
@@ -253,6 +257,39 @@ async fn fetch_revocations(dht: &dyn Dht, iid: &str) -> Result<Vec<RevocationDoc
         out.push(doc);
     }
     Ok(out)
+}
+
+fn parse_timestamp(value: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    value
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .map_err(|_| PostUrbitError::InvalidInput("timestamp parse"))
+}
+
+fn check_revocations(
+    verified_key: &[u8],
+    signed_at: chrono::DateTime<chrono::Utc>,
+    revocations: &[RevocationDocument],
+) -> Result<()> {
+    for revocation in revocations {
+        match revocation {
+            RevocationDocument::Identity(doc) => {
+                let effective = parse_timestamp(&doc.effective_at)?;
+                if effective <= signed_at {
+                    return Err(PostUrbitError::InvalidInput("identity revoked"));
+                }
+            }
+            RevocationDocument::Key(doc) => {
+                let effective = parse_timestamp(&doc.effective_at)?;
+                if effective <= signed_at {
+                    let revoked_key = base64_decode(&doc.revoked_key)?;
+                    if revoked_key == verified_key {
+                        return Err(PostUrbitError::InvalidInput("signing key revoked"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

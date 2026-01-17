@@ -15,7 +15,7 @@ use crate::admin_auth::{
     AuthConfig, create_session_cookie, generate_token_hex, hash_token, verify_password,
     verify_session_cookie,
 };
-use crate::admin_state::{AdminState, ApiKeyRecord, SessionRecord};
+use crate::admin_state::{AdminState, ApiKeyRecord, CachedRepository, SessionRecord};
 use crate::admin_types::{
     api_error, AddContactRequest, ApiErrorCode, ApiKey, BackupListEntry, BackupResult, Contact,
     ContactUpdate, CreateApiKeyRequest, CreateApiKeyResponse, Device, DeviceAddResult, IdentityInfo,
@@ -961,6 +961,7 @@ async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> 
     {
         let mut data = state.admin.data.lock().await;
         data.apps.push(app.clone());
+        data.app_sources.insert(app.id.clone(), request.source.clone());
     }
     let _ = state.admin.persist().await;
     let mut permissions_requested = required.clone();
@@ -1017,6 +1018,10 @@ async fn handle_install_upload(req: Request<Body>, state: Arc<HttpServerState>) 
     {
         let mut data = state.admin.data.lock().await;
         data.apps.push(app.clone());
+        data.app_sources.insert(app.id.clone(), crate::admin_types::AppSource {
+            r#type: "file".to_string(),
+            value: "upload".to_string(),
+        });
     }
     let _ = state.admin.persist().await;
     let mut permissions_requested = required.clone();
@@ -1031,20 +1036,90 @@ async fn handle_install_upload(req: Request<Body>, state: Arc<HttpServerState>) 
 
 async fn handle_update_app(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
     let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/update");
+    let source = {
+        let data = state.admin.data.lock().await;
+        if data.apps.iter().all(|app| app.id != app_id) {
+            return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND);
+        }
+        data.app_sources.get(app_id).cloned()
+    };
+
+    let Some(source) = source else {
+        return api_error_response(ApiErrorCode::Conflict, "missing app source", StatusCode::CONFLICT);
+    };
+    if source.r#type == "file" {
+        return api_error_response(ApiErrorCode::Conflict, "app source not updatable", StatusCode::CONFLICT);
+    }
+
+    let bytes = match source.r#type.as_str() {
+        "url" => match fetch_bytes(&source.value).await {
+            Ok(bytes) => bytes,
+            Err(resp) => return resp,
+        },
+        "repository" => {
+            let (repo_id, app_id_ref) = match parse_repository_reference(&source.value) {
+                Some(parts) => parts,
+                None => return api_error_response(ApiErrorCode::ValidationError, "invalid repository reference", StatusCode::UNPROCESSABLE_ENTITY),
+            };
+            let manifest = match fetch_trusted_repository(&repo_id, &state).await {
+                Ok(manifest) => manifest,
+                Err(resp) => return resp,
+            };
+            let app = match manifest.apps.iter().find(|app| app.id == app_id_ref) {
+                Some(app) => app,
+                None => return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND),
+            };
+            match fetch_bytes(&app.download_url).await {
+                Ok(bytes) => bytes,
+                Err(resp) => return resp,
+            }
+        }
+        _ => return api_error_response(ApiErrorCode::ValidationError, "unsupported source type", StatusCode::UNPROCESSABLE_ENTITY),
+    };
+
+    let package = match parse_postapp(&bytes) {
+        Ok(package) => package,
+        Err(_) => return api_error_response(ApiErrorCode::ValidationError, "invalid package", StatusCode::UNPROCESSABLE_ENTITY),
+    };
+    if verify_package_with_dht(state.dht.as_ref(), &package).await.is_err() {
+        return api_error_response(ApiErrorCode::Forbidden, "package verification failed", StatusCode::FORBIDDEN);
+    }
+
+    if std::fs::create_dir_all(&state.apps_dir).is_err() {
+        return api_error_response(ApiErrorCode::InternalError, "app directory error", StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let app_dir = state.apps_dir.join(&package.manifest.app.id);
+    let _ = std::fs::remove_dir_all(&app_dir);
+    if install_package(&package, &state.apps_dir).is_err() {
+        return api_error_response(ApiErrorCode::InternalError, "app update failed", StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let required = package.manifest.capabilities.required.clone();
+    let optional = package.manifest.capabilities.optional.clone().unwrap_or_default();
+
     let mut data = state.admin.data.lock().await;
-    if let Some(app) = data.apps.iter_mut().find(|app| app.id == app_id) {
+    let app = data.apps.iter_mut().find(|app| app.id == app_id);
+    if let Some(app) = app {
         let previous = app.version.clone();
-        app.version = app.version.clone();
+        app.name = package.manifest.app.name.clone();
+        app.version = package.manifest.app.version.clone();
+        app.description = package.manifest.app.description.clone();
+        app.author_iid = package.signature.author_iid.clone();
+        app.author_name = Some(package.manifest.app.author.name.clone());
+        app.permissions.granted = required.clone();
+        app.permissions.pending = optional.clone();
+        app.storage_used = package.manifest.files.total_size;
         let updated = app.clone();
         drop(data);
         let _ = state.admin.persist().await;
         let result = UpdateResult {
             app: updated,
             previous_version: previous,
-            new_permissions: Vec::new(),
+            new_permissions: optional,
         };
         return json_response(result);
     }
+
     api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND)
 }
 
@@ -1054,6 +1129,7 @@ async fn handle_delete_app(path: &str, state: Arc<HttpServerState>) -> Response<
     if let Some(pos) = data.apps.iter().position(|app| app.id == app_id) {
         data.apps.remove(pos);
         data.app_settings.remove(app_id);
+        data.app_sources.remove(app_id);
         drop(data);
         let app_dir = state.apps_dir.join(app_id);
         let _ = std::fs::remove_dir_all(app_dir);
@@ -1424,7 +1500,6 @@ async fn fetch_trusted_repository(repo_id: &str, state: &HttpServerState) -> std
         .iter()
         .find(|repo| repo.id == repo_id)
         .cloned();
-    drop(data);
 
     let Some(repo) = repo else {
         return Err(api_error_response(ApiErrorCode::NotFound, "repository not found", StatusCode::NOT_FOUND));
@@ -1432,6 +1507,19 @@ async fn fetch_trusted_repository(repo_id: &str, state: &HttpServerState) -> std
     if repo.trust_level == "disabled" {
         return Err(api_error_response(ApiErrorCode::Forbidden, "repository disabled", StatusCode::FORBIDDEN));
     }
+
+    let now = Utc::now();
+    if let Some(cached) = data.repo_cache.get(repo_id) {
+        if let Ok(fetched_at) = DateTime::parse_from_rfc3339(&cached.fetched_at) {
+            if fetched_at.with_timezone(&Utc) + Duration::hours(1) > now {
+                let manifest: RepositoryManifest = serde_json::from_value(cached.manifest.clone())
+                    .map_err(|_| api_error_response(ApiErrorCode::InternalError, "repository cache invalid", StatusCode::INTERNAL_SERVER_ERROR))?;
+                return Ok(manifest);
+            }
+        }
+    }
+    drop(data);
+
     let url = if repo.url.ends_with("repository.json") {
         repo.url
     } else {
@@ -1439,8 +1527,28 @@ async fn fetch_trusted_repository(repo_id: &str, state: &HttpServerState) -> std
     };
     let manifest = fetch_repository(&url).await
         .map_err(|_| api_error_response(ApiErrorCode::InvalidRequest, "repository fetch failed", StatusCode::BAD_REQUEST))?;
-    verify_repository(state.dht.as_ref(), &manifest).await
+    if manifest.signature.operator_iid != repo.operator_iid {
+        return Err(api_error_response(ApiErrorCode::Forbidden, "repository operator mismatch", StatusCode::FORBIDDEN));
+    }
+    let verified_key = verify_repository(state.dht.as_ref(), &manifest).await
         .map_err(|_| api_error_response(ApiErrorCode::Forbidden, "repository verification failed", StatusCode::FORBIDDEN))?;
+
+    if let Some(expected) = repo.operator_key_fingerprint.as_ref() {
+        let actual = fingerprint_key_bytes(&verified_key);
+        if actual != *expected {
+            return Err(api_error_response(ApiErrorCode::Forbidden, "repository key mismatch", StatusCode::FORBIDDEN));
+        }
+    }
+
+    let mut data = state.admin.data.lock().await;
+    let cached = CachedRepository {
+        fetched_at: now.to_rfc3339(),
+        manifest: serde_json::to_value(&manifest).map_err(|_| api_error_response(ApiErrorCode::InternalError, "repository cache failed", StatusCode::INTERNAL_SERVER_ERROR))?,
+    };
+    data.repo_cache.insert(repo_id.to_string(), cached);
+    drop(data);
+    let _ = state.admin.persist().await;
+
     Ok(manifest)
 }
 
@@ -1657,6 +1765,11 @@ fn merge_settings(current: &mut crate::admin_types::NodeSettings, patch: &Value)
 fn key_fingerprint(base64_key: &str) -> String {
     let raw = crate::encoding::base64_decode(base64_key).unwrap_or_default();
     let hash = sha2::Sha256::digest(raw.as_slice());
+    format!("sha256:{}", hex::encode(hash))
+}
+
+fn fingerprint_key_bytes(raw: &[u8]) -> String {
+    let hash = sha2::Sha256::digest(raw);
     format!("sha256:{}", hex::encode(hash))
 }
 

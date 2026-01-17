@@ -294,6 +294,7 @@ pub struct AppSettings {
 pub struct TrustedRepository {
     pub id: String,
     pub operator_iid: String,
+    pub operator_key_fingerprint: Option<String>,
     pub url: String,
     pub trust_level: String,
     pub auto_update: bool,
@@ -489,4 +490,3 @@ pub fn api_error(code: ApiErrorCode, message: &str) -> ApiErrorBody {
         },
     }
 }
-
