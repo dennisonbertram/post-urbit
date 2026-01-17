@@ -1405,15 +1405,27 @@ async fn handle_patch_app_permissions(req: Request<Body>, path: &str, state: Arc
     };
     let mut data = state.admin.data.lock().await;
     if let Some(app) = data.apps.iter_mut().find(|app| app.id == app_id) {
-        if let Some(grant) = patch.grant { app.permissions.granted.extend(grant); }
-        if let Some(deny) = patch.deny { app.permissions.denied.extend(deny); }
-        if let Some(reset) = patch.reset {
+        if let Some(grant) = patch.grant.as_ref() {
+            app.permissions.granted.extend(grant.iter().cloned());
+        }
+        if let Some(deny) = patch.deny.as_ref() {
+            app.permissions.denied.extend(deny.iter().cloned());
+        }
+        if let Some(reset) = patch.reset.as_ref() {
             app.permissions.granted.retain(|cap| !reset.contains(cap));
             app.permissions.denied.retain(|cap| !reset.contains(cap));
         }
         let updated = app.permissions.clone();
         drop(data);
         let _ = state.admin.persist().await;
+        log_entry(
+            &state,
+            "info",
+            "postnode::apps",
+            "app permissions updated",
+            Some(json!({"app_id": app_id, "grant": patch.grant, "deny": patch.deny, "reset": patch.reset})),
+        )
+        .await;
         return json_response(updated);
     }
     api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND)
@@ -1496,12 +1508,24 @@ async fn handle_patch_settings(req: Request<Body>, state: Arc<HttpServerState>) 
         Ok(body) => body,
         Err(resp) => return resp,
     };
+    let changed_sections: Vec<String> = patch
+        .as_object()
+        .map(|obj| obj.keys().cloned().collect())
+        .unwrap_or_default();
     let mut data = state.admin.data.lock().await;
     let mut settings = data.settings.clone();
     merge_settings(&mut settings, &patch);
     data.settings = settings.clone();
     drop(data);
     let _ = state.admin.persist().await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::admin",
+        "settings updated",
+        Some(json!({"sections": changed_sections})),
+    )
+    .await;
     json_response(settings)
 }
 
@@ -2776,6 +2800,75 @@ mod tests {
         let payload: LogsResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(!payload.entries.is_empty());
         assert_eq!(payload.entries[0].message, "test log entry");
+    }
+
+    #[tokio::test]
+    async fn patch_settings_writes_audit_log() {
+        let mut state = test_state().await;
+        state.auth.admin_token_hash = Some(hash_token("token"));
+        let state = Arc::new(state);
+        let network = {
+            let data = state.admin.data.lock().await;
+            data.settings.network.clone()
+        };
+        let patch = json!({ "network": network });
+        let req = Request::builder()
+            .method(Method::PATCH)
+            .uri("/admin/v1/settings")
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::from(patch.to_string()))
+            .unwrap();
+        let resp = handle_request(req, state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = state.admin.data.lock().await;
+        let entry = data.logs.last().expect("log entry");
+        assert_eq!(entry.message, "settings updated");
+    }
+
+    #[tokio::test]
+    async fn patch_app_permissions_writes_audit_log() {
+        let mut state = test_state().await;
+        state.auth.admin_token_hash = Some(hash_token("token"));
+        {
+            let mut data = state.admin.data.lock().await;
+            data.apps.push(InstalledApp {
+                id: "com.example.app".to_string(),
+                name: "Example".to_string(),
+                version: "1.0.0".to_string(),
+                author_iid: "k5xq7z4m".to_string(),
+                author_name: None,
+                description: "Example app".to_string(),
+                icon: None,
+                installed_at: Utc::now().to_rfc3339(),
+                last_opened: None,
+                update_available: None,
+                status: crate::admin_types::AppStatus::Installed,
+                permissions: crate::admin_types::AppPermissions {
+                    granted: Vec::new(),
+                    denied: Vec::new(),
+                    pending: Vec::new(),
+                },
+                storage_used: 0,
+                storage_quota: 1024,
+            });
+        }
+        let state = Arc::new(state);
+        let patch = json!({
+            "grant": ["messaging:send"],
+            "deny": ["storage:app"],
+            "reset": ["contacts:read"]
+        });
+        let req = Request::builder()
+            .method(Method::PATCH)
+            .uri("/admin/v1/apps/com.example.app/permissions")
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::from(patch.to_string()))
+            .unwrap();
+        let resp = handle_request(req, state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = state.admin.data.lock().await;
+        let entry = data.logs.last().expect("log entry");
+        assert_eq!(entry.message, "app permissions updated");
     }
 
     #[tokio::test]
