@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use chrono::{DateTime, Duration, Utc};
@@ -10,7 +11,7 @@ use futures::{SinkExt, StreamExt};
 use hyper::{Body, Method, Request, Response, StatusCode};
 use hyper::header::{HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use hyper::service::{make_service_fn, service_fn};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{Value, json};
 
 use crate::admin_auth::{
@@ -42,6 +43,67 @@ pub struct HttpServerConfig {
 }
 
 #[derive(Clone)]
+pub struct HealthState {
+    ready: Arc<AtomicBool>,
+    shutting_down: Arc<AtomicBool>,
+    details: Arc<tokio::sync::RwLock<ReadinessDetails>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReadinessDetails {
+    pub identity: String,
+    pub transport: String,
+    pub messaging: String,
+    pub apps: String,
+}
+
+impl Default for ReadinessDetails {
+    fn default() -> Self {
+        Self {
+            identity: "loaded".to_string(),
+            transport: "starting".to_string(),
+            messaging: "waiting".to_string(),
+            apps: "waiting".to_string(),
+        }
+    }
+}
+
+impl HealthState {
+    pub fn new() -> Self {
+        Self {
+            ready: Arc::new(AtomicBool::new(true)),
+            shutting_down: Arc::new(AtomicBool::new(false)),
+            details: Arc::new(tokio::sync::RwLock::new(ReadinessDetails::default())),
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+    }
+
+    pub fn set_ready(&self, ready: bool) {
+        self.ready.store(ready, Ordering::SeqCst);
+    }
+
+    pub fn set_shutting_down(&self, shutting_down: bool) {
+        self.shutting_down.store(shutting_down, Ordering::SeqCst);
+    }
+
+    pub async fn readiness_details(&self) -> ReadinessDetails {
+        self.details.read().await.clone()
+    }
+
+    pub async fn set_readiness_details(&self, details: ReadinessDetails) {
+        *self.details.write().await = details;
+    }
+}
+
+#[derive(Clone)]
 pub struct HttpServerState {
     pub admin: AdminState,
     pub auth: AuthConfig,
@@ -50,6 +112,7 @@ pub struct HttpServerState {
     pub event_bus: Arc<EventBus>,
     pub started_at: Instant,
     pub config: HttpServerConfig,
+    pub health: HealthState,
     pub apps_dir: PathBuf,
 }
 
@@ -106,8 +169,8 @@ fn normalize_admin_path(path: &str) -> Cow<'_, str> {
 
 async fn handle_public(req: &Request<Body>, path: &str, state: &HttpServerState) -> Option<Response<Body>> {
     match (req.method(), path) {
-        (&Method::GET, "/health/live") => Some(json_response(json!({"status": "alive"}))),
-        (&Method::GET, "/health/ready") => Some(json_response(json!({"status": "ready"}))),
+        (&Method::GET, "/health/live") => Some(handle_health_live(state).await),
+        (&Method::GET, "/health/ready") => Some(handle_health_ready(state).await),
         (&Method::GET, "/health") => Some(handle_health(state).await),
         (&Method::GET, "/metrics") => {
             if state.config.metrics_enabled {
@@ -341,11 +404,11 @@ async fn handle_admin_authed(req: Request<Body>, path: &str, state: Arc<HttpServ
         }
         (&Method::POST, "/admin/v1/restart") => {
             if let Err(resp) = require_permission(&auth, Permission::WriteSettings) { return resp; }
-            handle_restart().await
+            handle_restart(&state).await
         }
         (&Method::POST, "/admin/v1/shutdown") => {
             if let Err(resp) = require_permission(&auth, Permission::WriteSettings) { return resp; }
-            handle_shutdown().await
+            handle_shutdown(&state).await
         }
         _ => Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap(),
     }
@@ -484,6 +547,14 @@ async fn handle_login(req: Request<Body>, state: Arc<HttpServerState>) -> Respon
         return api_error_response(ApiErrorCode::Unauthorized, "password authentication disabled", StatusCode::UNAUTHORIZED);
     };
     if verify_password(hash, &body.password).is_err() {
+        log_entry(
+            &state,
+            "warn",
+            "postnode::admin",
+            "admin login failed",
+            Some(json!({"ip_address": ip_address, "user_agent": user_agent})),
+        )
+        .await;
         return api_error_response(ApiErrorCode::Unauthorized, "invalid credentials", StatusCode::UNAUTHORIZED);
     }
 
@@ -1934,12 +2005,41 @@ async fn render_metrics(state: &HttpServerState) -> String {
     out
 }
 
-async fn handle_restart() -> Response<Body> {
+async fn handle_restart(state: &HttpServerState) -> Response<Body> {
+    state.health.set_ready(false);
+    state.health.set_shutting_down(true);
     Response::builder().status(StatusCode::ACCEPTED).body(Body::empty()).unwrap()
 }
 
-async fn handle_shutdown() -> Response<Body> {
+async fn handle_shutdown(state: &HttpServerState) -> Response<Body> {
+    state.health.set_ready(false);
+    state.health.set_shutting_down(true);
     Response::builder().status(StatusCode::ACCEPTED).body(Body::empty()).unwrap()
+}
+
+async fn handle_health_live(state: &HttpServerState) -> Response<Body> {
+    if state.health.is_shutting_down() {
+        return json_response_with_status(
+            json!({"status": "dead", "reason": "shutting_down"}),
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    }
+    json_response(json!({"status": "alive"}))
+}
+
+async fn handle_health_ready(state: &HttpServerState) -> Response<Body> {
+    if state.health.is_ready() {
+        return json_response(json!({"status": "ready"}));
+    }
+    let details = state.health.readiness_details().await;
+    json_response_with_status(
+        json!({
+            "status": "not_ready",
+            "reason": "initializing",
+            "details": details,
+        }),
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
 }
 
 async fn handle_events(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
@@ -2369,6 +2469,15 @@ fn json_response<T: serde::Serialize>(payload: T) -> Response<Body> {
         .unwrap()
 }
 
+fn json_response_with_status<T: serde::Serialize>(payload: T, status: StatusCode) -> Response<Body> {
+    let body = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec());
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
 fn api_error_response(code: ApiErrorCode, message: &str, status: StatusCode) -> Response<Body> {
     let body = api_error(code, message);
     let payload = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
@@ -2528,6 +2637,7 @@ mod tests {
                 max_request_body_bytes: 1024 * 1024,
                 session_cookie_secure: false,
             },
+            health: HealthState::new(),
             apps_dir,
         }
     }
@@ -2581,6 +2691,33 @@ mod tests {
         let ready_bytes = hyper::body::to_bytes(ready_resp.into_body()).await.unwrap();
         let ready_value: Value = serde_json::from_slice(&ready_bytes).unwrap();
         assert_eq!(ready_value.get("status").and_then(|v| v.as_str()), Some("ready"));
+    }
+
+    #[tokio::test]
+    async fn health_ready_not_ready_returns_503() {
+        let state = test_state().await;
+        state.health.set_ready(false);
+        let state = Arc::new(state);
+        let ready_req = Request::builder().method(Method::GET).uri("/health/ready").body(Body::empty()).unwrap();
+        let ready_resp = handle_request(ready_req, state).await;
+        assert_eq!(ready_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let ready_bytes = hyper::body::to_bytes(ready_resp.into_body()).await.unwrap();
+        let ready_value: Value = serde_json::from_slice(&ready_bytes).unwrap();
+        assert_eq!(ready_value.get("status").and_then(|v| v.as_str()), Some("not_ready"));
+        assert!(ready_value.get("details").is_some());
+    }
+
+    #[tokio::test]
+    async fn health_live_shutting_down_returns_503() {
+        let state = test_state().await;
+        state.health.set_shutting_down(true);
+        let state = Arc::new(state);
+        let live_req = Request::builder().method(Method::GET).uri("/health/live").body(Body::empty()).unwrap();
+        let live_resp = handle_request(live_req, state).await;
+        assert_eq!(live_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let live_bytes = hyper::body::to_bytes(live_resp.into_body()).await.unwrap();
+        let live_value: Value = serde_json::from_slice(&live_bytes).unwrap();
+        assert_eq!(live_value.get("status").and_then(|v| v.as_str()), Some("dead"));
     }
 
     #[tokio::test]

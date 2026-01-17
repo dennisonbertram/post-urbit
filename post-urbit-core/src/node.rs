@@ -10,7 +10,7 @@ use crate::admin_state::AdminState;
 use crate::event_bus::EventBus;
 use crate::identity::{publish_genesis, publish_identity, IdentityManager};
 use crate::node_config::default_node_settings;
-use crate::node_http::{run_http_server, HttpServerConfig, HttpServerState};
+use crate::node_http::{run_http_server, HealthState, HttpServerConfig, HttpServerState};
 use crate::scheduler::Scheduler;
 use crate::transport::QuicTransport;
 use crate::error::{PostUrbitError, Result};
@@ -153,6 +153,7 @@ impl PostUrbitNode {
                 max_request_body_bytes: 100 * 1024 * 1024,
                 session_cookie_secure: false,
             },
+            health: HealthState::new(),
             apps_dir: self.apps_dir.clone(),
         };
         let http_addr = self.config.http_addr;
