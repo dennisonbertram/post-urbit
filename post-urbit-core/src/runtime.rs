@@ -353,11 +353,18 @@ impl CapabilityRegistry {
             .insert(method.to_string(), cap.to_string());
     }
 
+    pub fn capability_for(&self, method: &str) -> Option<&str> {
+        self.method_to_cap.get(method).map(|cap| cap.as_str())
+    }
+
     pub fn require(&self, grants: &[String], method: &str) -> Result<()> {
         let cap = self
             .method_to_cap
             .get(method)
             .ok_or(PostUrbitError::InvalidInput("unknown method"))?;
+        if cap.is_empty() {
+            return Ok(());
+        }
         if !grants.iter().any(|g| g == cap) {
             return Err(PostUrbitError::InvalidInput("capability denied"));
         }
