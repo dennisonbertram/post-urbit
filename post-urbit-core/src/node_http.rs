@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,6 +24,8 @@ use crate::admin_types::{
     UpdateResult,
 };
 use crate::error::{PostUrbitError, Result};
+use crate::app_store::{fetch_repository, install_package, parse_postapp, verify_package_with_dht, verify_repository, RepositoryManifest};
+use crate::dht::Dht;
 use crate::identity::{IdentityManager, Recovery};
 use crate::node_backup::{create_backup, restore_backup};
 use crate::node_config::default_node_settings;
@@ -40,8 +43,10 @@ pub struct HttpServerState {
     pub admin: AdminState,
     pub auth: AuthConfig,
     pub identity: Arc<IdentityManager>,
+    pub dht: Arc<dyn Dht + Send + Sync>,
     pub started_at: Instant,
     pub config: HttpServerConfig,
+    pub apps_dir: PathBuf,
 }
 
 pub async fn run_http_server(addr: SocketAddr, state: HttpServerState) -> Result<()> {
@@ -95,6 +100,11 @@ async fn handle_public(req: &Request<Body>, path: &str, state: &HttpServerState)
                 Some(Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap())
             }
         }
+        (&Method::GET, path) if path.starts_with("/apps/") => Some(serve_app(path, state)),
+        (&Method::POST, path) if path.starts_with("/apps/") => Some(Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap()),
+        (&Method::PUT, path) if path.starts_with("/apps/") => Some(Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap()),
+        (&Method::PATCH, path) if path.starts_with("/apps/") => Some(Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap()),
+        (&Method::DELETE, path) if path.starts_with("/apps/") => Some(Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap()),
         _ => None,
     }
 }
@@ -206,6 +216,10 @@ async fn handle_admin_authed(req: Request<Body>, path: &str, state: Arc<HttpServ
             if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
             handle_install_app(req, state).await
         }
+        (&Method::POST, "/admin/v1/apps/install/upload") => {
+            if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
+            handle_install_upload(req, state).await
+        }
         (&Method::POST, path) if path.ends_with("/update") && path.starts_with("/admin/v1/apps/") => {
             if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
             handle_update_app(path, state).await
@@ -225,6 +239,14 @@ async fn handle_admin_authed(req: Request<Body>, path: &str, state: Arc<HttpServ
         (&Method::PATCH, path) if path.ends_with("/permissions") && path.starts_with("/admin/v1/apps/") => {
             if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
             handle_patch_app_permissions(req, path, state).await
+        }
+        (&Method::GET, path) if path.ends_with("/settings") && path.starts_with("/admin/v1/apps/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ReadApps) { return resp; }
+            handle_get_app_settings(path, state).await
+        }
+        (&Method::PUT, path) if path.ends_with("/settings") && path.starts_with("/admin/v1/apps/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
+            handle_put_app_settings(req, path, state).await
         }
         (&Method::POST, path) if path.ends_with("/clear-data") && path.starts_with("/admin/v1/apps/") => {
             if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
@@ -873,24 +895,67 @@ async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> 
         Ok(body) => body,
         Err(resp) => return resp,
     };
+
+    let bytes = match request.source.r#type.as_str() {
+        "url" => match fetch_bytes(&request.source.value).await {
+            Ok(bytes) => bytes,
+            Err(resp) => return resp,
+        },
+        "repository" => {
+            let (repo_id, app_id) = match parse_repository_reference(&request.source.value) {
+                Some(parts) => parts,
+                None => return api_error_response(ApiErrorCode::ValidationError, "invalid repository reference", StatusCode::UNPROCESSABLE_ENTITY),
+            };
+            let manifest = match fetch_trusted_repository(&repo_id, &state).await {
+                Ok(manifest) => manifest,
+                Err(resp) => return resp,
+            };
+            let app = match manifest.apps.iter().find(|app| app.id == app_id) {
+                Some(app) => app,
+                None => return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND),
+            };
+            match fetch_bytes(&app.download_url).await {
+                Ok(bytes) => bytes,
+                Err(resp) => return resp,
+            }
+        }
+        _ => return api_error_response(ApiErrorCode::ValidationError, "unsupported source type", StatusCode::UNPROCESSABLE_ENTITY),
+    };
+
+    let package = match parse_postapp(&bytes) {
+        Ok(package) => package,
+        Err(_) => return api_error_response(ApiErrorCode::ValidationError, "invalid package", StatusCode::UNPROCESSABLE_ENTITY),
+    };
+    if verify_package_with_dht(state.dht.as_ref(), &package).await.is_err() {
+        return api_error_response(ApiErrorCode::Forbidden, "package verification failed", StatusCode::FORBIDDEN);
+    }
+    if std::fs::create_dir_all(&state.apps_dir).is_err() {
+        return api_error_response(ApiErrorCode::InternalError, "app directory error", StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    if install_package(&package, &state.apps_dir).is_err() {
+        return api_error_response(ApiErrorCode::Conflict, "app already installed", StatusCode::CONFLICT);
+    }
+
+    let required = package.manifest.capabilities.required.clone();
+    let optional = package.manifest.capabilities.optional.clone().unwrap_or_default();
     let app = InstalledApp {
-        id: request.source.value.clone(),
-        name: request.source.value.clone(),
-        version: "0.0.0".to_string(),
-        author_iid: state.identity.iid().await,
-        author_name: None,
-        description: "".to_string(),
+        id: package.manifest.app.id.clone(),
+        name: package.manifest.app.name.clone(),
+        version: package.manifest.app.version.clone(),
+        author_iid: package.signature.author_iid.clone(),
+        author_name: Some(package.manifest.app.author.name.clone()),
+        description: package.manifest.app.description.clone(),
         icon: None,
         installed_at: Utc::now().to_rfc3339(),
         last_opened: None,
         update_available: None,
         status: crate::admin_types::AppStatus::Installed,
         permissions: crate::admin_types::AppPermissions {
-            granted: Vec::new(),
+            granted: required.clone(),
             denied: Vec::new(),
-            pending: Vec::new(),
+            pending: optional.clone(),
         },
-        storage_used: 0,
+        storage_used: package.manifest.files.total_size,
         storage_quota: 0,
     };
     {
@@ -898,10 +963,68 @@ async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> 
         data.apps.push(app.clone());
     }
     let _ = state.admin.persist().await;
+    let mut permissions_requested = required.clone();
+    permissions_requested.extend(optional.clone());
     let result = InstallResult {
         app,
-        permissions_requested: Vec::new(),
-        permissions_granted: Vec::new(),
+        permissions_requested,
+        permissions_granted: required,
+    };
+    json_response(result)
+}
+
+async fn handle_install_upload(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let bytes = match read_multipart_file(req, state.config.max_request_body_bytes).await {
+        Ok(bytes) => bytes,
+        Err(resp) => return resp,
+    };
+    let package = match parse_postapp(&bytes) {
+        Ok(package) => package,
+        Err(_) => return api_error_response(ApiErrorCode::ValidationError, "invalid package", StatusCode::UNPROCESSABLE_ENTITY),
+    };
+    if verify_package_with_dht(state.dht.as_ref(), &package).await.is_err() {
+        return api_error_response(ApiErrorCode::Forbidden, "package verification failed", StatusCode::FORBIDDEN);
+    }
+    if std::fs::create_dir_all(&state.apps_dir).is_err() {
+        return api_error_response(ApiErrorCode::InternalError, "app directory error", StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    if install_package(&package, &state.apps_dir).is_err() {
+        return api_error_response(ApiErrorCode::Conflict, "app already installed", StatusCode::CONFLICT);
+    }
+
+    let required = package.manifest.capabilities.required.clone();
+    let optional = package.manifest.capabilities.optional.clone().unwrap_or_default();
+    let app = InstalledApp {
+        id: package.manifest.app.id.clone(),
+        name: package.manifest.app.name.clone(),
+        version: package.manifest.app.version.clone(),
+        author_iid: package.signature.author_iid.clone(),
+        author_name: Some(package.manifest.app.author.name.clone()),
+        description: package.manifest.app.description.clone(),
+        icon: None,
+        installed_at: Utc::now().to_rfc3339(),
+        last_opened: None,
+        update_available: None,
+        status: crate::admin_types::AppStatus::Installed,
+        permissions: crate::admin_types::AppPermissions {
+            granted: required.clone(),
+            denied: Vec::new(),
+            pending: optional.clone(),
+        },
+        storage_used: package.manifest.files.total_size,
+        storage_quota: 0,
+    };
+    {
+        let mut data = state.admin.data.lock().await;
+        data.apps.push(app.clone());
+    }
+    let _ = state.admin.persist().await;
+    let mut permissions_requested = required.clone();
+    permissions_requested.extend(optional);
+    let result = InstallResult {
+        app,
+        permissions_requested,
+        permissions_granted: required,
     };
     json_response(result)
 }
@@ -930,7 +1053,10 @@ async fn handle_delete_app(path: &str, state: Arc<HttpServerState>) -> Response<
     let mut data = state.admin.data.lock().await;
     if let Some(pos) = data.apps.iter().position(|app| app.id == app_id) {
         data.apps.remove(pos);
+        data.app_settings.remove(app_id);
         drop(data);
+        let app_dir = state.apps_dir.join(app_id);
+        let _ = std::fs::remove_dir_all(app_dir);
         let _ = state.admin.persist().await;
         return Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap();
     }
@@ -970,6 +1096,32 @@ async fn handle_patch_app_permissions(req: Request<Body>, path: &str, state: Arc
 
 async fn handle_clear_app_data(_path: &str, _state: Arc<HttpServerState>) -> Response<Body> {
     Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty()).unwrap()
+}
+
+async fn handle_get_app_settings(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/settings");
+    let data = state.admin.data.lock().await;
+    if !data.apps.iter().any(|app| app.id == app_id) {
+        return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND);
+    }
+    let value = data.app_settings.get(app_id).cloned().unwrap_or_else(|| Value::Object(Default::default()));
+    json_response(value)
+}
+
+async fn handle_put_app_settings(req: Request<Body>, path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/settings");
+    let value = match read_json::<Value>(req, state.config.max_request_body_bytes).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+    let mut data = state.admin.data.lock().await;
+    if !data.apps.iter().any(|app| app.id == app_id) {
+        return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND);
+    }
+    data.app_settings.insert(app_id.to_string(), value.clone());
+    drop(data);
+    let _ = state.admin.persist().await;
+    json_response(value)
 }
 
 async fn handle_settings(state: Arc<HttpServerState>) -> Response<Body> {
@@ -1242,6 +1394,155 @@ async fn handle_shutdown() -> Response<Body> {
     Response::builder().status(StatusCode::ACCEPTED).body(Body::empty()).unwrap()
 }
 
+async fn fetch_bytes(url: &str) -> std::result::Result<Vec<u8>, Response<Body>> {
+    let response = reqwest::get(url).await
+        .map_err(|_| api_error_response(ApiErrorCode::InvalidRequest, "download failed", StatusCode::BAD_REQUEST))?;
+    if !response.status().is_success() {
+        return Err(api_error_response(ApiErrorCode::InvalidRequest, "download failed", StatusCode::BAD_REQUEST));
+    }
+    let bytes = response.bytes().await
+        .map_err(|_| api_error_response(ApiErrorCode::InvalidRequest, "download failed", StatusCode::BAD_REQUEST))?;
+    Ok(bytes.to_vec())
+}
+
+fn parse_repository_reference(value: &str) -> Option<(String, String)> {
+    let mut parts = value.splitn(2, ':');
+    let repo = parts.next()?.to_string();
+    let app = parts.next()?.to_string();
+    if repo.is_empty() || app.is_empty() {
+        return None;
+    }
+    Some((repo, app))
+}
+
+async fn fetch_trusted_repository(repo_id: &str, state: &HttpServerState) -> std::result::Result<RepositoryManifest, Response<Body>> {
+    let data = state.admin.data.lock().await;
+    let repo = data
+        .settings
+        .apps
+        .trusted_repositories
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .cloned();
+    drop(data);
+
+    let Some(repo) = repo else {
+        return Err(api_error_response(ApiErrorCode::NotFound, "repository not found", StatusCode::NOT_FOUND));
+    };
+    if repo.trust_level == "disabled" {
+        return Err(api_error_response(ApiErrorCode::Forbidden, "repository disabled", StatusCode::FORBIDDEN));
+    }
+    let url = if repo.url.ends_with("repository.json") {
+        repo.url
+    } else {
+        format!("{}/repository.json", repo.url.trim_end_matches('/'))
+    };
+    let manifest = fetch_repository(&url).await
+        .map_err(|_| api_error_response(ApiErrorCode::InvalidRequest, "repository fetch failed", StatusCode::BAD_REQUEST))?;
+    verify_repository(state.dht.as_ref(), &manifest).await
+        .map_err(|_| api_error_response(ApiErrorCode::Forbidden, "repository verification failed", StatusCode::FORBIDDEN))?;
+    Ok(manifest)
+}
+
+async fn read_multipart_file(req: Request<Body>, max_bytes: usize) -> std::result::Result<Vec<u8>, Response<Body>> {
+    let content_type = req.headers().get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let boundary = content_type.split("boundary=").nth(1).unwrap_or("").to_string();
+    if boundary.is_empty() {
+        return Err(api_error_response(ApiErrorCode::InvalidRequest, "missing boundary", StatusCode::BAD_REQUEST));
+    }
+
+    let bytes = match hyper::body::to_bytes(req.into_body()).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(api_error_response(ApiErrorCode::InvalidRequest, "invalid body", StatusCode::BAD_REQUEST)),
+    };
+    if bytes.len() > max_bytes {
+        return Err(api_error_response(ApiErrorCode::PayloadTooLarge, "payload too large", StatusCode::PAYLOAD_TOO_LARGE));
+    }
+
+    let boundary_marker = format!("--{boundary}").into_bytes();
+    let mut cursor = 0;
+    while let Some(start) = find_subslice(&bytes[cursor..], &boundary_marker) {
+        let part_start = cursor + start + boundary_marker.len();
+        if bytes.get(part_start..part_start + 2) == Some(b"--") {
+            break;
+        }
+        let mut idx = part_start;
+        if bytes.get(idx..idx + 2) == Some(b"\r\n") {
+            idx += 2;
+        }
+        let header_end = find_subslice(&bytes[idx..], b"\r\n\r\n")
+            .ok_or_else(|| api_error_response(ApiErrorCode::InvalidRequest, "invalid multipart", StatusCode::BAD_REQUEST))?;
+        let headers = &bytes[idx..idx + header_end];
+        let headers_str = String::from_utf8_lossy(headers);
+        let content_start = idx + header_end + 4;
+        let next_boundary = find_subslice(&bytes[content_start..], &boundary_marker)
+            .ok_or_else(|| api_error_response(ApiErrorCode::InvalidRequest, "invalid multipart", StatusCode::BAD_REQUEST))?;
+        let mut content_end = content_start + next_boundary;
+        if bytes.get(content_end - 2..content_end) == Some(b"\r\n") {
+            content_end -= 2;
+        }
+        if headers_str.contains("name=\"file\"") {
+            return Ok(bytes[content_start..content_end].to_vec());
+        }
+        cursor = content_start + next_boundary;
+    }
+
+    Err(api_error_response(ApiErrorCode::InvalidRequest, "missing file", StatusCode::BAD_REQUEST))
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn serve_app(path: &str, state: &HttpServerState) -> Response<Body> {
+    let mut parts = path.trim_start_matches("/apps/").splitn(2, '/');
+    let app_id = match parts.next() {
+        Some(id) if !id.is_empty() => id,
+        _ => return Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap(),
+    };
+    let rest = parts.next().unwrap_or("");
+    if rest.starts_with("api/") {
+        return Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap();
+    }
+
+    let relative = if rest.is_empty() { "ui/index.html".to_string() } else if rest.starts_with("assets/") {
+        let asset_path = format!("ui/{}", rest);
+        if state.apps_dir.join(app_id).join(&asset_path).exists() {
+            asset_path
+        } else {
+            rest.to_string()
+        }
+    } else if rest.ends_with('/') {
+        format!("ui/{}index.html", rest)
+    } else {
+        format!("ui/{}", rest)
+    };
+
+    let app_root = state.apps_dir.join(app_id);
+    let Some(full) = safe_join(&app_root, &relative) else {
+        return Response::builder().status(StatusCode::BAD_REQUEST).body(Body::empty()).unwrap();
+    };
+    if let Ok(bytes) = std::fs::read(&full) {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(bytes))
+            .unwrap();
+    }
+
+    Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap()
+}
+
+fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
+    let candidate = root.join(relative);
+    if candidate.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        return None;
+    }
+    Some(candidate)
+}
+
 fn json_response<T: serde::Serialize>(payload: T) -> Response<Body> {
     let body = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec());
     Response::builder()
@@ -1373,11 +1674,14 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dht::MemoryDht;
 
     async fn test_state() -> HttpServerState {
         let dir = tempfile::tempdir().unwrap();
         let data_dir = dir.path().join("data");
         let log_dir = dir.path().join("logs");
+        let apps_dir = data_dir.join("apps").join("installed");
+        let _ = std::fs::create_dir_all(&apps_dir);
         let settings = default_node_settings(
             data_dir.to_string_lossy().as_ref(),
             log_dir.to_string_lossy().as_ref(),
@@ -1393,12 +1697,14 @@ mod tests {
                 session_timeout_hours: 24,
             },
             identity,
+            dht: Arc::new(MemoryDht::new()),
             started_at: Instant::now(),
             config: HttpServerConfig {
                 metrics_enabled: true,
                 max_request_body_bytes: 1024 * 1024,
                 session_cookie_secure: false,
             },
+            apps_dir,
         }
     }
 

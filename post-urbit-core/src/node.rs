@@ -31,6 +31,7 @@ pub struct PostUrbitNode {
     transport: Arc<QuicTransport>,
     dht: Arc<MemoryDht>,
     admin: AdminState,
+    apps_dir: std::path::PathBuf,
 }
 
 impl PostUrbitNode {
@@ -61,6 +62,7 @@ impl PostUrbitNode {
             log_dir.to_string_lossy().as_ref(),
         );
         let admin = AdminState::load(&config.data_dir, settings).await?;
+        let apps_dir = Path::new(&config.data_dir).join("apps").join("installed");
 
         Ok(Self {
             config,
@@ -68,6 +70,7 @@ impl PostUrbitNode {
             transport,
             dht,
             admin,
+            apps_dir,
         })
     }
 
@@ -90,12 +93,14 @@ impl PostUrbitNode {
             admin: self.admin.clone(),
             auth,
             identity: self.identity.clone(),
+            dht: self.dht.clone(),
             started_at: std::time::Instant::now(),
             config: HttpServerConfig {
                 metrics_enabled: self.config.metrics_enabled,
                 max_request_body_bytes: 100 * 1024 * 1024,
                 session_cookie_secure: false,
             },
+            apps_dir: self.apps_dir.clone(),
         };
         let http_addr = self.config.http_addr;
         let http_handle = tokio::spawn(async move { run_http_server(http_addr, http_state).await });
