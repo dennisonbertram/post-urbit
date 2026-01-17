@@ -121,6 +121,9 @@ pub fn default_node_settings(data_dir: &str, log_dir: &str) -> NodeSettings {
             quiet_hours_start: None,
             quiet_hours_end: None,
         },
+        logging: crate::admin_types::LoggingSettings::default(),
+        metrics: crate::admin_types::MetricsSettings::default(),
+        health: crate::admin_types::HealthSettings::default(),
     }
 }
 

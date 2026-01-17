@@ -258,6 +258,12 @@ pub struct NodeSettings {
     pub privacy: PrivacySettings,
     pub storage: StorageSettings,
     pub notifications: NotificationSettings,
+    #[serde(default)]
+    pub logging: LoggingSettings,
+    #[serde(default)]
+    pub metrics: MetricsSettings,
+    #[serde(default)]
+    pub health: HealthSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +333,62 @@ pub struct NotificationSettings {
     pub sound_enabled: bool,
     pub quiet_hours_start: Option<String>,
     pub quiet_hours_end: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LoggingSettings {
+    pub redact_iids: bool,
+    pub redact_ips: bool,
+    pub redact_message_content: bool,
+}
+
+impl Default for LoggingSettings {
+    fn default() -> Self {
+        Self {
+            redact_iids: true,
+            redact_ips: true,
+            redact_message_content: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MetricsSettings {
+    pub enabled: bool,
+    pub require_auth: bool,
+    pub auth_token_hash: Option<String>,
+}
+
+impl Default for MetricsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            require_auth: false,
+            auth_token_hash: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HealthSettings {
+    pub disk_free_min_bytes: u64,
+    pub memory_max_percent: u8,
+    pub connection_queue_max: u32,
+    pub message_queue_max: u32,
+}
+
+impl Default for HealthSettings {
+    fn default() -> Self {
+        Self {
+            disk_free_min_bytes: 100 * 1024 * 1024,
+            memory_max_percent: 90,
+            connection_queue_max: 1000,
+            message_queue_max: 10000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,7 +8,7 @@ use std::time::Instant;
 use chrono::{DateTime, Duration, Utc};
 use futures::{SinkExt, StreamExt};
 use hyper::{Body, Method, Request, Response, StatusCode};
-use hyper::header::{HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, SET_COOKIE};
+use hyper::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use hyper::service::{make_service_fn, service_fn};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -108,22 +108,43 @@ fn normalize_admin_path(path: &str) -> Cow<'_, str> {
     Cow::Borrowed(path)
 }
 
+fn bearer_token(req: &Request<Body>) -> Option<String> {
+    let value = req.headers().get(AUTHORIZATION)?.to_str().ok()?;
+    let value = value.trim();
+    value.strip_prefix("Bearer ").map(|token| token.trim().to_string())
+}
+
 async fn handle_public(req: &Request<Body>, path: &str, state: &HttpServerState) -> Option<Response<Body>> {
     match (req.method(), path) {
         (&Method::GET, "/health/live") => Some(handle_health_live(state).await),
         (&Method::GET, "/health/ready") => Some(handle_health_ready(state).await),
         (&Method::GET, "/health") => Some(handle_health(state).await),
         (&Method::GET, "/metrics") => {
-            if state.config.metrics_enabled {
-                let payload = metrics::render_metrics(&state.admin, &state.identity, state.started_at).await;
-                Some(Response::builder()
-                    .status(StatusCode::OK)
-                    .header(CONTENT_TYPE, "text/plain; version=0.0.4")
-                    .body(Body::from(payload))
-                    .unwrap())
-            } else {
-                Some(Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap())
+            let metrics_settings = {
+                let data = state.admin.data.lock().await;
+                data.settings.metrics.clone()
+            };
+            if !state.config.metrics_enabled || !metrics_settings.enabled {
+                return Some(Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap());
             }
+            if metrics_settings.require_auth {
+                let token = bearer_token(req);
+                let expected = metrics_settings.auth_token_hash.as_ref();
+                let authorized = token
+                    .as_deref()
+                    .zip(expected)
+                    .map(|(token, expected)| hash_token(token) == *expected)
+                    .unwrap_or(false);
+                if !authorized {
+                    return Some(Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::empty()).unwrap());
+                }
+            }
+            let payload = metrics::render_metrics(&state.admin, &state.identity, state.started_at).await;
+            Some(Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/plain; version=0.0.4")
+                .body(Body::from(payload))
+                .unwrap())
         }
         (&Method::GET, path) if path.starts_with("/apps/") => Some(serve_app(path, state)),
         (&Method::POST, path) if path.starts_with("/apps/") => Some(Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap()),
@@ -2111,13 +2132,18 @@ async fn audit_event(
 async fn handle_health(state: &HttpServerState) -> Response<Body> {
     let identity_doc = state.identity.identity_document().await;
     let iid = state.identity.iid().await;
+    let health_settings = {
+        let data = state.admin.data.lock().await;
+        data.settings.health.clone()
+    };
     let apps_installed = {
         let data = state.admin.data.lock().await;
         data.apps.len() as u64
     };
     let disk_used_bytes = directory_size(&state.admin.data_dir);
     let disk_free_bytes = fs2::available_space(&state.admin.data_dir).unwrap_or(0);
-    let healthy = state.health.is_ready() && !state.health.is_shutting_down();
+    let disk_ok = disk_free_bytes >= health_settings.disk_free_min_bytes;
+    let healthy = state.health.is_ready() && !state.health.is_shutting_down() && disk_ok;
     let payload = json!({
         "status": if healthy { "healthy" } else { "unhealthy" },
         "version": env!("CARGO_PKG_VERSION"),
@@ -2139,9 +2165,10 @@ async fn handle_health(state: &HttpServerState) -> Response<Body> {
                 "sessions_active": 0,
             },
             "storage": {
-                "status": "healthy",
+                "status": if disk_ok { "healthy" } else { "unhealthy" },
                 "disk_used_bytes": disk_used_bytes,
                 "disk_free_bytes": disk_free_bytes,
+                "error": if disk_ok { Value::Null } else { Value::String("disk_full".to_string()) },
             },
             "apps": {
                 "status": "healthy",
@@ -2765,6 +2792,7 @@ mod tests {
         let data_dir = dir.path().join("data");
         let log_dir = dir.path().join("logs");
         let apps_dir = data_dir.join("apps").join("installed");
+        let _ = std::fs::create_dir_all(&data_dir);
         let _ = std::fs::create_dir_all(&apps_dir);
         let settings = default_node_settings(
             data_dir.to_string_lossy().as_ref(),
@@ -2798,6 +2826,10 @@ mod tests {
     async fn health_ok() {
         let state = test_state().await;
         state.health.set_ready(true);
+        {
+            let mut data = state.admin.data.lock().await;
+            data.settings.health.disk_free_min_bytes = 0;
+        }
         let state = Arc::new(state);
         let req = Request::builder().method(Method::GET).uri("/health").body(Body::empty()).unwrap();
         let resp = handle_request(req, state).await;
@@ -2827,6 +2859,39 @@ mod tests {
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains("postnode_uptime_seconds"));
         assert!(body.contains("postnode_info"));
+    }
+
+    #[tokio::test]
+    async fn metrics_auth_rejects_without_token() {
+        let state = test_state().await;
+        {
+            let mut data = state.admin.data.lock().await;
+            data.settings.metrics.require_auth = true;
+            data.settings.metrics.auth_token_hash = Some(hash_token("secret"));
+        }
+        let state = Arc::new(state);
+        let req = Request::builder().method(Method::GET).uri("/metrics").body(Body::empty()).unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn metrics_auth_accepts_with_token() {
+        let state = test_state().await;
+        {
+            let mut data = state.admin.data.lock().await;
+            data.settings.metrics.require_auth = true;
+            data.settings.metrics.auth_token_hash = Some(hash_token("secret"));
+        }
+        let state = Arc::new(state);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/metrics")
+            .header(AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -2887,6 +2952,25 @@ mod tests {
         let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("unhealthy"));
+    }
+
+    #[tokio::test]
+    async fn health_unhealthy_when_disk_below_threshold() {
+        let state = test_state().await;
+        state.health.set_ready(true);
+        {
+            let mut data = state.admin.data.lock().await;
+            data.settings.health.disk_free_min_bytes = u64::MAX;
+        }
+        let state = Arc::new(state);
+        let req = Request::builder().method(Method::GET).uri("/health").body(Body::empty()).unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let storage = value.get("checks").and_then(|v| v.get("storage")).expect("storage");
+        assert_eq!(storage.get("status").and_then(|v| v.as_str()), Some("unhealthy"));
+        assert_eq!(storage.get("error").and_then(|v| v.as_str()), Some("disk_full"));
     }
 
     #[tokio::test]

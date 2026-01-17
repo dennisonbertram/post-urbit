@@ -221,12 +221,17 @@ async fn build_status(
 ) -> NodeStatus {
     let uptime = started_at.elapsed().as_secs();
     let data = admin.data.lock().await;
-    let status = match health {
+    let disk_free_bytes = fs2::available_space(&admin.data_dir).unwrap_or(0);
+    let disk_ok = disk_free_bytes >= data.settings.health.disk_free_min_bytes;
+    let mut status = match health {
         Some(health) if health.is_shutting_down() => "unhealthy",
         Some(health) if health.is_ready() => "healthy",
         Some(_) => "degraded",
         None => "unknown",
     };
+    if !disk_ok {
+        status = "unhealthy";
+    }
     NodeStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: uptime,
@@ -247,7 +252,7 @@ async fn build_status(
         },
         storage: crate::admin_types::StorageStatus {
             data_used_bytes: directory_size(&admin.data_dir),
-            data_free_bytes: fs2::available_space(&admin.data_dir).unwrap_or(0),
+            data_free_bytes: disk_free_bytes,
             messages_count: 0,
             documents_count: 0,
         },

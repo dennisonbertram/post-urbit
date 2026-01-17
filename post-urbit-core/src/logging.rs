@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::admin_state::AdminState;
-use crate::admin_types::LogEntry;
+use crate::admin_types::{LogEntry, LoggingSettings};
 use crate::event_bus::EventBus;
 
 const MAX_LOG_BYTES: u64 = 100 * 1024 * 1024;
@@ -31,24 +31,37 @@ fn redact_ip(value: &str) -> String {
     }
 }
 
-fn redact_value(key: Option<&str>, value: Value) -> Value {
+fn redact_value(key: Option<&str>, value: Value, settings: &LoggingSettings) -> Value {
     match value {
         Value::Object(map) => {
             let mut redacted = serde_json::Map::new();
             for (k, v) in map {
-                redacted.insert(k.clone(), redact_value(Some(&k), v));
+                redacted.insert(k.clone(), redact_value(Some(&k), v, settings));
             }
             Value::Object(redacted)
         }
-        Value::Array(values) => Value::Array(values.into_iter().map(|v| redact_value(key, v)).collect()),
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(|v| redact_value(key, v, settings)).collect())
+        }
         Value::String(value) => {
             if let Some(key) = key {
                 let key = key.to_ascii_lowercase();
-                if key.contains("iid") || key.contains("message_id") || key.contains("messageid") {
+                if settings.redact_iids
+                    && (key.contains("iid")
+                        || key.contains("message_id")
+                        || key.contains("messageid"))
+                {
                     return Value::String(redact_token(&value));
                 }
-                if key.contains("ip") {
+                if settings.redact_ips && key.contains("ip") {
                     return Value::String(redact_ip(&value));
+                }
+                if settings.redact_message_content
+                    && (key.contains("message_content")
+                        || key.contains("body")
+                        || key.contains("content"))
+                {
+                    return Value::String("***".to_string());
                 }
             }
             Value::String(value)
@@ -57,8 +70,8 @@ fn redact_value(key: Option<&str>, value: Value) -> Value {
     }
 }
 
-fn redact_log_fields(fields: Option<Value>) -> Option<Value> {
-    fields.map(|value| redact_value(None, value))
+fn redact_log_fields(fields: Option<Value>, settings: &LoggingSettings) -> Option<Value> {
+    fields.map(|value| redact_value(None, value, settings))
 }
 
 async fn ensure_log_dir(path: &Path) {
@@ -115,6 +128,11 @@ async fn log_dirs(admin: &AdminState) -> (PathBuf, PathBuf) {
     (base, audit)
 }
 
+async fn log_settings(admin: &AdminState) -> LoggingSettings {
+    let data = admin.data.lock().await;
+    data.settings.logging.clone()
+}
+
 pub async fn log_entry(
     admin: &AdminState,
     event_bus: Option<&EventBus>,
@@ -123,12 +141,13 @@ pub async fn log_entry(
     message: &str,
     fields: Option<Value>,
 ) {
+    let settings = log_settings(admin).await;
     let entry = LogEntry {
         timestamp: Utc::now().to_rfc3339(),
         level: level.to_string(),
         target: target.to_string(),
         message: message.to_string(),
-        fields: redact_log_fields(fields),
+        fields: redact_log_fields(fields, &settings),
     };
     admin.append_log(entry.clone(), 1000).await;
     if let Some(bus) = event_bus {
@@ -186,5 +205,35 @@ mod tests {
 
         let audit_path = temp.path().join("logs").join("audit").join("audit.log");
         assert!(audit_path.exists());
+    }
+
+    #[tokio::test]
+    async fn log_entry_allows_redaction_toggle() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = default_node_settings(
+            temp.path().to_str().unwrap(),
+            temp.path().join("logs").to_str().unwrap(),
+        );
+        settings.logging.redact_iids = false;
+        settings.logging.redact_ips = false;
+        settings.logging.redact_message_content = false;
+        let admin = AdminState::load(temp.path(), settings).await.unwrap();
+
+        log_entry(
+            &admin,
+            None,
+            "info",
+            "postnode::admin",
+            "test",
+            Some(json!({"iid": "k5xq7z4mabcdef", "ip_address": "192.168.1.10", "body": "hello"})),
+        )
+        .await;
+
+        let data = admin.data.lock().await;
+        let entry = data.logs.last().expect("log entry");
+        let fields = entry.fields.as_ref().expect("fields");
+        assert_eq!(fields.get("iid").and_then(|v| v.as_str()), Some("k5xq7z4mabcdef"));
+        assert_eq!(fields.get("ip_address").and_then(|v| v.as_str()), Some("192.168.1.10"));
+        assert_eq!(fields.get("body").and_then(|v| v.as_str()), Some("hello"));
     }
 }
