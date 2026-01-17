@@ -5,6 +5,7 @@ use chrono::Utc;
 use rand::RngCore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 use wasmtime::{Caller, Engine, ExternType, Linker, Module, Store};
 
 use crate::error::{PostUrbitError, Result};
@@ -18,6 +19,98 @@ struct StoredValue {
 }
 
 type StorageMap = HashMap<String, HashMap<String, StoredValue>>;
+
+#[derive(Debug, Clone)]
+pub struct ContactSummary {
+    iid: String,
+    name: Option<String>,
+    avatar_hash: Option<String>,
+    last_seen: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppUserContact {
+    iid: String,
+    name: Option<String>,
+    avatar_hash: Option<String>,
+    app_data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct NotificationRecord {
+    id: String,
+    title: String,
+    body: String,
+    icon: Option<String>,
+    sound: bool,
+    created_at: String,
+}
+
+#[derive(Debug, Default)]
+struct NotificationState {
+    notifications: HashMap<String, Vec<NotificationRecord>>,
+    badges: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+struct SyncDocument {
+    id: String,
+    document_type: String,
+    access: DocumentAccess,
+    created_at: String,
+    operations: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct DocumentAccess {
+    owner: String,
+    readers: Vec<String>,
+    writers: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct SyncState {
+    documents: HashMap<String, SyncDocument>,
+}
+
+#[derive(Debug, Default)]
+struct ContactsState {
+    contacts: Vec<ContactSummary>,
+    app_users: Vec<AppUserContact>,
+}
+
+#[derive(Debug, Default)]
+struct MessagingState {
+    outbox: HashMap<String, Vec<OutboundMessage>>,
+    subscriptions: HashMap<String, Vec<SubscriptionRecord>>,
+    groups: HashMap<String, GroupRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct OutboundMessage {
+    id: String,
+    recipient: String,
+    message_type: String,
+    content: Vec<u8>,
+    sent_at: String,
+    group_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SubscriptionRecord {
+    id: String,
+    message_types: Vec<String>,
+    senders: Vec<String>,
+    groups: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GroupRecord {
+    id: String,
+    name: String,
+    members: Vec<String>,
+    created_at: String,
+}
 
 pub struct RuntimeApp {
     pub wasm: Vec<u8>,
@@ -44,6 +137,10 @@ struct HostState {
     installed_at: String,
     capabilities: Vec<String>,
     storage: Option<Arc<Mutex<StorageMap>>>,
+    contacts: Option<Arc<Mutex<ContactsState>>>,
+    notifications: Option<Arc<Mutex<NotificationState>>>,
+    sync_state: Option<Arc<Mutex<SyncState>>>,
+    messaging: Option<Arc<Mutex<MessagingState>>>,
     registry: Option<Arc<CapabilityRegistry>>,
     identity_iid: Option<String>,
     boot_time: Option<std::time::Instant>,
@@ -56,6 +153,10 @@ impl HostState {
         installed_at: String,
         capabilities: Vec<String>,
         storage: Arc<Mutex<StorageMap>>,
+        contacts: Arc<Mutex<ContactsState>>,
+        notifications: Arc<Mutex<NotificationState>>,
+        sync_state: Arc<Mutex<SyncState>>,
+        messaging: Arc<Mutex<MessagingState>>,
         registry: Arc<CapabilityRegistry>,
         identity_iid: Option<String>,
     ) -> Self {
@@ -67,6 +168,10 @@ impl HostState {
             installed_at,
             capabilities,
             storage: Some(storage),
+            contacts: Some(contacts),
+            notifications: Some(notifications),
+            sync_state: Some(sync_state),
+            messaging: Some(messaging),
             registry: Some(registry),
             identity_iid,
             boot_time: Some(std::time::Instant::now()),
@@ -78,6 +183,10 @@ pub struct RuntimeManager {
     engine: Engine,
     apps: HashMap<String, RuntimeApp>,
     storage: Arc<Mutex<StorageMap>>,
+    contacts: Arc<Mutex<ContactsState>>,
+    notifications: Arc<Mutex<NotificationState>>,
+    sync_state: Arc<Mutex<SyncState>>,
+    messaging: Arc<Mutex<MessagingState>>,
     registry: Arc<CapabilityRegistry>,
     identity_iid: Option<String>,
 }
@@ -88,6 +197,10 @@ impl RuntimeManager {
             engine: Engine::default(),
             apps: HashMap::new(),
             storage: Arc::new(Mutex::new(HashMap::new())),
+            contacts: Arc::new(Mutex::new(ContactsState::default())),
+            notifications: Arc::new(Mutex::new(NotificationState::default())),
+            sync_state: Arc::new(Mutex::new(SyncState::default())),
+            messaging: Arc::new(Mutex::new(MessagingState::default())),
             registry: Arc::new(default_registry()),
             identity_iid: None,
         }
@@ -129,6 +242,13 @@ impl RuntimeManager {
         self.identity_iid = Some(iid);
     }
 
+    pub fn set_contacts(&mut self, contacts: Vec<ContactSummary>, app_users: Vec<AppUserContact>) {
+        if let Ok(mut state) = self.contacts.lock() {
+            state.contacts = contacts;
+            state.app_users = app_users;
+        }
+    }
+
     pub fn start(&mut self, app_id: &str) -> Result<()> {
         let app = self
             .apps
@@ -144,6 +264,10 @@ impl RuntimeManager {
                 app.installed_at.clone(),
                 app.capabilities.clone(),
                 self.storage.clone(),
+                self.contacts.clone(),
+                self.notifications.clone(),
+                self.sync_state.clone(),
+                self.messaging.clone(),
                 self.registry.clone(),
                 self.identity_iid.clone(),
             ),
@@ -192,6 +316,16 @@ fn default_registry() -> CapabilityRegistry {
     registry.register("storage.set", "storage:app");
     registry.register("storage.delete", "storage:app");
     registry.register("storage.list", "storage:app");
+    registry.register("messaging.send", "messaging:send");
+    registry.register("messaging.send_group", "messaging:send");
+    registry.register("messaging.subscribe", "messaging:subscribe");
+    registry.register("messaging.create_group", "messaging:group");
+    registry.register("contacts.list", "contacts:read");
+    registry.register("contacts.list_app_users", "contacts:read:limited");
+    registry.register("sync.create_document", "sync:documents");
+    registry.register("sync.apply_operation", "sync:documents");
+    registry.register("notifications.show", "notifications:show");
+    registry.register("notifications.set_badge", "notifications:badge");
     registry.register("system.get_time", "system:time");
     registry.register("system.get_random", "system:random");
     registry.register("system.get_deterministic_random", "");
@@ -283,6 +417,16 @@ fn handle_host_call(
         "storage.set" => storage_set(args, state),
         "storage.delete" => storage_delete(args, state),
         "storage.list" => storage_list(args, state),
+        "messaging.send" => messaging_send(args, state),
+        "messaging.send_group" => messaging_send_group(args, state),
+        "messaging.subscribe" => messaging_subscribe(args, state),
+        "messaging.create_group" => messaging_create_group(args, state),
+        "contacts.list" => contacts_list(args, state),
+        "contacts.list_app_users" => contacts_list_app_users(state),
+        "sync.create_document" => sync_create_document(args, state),
+        "sync.apply_operation" => sync_apply_operation(args, state),
+        "notifications.show" => notifications_show(args, state),
+        "notifications.set_badge" => notifications_set_badge(args, state),
         "system.get_time" => system_get_time(state),
         "system.get_random" => system_get_random(args),
         "system.get_deterministic_random" => system_get_deterministic_random(args, state),
@@ -556,6 +700,420 @@ fn system_get_app_info(state: &HostState) -> ResultEnvelope {
     ]))
 }
 
+fn messaging_send(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let Some(recipient) = map_string_field(&args, "recipient") else {
+        return ResultEnvelope::error("INVALID_REQUEST", "Missing recipient");
+    };
+    let Some(message_type) = map_string_field(&args, "message_type") else {
+        return ResultEnvelope::error("INVALID_MESSAGE_TYPE", "Missing message type");
+    };
+    let Some(content) = map_bytes_field(&args, "content") else {
+        return ResultEnvelope::error("INVALID_REQUEST", "Missing content");
+    };
+    if content.len() > 1_048_576 {
+        return ResultEnvelope::error("MESSAGE_TOO_LARGE", "Message too large");
+    }
+    let id = Uuid::new_v4().to_string();
+    let sent_at = Utc::now().to_rfc3339();
+    if let Some(outbox) = state.messaging.as_ref().and_then(|m| m.lock().ok()) {
+        drop(outbox);
+    }
+    if let Some(messaging) = state.messaging.as_ref() {
+        if let Ok(mut data) = messaging.lock() {
+            data.outbox
+                .entry(state.app_id.clone())
+                .or_default()
+                .push(OutboundMessage {
+                    id: id.clone(),
+                    recipient,
+                    message_type,
+                    content,
+                    sent_at: sent_at.clone(),
+                    group_id: None,
+                });
+        }
+    }
+    ResultEnvelope::ok(cbor_map(vec![
+        (
+            serde_cbor::Value::Text("message_id".to_string()),
+            serde_cbor::Value::Text(id),
+        ),
+        (
+            serde_cbor::Value::Text("sent_at".to_string()),
+            serde_cbor::Value::Text(sent_at),
+        ),
+    ]))
+}
+
+fn messaging_send_group(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let Some(group_id) = map_string_field(&args, "group_id") else {
+        return ResultEnvelope::error("INVALID_REQUEST", "Missing group_id");
+    };
+    let Some(message_type) = map_string_field(&args, "message_type") else {
+        return ResultEnvelope::error("INVALID_MESSAGE_TYPE", "Missing message type");
+    };
+    let Some(content) = map_bytes_field(&args, "content") else {
+        return ResultEnvelope::error("INVALID_REQUEST", "Missing content");
+    };
+    if content.len() > 1_048_576 {
+        return ResultEnvelope::error("MESSAGE_TOO_LARGE", "Message too large");
+    }
+    let id = Uuid::new_v4().to_string();
+    let sent_at = Utc::now().to_rfc3339();
+    if let Some(messaging) = state.messaging.as_ref() {
+        if let Ok(mut data) = messaging.lock() {
+            data.outbox
+                .entry(state.app_id.clone())
+                .or_default()
+                .push(OutboundMessage {
+                    id: id.clone(),
+                    recipient: group_id.clone(),
+                    message_type,
+                    content,
+                    sent_at: sent_at.clone(),
+                    group_id: Some(group_id),
+                });
+        }
+    }
+    ResultEnvelope::ok(cbor_map(vec![
+        (
+            serde_cbor::Value::Text("message_id".to_string()),
+            serde_cbor::Value::Text(id),
+        ),
+        (
+            serde_cbor::Value::Text("sent_at".to_string()),
+            serde_cbor::Value::Text(sent_at),
+        ),
+    ]))
+}
+
+fn messaging_subscribe(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let mut message_types = Vec::new();
+    let mut senders = Vec::new();
+    let mut groups = Vec::new();
+    if let serde_cbor::Value::Map(entries) = &args {
+        for (key, value) in entries {
+            if let serde_cbor::Value::Text(name) = key {
+                if name == "filter" {
+                    if let serde_cbor::Value::Map(filter) = value {
+                        let filter_value = serde_cbor::Value::Map(filter.clone());
+                        message_types = map_array_text_field(&filter_value, "message_types").unwrap_or_default();
+                        senders = map_array_text_field(&filter_value, "senders").unwrap_or_default();
+                        groups = map_array_text_field(&filter_value, "groups").unwrap_or_default();
+                    }
+                }
+            }
+        }
+    }
+    let id = Uuid::new_v4().to_string();
+    if let Some(messaging) = state.messaging.as_ref() {
+        if let Ok(mut data) = messaging.lock() {
+            data.subscriptions
+                .entry(state.app_id.clone())
+                .or_default()
+                .push(SubscriptionRecord {
+                    id: id.clone(),
+                    message_types,
+                    senders,
+                    groups,
+                });
+        }
+    }
+    ResultEnvelope::ok(cbor_map(vec![(
+        serde_cbor::Value::Text("subscription_id".to_string()),
+        serde_cbor::Value::Text(id),
+    )]))
+}
+
+fn messaging_create_group(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let Some(name) = map_string_field(&args, "name") else {
+        return ResultEnvelope::error("INVALID_REQUEST", "Missing name");
+    };
+    if name.len() > 100 {
+        return ResultEnvelope::error("NAME_TOO_LONG", "Group name too long");
+    }
+    let members = map_array_text_field(&args, "members").unwrap_or_default();
+    let id = Uuid::new_v4().to_string();
+    let created_at = Utc::now().to_rfc3339();
+    if let Some(messaging) = state.messaging.as_ref() {
+        if let Ok(mut data) = messaging.lock() {
+            data.groups.insert(
+                id.clone(),
+                GroupRecord {
+                    id: id.clone(),
+                    name: name.clone(),
+                    members,
+                    created_at: created_at.clone(),
+                },
+            );
+        }
+    }
+    ResultEnvelope::ok(cbor_map(vec![
+        (
+            serde_cbor::Value::Text("group_id".to_string()),
+            serde_cbor::Value::Text(id),
+        ),
+        (
+            serde_cbor::Value::Text("created_at".to_string()),
+            serde_cbor::Value::Text(created_at),
+        ),
+    ]))
+}
+
+fn contacts_list(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let cursor = map_string_field(&args, "cursor");
+    let limit = map_u64_field(&args, "limit").unwrap_or(100).min(1000) as usize;
+    let contacts_state = match state.contacts.as_ref().and_then(|c| c.lock().ok()) {
+        Some(state) => state,
+        None => return ResultEnvelope::error("NOT_AVAILABLE", "Contacts unavailable"),
+    };
+    let mut contacts = contacts_state.contacts.clone();
+    contacts.sort_by(|a, b| a.iid.cmp(&b.iid));
+    if let Some(cursor) = cursor {
+        contacts.retain(|contact| contact.iid > cursor);
+    }
+    let has_more = contacts.len() > limit;
+    let sliced = contacts.into_iter().take(limit).collect::<Vec<_>>();
+    let next_cursor = if has_more { sliced.last().map(|c| c.iid.clone()) } else { None };
+    let list = sliced
+        .into_iter()
+        .map(|contact| {
+            let mut entries = vec![
+                (
+                    serde_cbor::Value::Text("iid".to_string()),
+                    serde_cbor::Value::Text(contact.iid),
+                ),
+            ];
+            if let Some(name) = contact.name {
+                entries.push((
+                    serde_cbor::Value::Text("name".to_string()),
+                    serde_cbor::Value::Text(name),
+                ));
+            }
+            if let Some(avatar) = contact.avatar_hash {
+                entries.push((
+                    serde_cbor::Value::Text("avatar_hash".to_string()),
+                    serde_cbor::Value::Text(avatar),
+                ));
+            }
+            if let Some(last_seen) = contact.last_seen {
+                entries.push((
+                    serde_cbor::Value::Text("last_seen".to_string()),
+                    serde_cbor::Value::Text(last_seen),
+                ));
+            }
+            cbor_map(entries)
+        })
+        .collect();
+    ResultEnvelope::ok(cbor_map(vec![
+        (
+            serde_cbor::Value::Text("contacts".to_string()),
+            serde_cbor::Value::Array(list),
+        ),
+        (
+            serde_cbor::Value::Text("cursor".to_string()),
+            next_cursor
+                .map(serde_cbor::Value::Text)
+                .unwrap_or(serde_cbor::Value::Null),
+        ),
+        (
+            serde_cbor::Value::Text("has_more".to_string()),
+            serde_cbor::Value::Bool(has_more),
+        ),
+    ]))
+}
+
+fn contacts_list_app_users(state: &mut HostState) -> ResultEnvelope {
+    let contacts_state = match state.contacts.as_ref().and_then(|c| c.lock().ok()) {
+        Some(state) => state,
+        None => return ResultEnvelope::error("NOT_AVAILABLE", "Contacts unavailable"),
+    };
+    let list = contacts_state
+        .app_users
+        .iter()
+        .map(|contact| {
+            let mut entries = vec![
+                (
+                    serde_cbor::Value::Text("iid".to_string()),
+                    serde_cbor::Value::Text(contact.iid.clone()),
+                ),
+            ];
+            if let Some(name) = &contact.name {
+                entries.push((
+                    serde_cbor::Value::Text("name".to_string()),
+                    serde_cbor::Value::Text(name.clone()),
+                ));
+            }
+            if let Some(avatar) = &contact.avatar_hash {
+                entries.push((
+                    serde_cbor::Value::Text("avatar_hash".to_string()),
+                    serde_cbor::Value::Text(avatar.clone()),
+                ));
+            }
+            if let Some(app_data) = &contact.app_data {
+                entries.push((
+                    serde_cbor::Value::Text("app_data".to_string()),
+                    serde_cbor::Value::Bytes(app_data.clone()),
+                ));
+            }
+            cbor_map(entries)
+        })
+        .collect();
+    ResultEnvelope::ok(cbor_map(vec![(
+        serde_cbor::Value::Text("contacts".to_string()),
+        serde_cbor::Value::Array(list),
+    )]))
+}
+
+fn sync_create_document(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let Some(document_type) = map_string_field(&args, "document_type") else {
+        return ResultEnvelope::error("INVALID_STATE", "Missing document_type");
+    };
+    let access = match map_access_field(&args, "access") {
+        Some(access) => access,
+        None => return ResultEnvelope::error("INVALID_STATE", "Missing access"),
+    };
+    let id = format!("{:x}", Sha256::digest(format!("{}:{}:{}", state.app_id, document_type, Uuid::new_v4()).as_bytes()));
+    let created_at = Utc::now().to_rfc3339();
+    if let Some(sync_state) = state.sync_state.as_ref() {
+        if let Ok(mut data) = sync_state.lock() {
+            data.documents.insert(
+                id.clone(),
+                SyncDocument {
+                    id: id.clone(),
+                    document_type,
+                    access,
+                    created_at: created_at.clone(),
+                    operations: Vec::new(),
+                },
+            );
+        }
+    }
+    ResultEnvelope::ok(cbor_map(vec![
+        (
+            serde_cbor::Value::Text("document_id".to_string()),
+            serde_cbor::Value::Text(id),
+        ),
+        (
+            serde_cbor::Value::Text("created_at".to_string()),
+            serde_cbor::Value::Text(created_at),
+        ),
+    ]))
+}
+
+fn sync_apply_operation(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let Some(document_id) = map_string_field(&args, "document_id") else {
+        return ResultEnvelope::error("DOCUMENT_NOT_FOUND", "Missing document_id");
+    };
+    let Some(operation) = map_bytes_field(&args, "operation") else {
+        return ResultEnvelope::error("INVALID_OPERATION", "Missing operation");
+    };
+    let Some(sync_state) = state.sync_state.as_ref() else {
+        return ResultEnvelope::error("DOCUMENT_NOT_FOUND", "Sync unavailable");
+    };
+    let mut data = match sync_state.lock() {
+        Ok(data) => data,
+        Err(_) => return ResultEnvelope::error("DOCUMENT_NOT_FOUND", "Sync unavailable"),
+    };
+    let doc = match data.documents.get_mut(&document_id) {
+        Some(doc) => doc,
+        None => return ResultEnvelope::error("DOCUMENT_NOT_FOUND", "Document not found"),
+    };
+    if let Some(iid) = state.identity_iid.as_ref() {
+        if !doc.access.writers.contains(iid) && doc.access.owner != *iid {
+            return ResultEnvelope::error("ACCESS_DENIED", "Access denied");
+        }
+    }
+    doc.operations.push(operation);
+    let op_id = format!("{:x}", Sha256::digest(Uuid::new_v4().as_bytes()));
+    let applied_at = Utc::now().to_rfc3339();
+    ResultEnvelope::ok(cbor_map(vec![
+        (
+            serde_cbor::Value::Text("operation_id".to_string()),
+            serde_cbor::Value::Text(op_id),
+        ),
+        (
+            serde_cbor::Value::Text("applied_at".to_string()),
+            serde_cbor::Value::Text(applied_at),
+        ),
+    ]))
+}
+
+fn notifications_show(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let Some(title) = map_string_field(&args, "title") else {
+        return ResultEnvelope::error("INVALID_REQUEST", "Missing title");
+    };
+    let Some(body) = map_string_field(&args, "body") else {
+        return ResultEnvelope::error("INVALID_REQUEST", "Missing body");
+    };
+    if title.len() > 100 {
+        return ResultEnvelope::error("TITLE_TOO_LONG", "Title too long");
+    }
+    if body.len() > 500 {
+        return ResultEnvelope::error("BODY_TOO_LONG", "Body too long");
+    }
+    let id = map_string_field(&args, "id").unwrap_or_else(|| Uuid::new_v4().to_string());
+    let icon = map_string_field(&args, "icon");
+    let sound = map_bool_field(&args, "sound").unwrap_or(false);
+    if let Some(notifications) = state.notifications.as_ref() {
+        if let Ok(mut data) = notifications.lock() {
+            data.notifications
+                .entry(state.app_id.clone())
+                .or_default()
+                .push(NotificationRecord {
+                    id: id.clone(),
+                    title,
+                    body,
+                    icon,
+                    sound,
+                    created_at: Utc::now().to_rfc3339(),
+                });
+        }
+    }
+    ResultEnvelope::ok(cbor_map(vec![(
+        serde_cbor::Value::Text("notification_id".to_string()),
+        serde_cbor::Value::Text(id),
+    )]))
+}
+
+fn notifications_set_badge(args: serde_cbor::Value, state: &mut HostState) -> ResultEnvelope {
+    let Some(count) = map_u64_field(&args, "count") else {
+        return ResultEnvelope::error("INVALID_REQUEST", "Missing count");
+    };
+    if let Some(notifications) = state.notifications.as_ref() {
+        if let Ok(mut data) = notifications.lock() {
+            data.badges.insert(state.app_id.clone(), count);
+        }
+    }
+    ResultEnvelope::ok(cbor_map(Vec::new()))
+}
+
+fn map_bool_field(value: &serde_cbor::Value, key: &str) -> Option<bool> {
+    let serde_cbor::Value::Map(entries) = value else {
+        return None;
+    };
+    entries.iter().find_map(|(k, v)| match (k, v) {
+        (serde_cbor::Value::Text(name), serde_cbor::Value::Bool(value)) if name == key => {
+            Some(*value)
+        }
+        _ => None,
+    })
+}
+
+fn map_access_field(value: &serde_cbor::Value, key: &str) -> Option<DocumentAccess> {
+    let serde_cbor::Value::Map(entries) = value else {
+        return None;
+    };
+    let access_value = entries.iter().find_map(|(k, v)| match (k, v) {
+        (serde_cbor::Value::Text(name), value) if name == key => Some(value.clone()),
+        _ => None,
+    })?;
+    let owner = map_string_field(&access_value, "owner")?;
+    let readers = map_array_text_field(&access_value, "readers").unwrap_or_default();
+    let writers = map_array_text_field(&access_value, "writers").unwrap_or_default();
+    Some(DocumentAccess { owner, readers, writers })
+}
+
 fn map_string_field(value: &serde_cbor::Value, key: &str) -> Option<String> {
     let serde_cbor::Value::Map(entries) = value else {
         return None;
@@ -591,6 +1149,24 @@ fn map_u64_field(value: &serde_cbor::Value, key: &str) -> Option<u64> {
             } else {
                 None
             }
+        }
+        _ => None,
+    })
+}
+
+fn map_array_text_field(value: &serde_cbor::Value, key: &str) -> Option<Vec<String>> {
+    let serde_cbor::Value::Map(entries) = value else {
+        return None;
+    };
+    entries.iter().find_map(|(k, v)| match (k, v) {
+        (serde_cbor::Value::Text(name), serde_cbor::Value::Array(items)) if name == key => {
+            let mut out = Vec::new();
+            for item in items {
+                if let serde_cbor::Value::Text(text) = item {
+                    out.push(text.clone());
+                }
+            }
+            Some(out)
         }
         _ => None,
     })
@@ -832,12 +1408,16 @@ mod tests {
             Utc::now().to_rfc3339(),
             caps,
             Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(ContactsState::default())),
+            Arc::new(Mutex::new(NotificationState::default())),
+            Arc::new(Mutex::new(SyncState::default())),
+            Arc::new(Mutex::new(MessagingState::default())),
             Arc::new(default_registry()),
             Some("iid-test".to_string()),
         )
     }
 
-    fn map(entries: Vec<(&str, CborValue)>) -> CborValue {
+    fn cbor_map_test(entries: Vec<(&str, CborValue)>) -> CborValue {
         let mut map = BTreeMap::new();
         for (key, value) in entries {
             map.insert(CborValue::Text(key.to_string()), value);
@@ -848,14 +1428,14 @@ mod tests {
     #[test]
     fn host_storage_set_get_round_trip() {
         let mut state = build_state(vec!["storage:app".to_string()]);
-        let set_args = map(vec![
+        let set_args = cbor_map_test(vec![
             ("key", CborValue::Text("key".to_string())),
             ("value", CborValue::Bytes(b"hello".to_vec())),
         ]);
         let set_result = handle_host_call("storage.set", set_args, &mut state);
         assert!(set_result.ok);
 
-        let get_args = map(vec![("key", CborValue::Text("key".to_string()))]);
+        let get_args = cbor_map_test(vec![("key", CborValue::Text("key".to_string()))]);
         let get_result = handle_host_call("storage.get", get_args, &mut state);
         assert!(get_result.ok);
         let Some(CborValue::Map(map)) = get_result.value else {
@@ -871,7 +1451,7 @@ mod tests {
     #[test]
     fn host_storage_denies_without_capability() {
         let mut state = build_state(Vec::new());
-        let args = map(vec![("key", CborValue::Text("key".to_string()))]);
+        let args = cbor_map_test(vec![("key", CborValue::Text("key".to_string()))]);
         let result = handle_host_call("storage.get", args, &mut state);
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
@@ -880,7 +1460,7 @@ mod tests {
     #[test]
     fn host_system_random_generates_bytes() {
         let mut state = build_state(vec!["system:random".to_string()]);
-        let args = map(vec![("length", CborValue::Integer(16))]);
+        let args = cbor_map_test(vec![("length", CborValue::Integer(16))]);
         let result = handle_host_call("system.get_random", args, &mut state);
         assert!(result.ok);
         let Some(CborValue::Map(map)) = result.value else {
@@ -891,5 +1471,87 @@ mod tests {
             _ => None,
         });
         assert_eq!(bytes_len, Some(16));
+    }
+
+    #[test]
+    fn host_contacts_list_returns_entries() {
+        let contacts_state = Arc::new(Mutex::new(ContactsState {
+            contacts: vec![ContactSummary {
+                iid: "iid-a".to_string(),
+                name: Some("Alice".to_string()),
+                avatar_hash: None,
+                last_seen: None,
+            }],
+            app_users: Vec::new(),
+        }));
+        let mut state = HostState::new(
+            "app.test".to_string(),
+            "1.0.0".to_string(),
+            Utc::now().to_rfc3339(),
+            vec!["contacts:read".to_string()],
+            Arc::new(Mutex::new(HashMap::new())),
+            contacts_state,
+            Arc::new(Mutex::new(NotificationState::default())),
+            Arc::new(Mutex::new(SyncState::default())),
+            Arc::new(Mutex::new(MessagingState::default())),
+            Arc::new(default_registry()),
+            Some("iid-test".to_string()),
+        );
+        let result = handle_host_call("contacts.list", cbor_map_test(Vec::new()), &mut state);
+        assert!(result.ok);
+    }
+
+    #[test]
+    fn host_notifications_show_returns_id() {
+        let mut state = build_state(vec!["notifications:show".to_string()]);
+        let args = cbor_map_test(vec![
+            ("title", CborValue::Text("Hi".to_string())),
+            ("body", CborValue::Text("There".to_string())),
+        ]);
+        let result = handle_host_call("notifications.show", args, &mut state);
+        assert!(result.ok);
+        let Some(CborValue::Map(map)) = result.value else {
+            panic!("missing value");
+        };
+        let id = map.iter().find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(name), CborValue::Text(value)) if name == "notification_id" => {
+                Some(value.clone())
+            }
+            _ => None,
+        });
+        assert!(id.is_some());
+    }
+
+    #[test]
+    fn host_sync_create_and_apply_operation() {
+        let mut state = build_state(vec!["sync:documents".to_string()]);
+        let access = cbor_map_test(vec![
+            ("owner", CborValue::Text("iid-test".to_string())),
+            ("readers", CborValue::Array(Vec::new())),
+            ("writers", CborValue::Array(vec![CborValue::Text("iid-test".to_string())])),
+        ]);
+        let create_args = cbor_map_test(vec![
+            ("document_type", CborValue::Text("note".to_string())),
+            ("access", access),
+        ]);
+        let create_result = handle_host_call("sync.create_document", create_args, &mut state);
+        assert!(create_result.ok);
+        let Some(CborValue::Map(map)) = create_result.value else {
+            panic!("missing value");
+        };
+        let doc_id = map.iter().find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(name), CborValue::Text(value)) if name == "document_id" => {
+                Some(value.clone())
+            }
+            _ => None,
+        });
+        let doc_id = doc_id.expect("doc id");
+
+        let apply_args = cbor_map_test(vec![
+            ("document_id", CborValue::Text(doc_id)),
+            ("operation", CborValue::Bytes(b"op".to_vec())),
+        ]);
+        let apply_result = handle_host_call("sync.apply_operation", apply_args, &mut state);
+        assert!(apply_result.ok);
     }
 }
