@@ -1,7 +1,16 @@
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey, Signer};
+use sha2::{Digest, Sha256};
+
+use crate::encoding::{base64_decode, base64_encode, validate_crockford_base32_lower};
 use crate::error::{PostUrbitError, Result};
 
 const PURL_MAGIC: &[u8; 4] = b"PURL";
 const PURL_VERSION: u8 = 1;
+const RELAY_ALLOC_DOMAIN: &[u8] = b"post-urbit-relay-alloc-v1";
+const RELAY_REBIND_DOMAIN: &[u8] = b"post-urbit-rebind-v1";
 
 #[derive(Debug, Clone)]
 pub struct PurlPacket {
@@ -64,6 +73,156 @@ pub fn decode_purl(bytes: &[u8]) -> Result<PurlPacket> {
     })
 }
 
+pub fn sign_relay_allocation(
+    signing_key: &SigningKey,
+    iid: &str,
+    lifetime: u32,
+    timestamp: &str,
+    nonce: &[u8; 16],
+) -> Result<String> {
+    let payload = relay_allocation_signature_input(iid, lifetime, timestamp, nonce)?;
+    let digest = Sha256::digest(&payload);
+    let signature: Signature = signing_key.sign(&digest);
+    Ok(base64_encode(signature.to_bytes().as_slice()))
+}
+
+pub fn verify_relay_allocation(
+    signature_base64: &str,
+    signing_key_base64: &str,
+    iid: &str,
+    lifetime: u32,
+    timestamp: &str,
+    nonce: &[u8; 16],
+) -> Result<()> {
+    let payload = relay_allocation_signature_input(iid, lifetime, timestamp, nonce)?;
+    let digest = Sha256::digest(&payload);
+    let signature_bytes = base64_decode(signature_base64)?;
+    if signature_bytes.len() != 64 {
+        return Err(PostUrbitError::InvalidInput("signature length"));
+    }
+    let signature = Signature::from_bytes(
+        signature_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("signature length"))?,
+    );
+    let key_bytes = base64_decode(signing_key_base64)?;
+    if key_bytes.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("signing key length"));
+    }
+    let verifying_key = VerifyingKey::from_bytes(
+        key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("signing key length"))?,
+    )
+    .map_err(|_| PostUrbitError::InvalidInput("signing key parse"))?;
+    verifying_key
+        .verify_strict(&digest, &signature)
+        .map_err(|_| PostUrbitError::Crypto("relay allocation signature invalid"))
+}
+
+pub fn sign_relay_rebind(
+    signing_key: &SigningKey,
+    allocation_id: &str,
+    token_base64url: &str,
+    timestamp: &str,
+) -> Result<String> {
+    let payload = relay_rebind_signature_input(allocation_id, token_base64url, timestamp)?;
+    let digest = Sha256::digest(&payload);
+    let signature: Signature = signing_key.sign(&digest);
+    Ok(base64_encode(signature.to_bytes().as_slice()))
+}
+
+pub fn verify_relay_rebind(
+    signature_base64: &str,
+    signing_key_base64: &str,
+    allocation_id: &str,
+    token_base64url: &str,
+    timestamp: &str,
+) -> Result<()> {
+    let payload = relay_rebind_signature_input(allocation_id, token_base64url, timestamp)?;
+    let digest = Sha256::digest(&payload);
+    let signature_bytes = base64_decode(signature_base64)?;
+    if signature_bytes.len() != 64 {
+        return Err(PostUrbitError::InvalidInput("signature length"));
+    }
+    let signature = Signature::from_bytes(
+        signature_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("signature length"))?,
+    );
+    let key_bytes = base64_decode(signing_key_base64)?;
+    if key_bytes.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("signing key length"));
+    }
+    let verifying_key = VerifyingKey::from_bytes(
+        key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("signing key length"))?,
+    )
+    .map_err(|_| PostUrbitError::InvalidInput("signing key parse"))?;
+    verifying_key
+        .verify_strict(&digest, &signature)
+        .map_err(|_| PostUrbitError::Crypto("relay rebind signature invalid"))
+}
+
+fn relay_allocation_signature_input(
+    iid: &str,
+    lifetime: u32,
+    timestamp: &str,
+    nonce: &[u8; 16],
+) -> Result<Vec<u8>> {
+    validate_crockford_base32_lower(iid)?;
+    validate_timestamp(timestamp)?;
+    let mut out = Vec::with_capacity(
+        RELAY_ALLOC_DOMAIN.len() + iid.len() + 4 + timestamp.len() + nonce.len(),
+    );
+    out.extend_from_slice(RELAY_ALLOC_DOMAIN);
+    out.extend_from_slice(iid.as_bytes());
+    out.extend_from_slice(&lifetime.to_be_bytes());
+    out.extend_from_slice(timestamp.as_bytes());
+    out.extend_from_slice(nonce);
+    Ok(out)
+}
+
+fn relay_rebind_signature_input(
+    allocation_id: &str,
+    token_base64url: &str,
+    timestamp: &str,
+) -> Result<Vec<u8>> {
+    validate_timestamp(timestamp)?;
+    let token = URL_SAFE_NO_PAD
+        .decode(token_base64url.as_bytes())
+        .map_err(|_| PostUrbitError::InvalidEncoding("token base64url"))?;
+    if token.len() != 16 {
+        return Err(PostUrbitError::InvalidInput("token length"));
+    }
+    let mut out = Vec::with_capacity(
+        RELAY_REBIND_DOMAIN.len() + allocation_id.len() + token.len() + timestamp.len(),
+    );
+    out.extend_from_slice(RELAY_REBIND_DOMAIN);
+    out.extend_from_slice(allocation_id.as_bytes());
+    out.extend_from_slice(&token);
+    out.extend_from_slice(timestamp.as_bytes());
+    Ok(out)
+}
+
+fn validate_timestamp(value: &str) -> Result<()> {
+    if value.contains('.') {
+        return Err(PostUrbitError::InvalidInput("timestamp fractional"));
+    }
+    if !value.ends_with('Z') {
+        return Err(PostUrbitError::InvalidInput("timestamp utc"));
+    }
+    let _: DateTime<Utc> = value
+        .parse()
+        .map_err(|_| PostUrbitError::InvalidInput("timestamp parse"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +245,53 @@ mod tests {
     fn purl_rejects_bad_magic() {
         let err = decode_purl(b"PURX").unwrap_err();
         assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn relay_allocation_signature_round_trip() {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let iid = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let nonce = [7u8; 16];
+        let signature = sign_relay_allocation(
+            &signing_key,
+            iid,
+            3600,
+            "2025-01-15T00:00:00Z",
+            &nonce,
+        )
+        .unwrap();
+        let key_b64 = base64_encode(signing_key.verifying_key().as_bytes());
+        verify_relay_allocation(
+            &signature,
+            &key_b64,
+            iid,
+            3600,
+            "2025-01-15T00:00:00Z",
+            &nonce,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn relay_rebind_signature_round_trip() {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let allocation_id = "alloc-123";
+        let token = URL_SAFE_NO_PAD.encode([9u8; 16]);
+        let signature = sign_relay_rebind(
+            &signing_key,
+            allocation_id,
+            &token,
+            "2025-01-15T00:00:00Z",
+        )
+        .unwrap();
+        let key_b64 = base64_encode(signing_key.verifying_key().as_bytes());
+        verify_relay_rebind(
+            &signature,
+            &key_b64,
+            allocation_id,
+            &token,
+            "2025-01-15T00:00:00Z",
+        )
+        .unwrap();
     }
 }
