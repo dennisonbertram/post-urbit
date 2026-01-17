@@ -117,4 +117,16 @@ mod tests {
         let err = restore_backup(&backup, "wrong", restore_dir.path()).unwrap_err();
         assert!(matches!(err, PostUrbitError::Crypto(_)));
     }
+
+    #[test]
+    fn backup_tamper_detects() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = create_backup(dir.path(), "password").unwrap();
+        let mut tampered = backup.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        let restore_dir = tempfile::tempdir().unwrap();
+        let err = restore_backup(&tampered, "password", restore_dir.path()).unwrap_err();
+        assert!(matches!(err, PostUrbitError::Crypto(_)));
+    }
 }

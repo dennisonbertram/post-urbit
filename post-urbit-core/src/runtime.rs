@@ -16,6 +16,7 @@ pub struct Manifest {
     pub app: AppMetadata,
     pub runtime: RuntimeConfig,
     pub capabilities: CapabilitiesConfig,
+    pub dependencies: DependenciesConfig,
     pub files: FilesConfig,
 }
 
@@ -66,6 +67,13 @@ pub struct CapabilitiesConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependenciesConfig {
+    pub node_version: Option<String>,
+    pub api_version: String,
+    pub apps: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesConfig {
     pub hashes: HashMap<String, String>,
     pub total_size: u64,
@@ -88,12 +96,38 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
         return Err(PostUrbitError::InvalidInput("manifest version"));
     }
     validate_app_id(&manifest.app.id)?;
+    if manifest.app.name.trim().is_empty() {
+        return Err(PostUrbitError::InvalidInput("app name"));
+    }
+    if manifest.app.description.trim().is_empty() {
+        return Err(PostUrbitError::InvalidInput("app description"));
+    }
     validate_semver(&manifest.app.version)?;
+    if manifest.app.author.name.trim().is_empty() {
+        return Err(PostUrbitError::InvalidInput("author name"));
+    }
+    if manifest.app.license.trim().is_empty() {
+        return Err(PostUrbitError::InvalidInput("app license"));
+    }
     if !manifest.runtime.entry.ends_with(".wasm") {
         return Err(PostUrbitError::InvalidInput("runtime entry"));
     }
-    if manifest.capabilities.required.is_empty() {
-        return Err(PostUrbitError::InvalidInput("capabilities required"));
+    if manifest.dependencies.api_version != "1" {
+        return Err(PostUrbitError::InvalidInput("api version"));
+    }
+    for cap in &manifest.capabilities.required {
+        if cap.trim().is_empty() {
+            return Err(PostUrbitError::InvalidInput("capability format"));
+        }
+    }
+    if !manifest.files.hashes.contains_key(&manifest.runtime.entry) {
+        return Err(PostUrbitError::InvalidInput("entry hash missing"));
+    }
+    for (path, hash) in &manifest.files.hashes {
+        if path.trim().is_empty() {
+            return Err(PostUrbitError::InvalidInput("file path"));
+        }
+        validate_sha256_hash(hash)?;
     }
     Ok(())
 }
@@ -293,6 +327,16 @@ fn validate_semver(version: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_sha256_hash(value: &str) -> Result<()> {
+    let Some(hex_part) = value.strip_prefix("sha256:") else {
+        return Err(PostUrbitError::InvalidInput("hash format"));
+    };
+    if hex_part.len() != 64 || hex_part.chars().any(|ch| !ch.is_ascii_hexdigit()) {
+        return Err(PostUrbitError::InvalidInput("hash format"));
+    }
+    Ok(())
+}
+
 pub struct CapabilityRegistry {
     method_to_cap: HashMap<String, String>,
 }
@@ -403,12 +447,21 @@ mod tests {
                 fuel: None,
             },
             capabilities: CapabilitiesConfig {
-                required: vec!["storage:app".to_string()],
+                required: Vec::new(),
                 optional: None,
                 reasons: None,
             },
+            dependencies: DependenciesConfig {
+                node_version: None,
+                api_version: "1".to_string(),
+                apps: None,
+            },
             files: FilesConfig {
-                hashes: HashMap::new(),
+                hashes: HashMap::from([(
+                    "main.wasm".to_string(),
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_string(),
+                )]),
                 total_size: 0,
             },
         }
@@ -418,6 +471,30 @@ mod tests {
     fn manifest_validation_ok() {
         let manifest = sample_manifest();
         validate_manifest(&manifest).unwrap();
+    }
+
+    #[test]
+    fn manifest_requires_entry_hash() {
+        let mut manifest = sample_manifest();
+        manifest.files.hashes.clear();
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn manifest_requires_api_version() {
+        let mut manifest = sample_manifest();
+        manifest.dependencies.api_version = "2".to_string();
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn manifest_rejects_bad_hash() {
+        let mut manifest = sample_manifest();
+        manifest.files.hashes.insert("main.wasm".to_string(), "sha256:bad".to_string());
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
     }
 
     #[test]

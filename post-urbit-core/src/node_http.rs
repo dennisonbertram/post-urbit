@@ -160,4 +160,55 @@ mod tests {
         let resp = handle_request(req, cfg).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
+
+    #[tokio::test]
+    async fn admin_allows_bearer() {
+        let cfg = Arc::new(HttpConfig {
+            metrics_enabled: true,
+            admin_token: Some("token".to_string()),
+            csrf_token: None,
+        });
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/admin/apps")
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, cfg).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_allows_session_cookie() {
+        let cfg = Arc::new(HttpConfig {
+            metrics_enabled: true,
+            admin_token: Some("token".to_string()),
+            csrf_token: None,
+        });
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/admin/apps")
+            .header(hyper::header::COOKIE, "session=token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, cfg).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_rejects_missing_token() {
+        let cfg = Arc::new(HttpConfig {
+            metrics_enabled: true,
+            admin_token: Some("token".to_string()),
+            csrf_token: Some("csrf".to_string()),
+        });
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/admin/apps/install")
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, cfg).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
 }

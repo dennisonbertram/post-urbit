@@ -28,6 +28,7 @@ hmac = "0.12"
 hkdf = "0.12"
 url = "2.5"
 uuid = { version = "1", features = ["v4"] }
+wasmtime = "15.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -53,3 +54,4 @@ clap = { version = "4.0", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3.0"
+wat = "1.0"
