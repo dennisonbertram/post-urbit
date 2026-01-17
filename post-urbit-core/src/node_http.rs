@@ -1604,6 +1604,9 @@ async fn handle_settings_section(path: &str, state: Arc<HttpServerState>) -> Res
         "privacy" => serde_json::to_value(&data.settings.privacy).ok(),
         "storage" => serde_json::to_value(&data.settings.storage).ok(),
         "notifications" => serde_json::to_value(&data.settings.notifications).ok(),
+        "logging" => serde_json::to_value(&data.settings.logging).ok(),
+        "metrics" => serde_json::to_value(&data.settings.metrics).ok(),
+        "health" => serde_json::to_value(&data.settings.health).ok(),
         _ => None,
     };
     if let Some(value) = value {
@@ -1665,6 +1668,9 @@ async fn handle_reset_settings(req: Request<Body>, state: Arc<HttpServerState>) 
         Some("privacy") => data.settings.privacy = defaults.privacy,
         Some("storage") => data.settings.storage = defaults.storage,
         Some("notifications") => data.settings.notifications = defaults.notifications,
+        Some("logging") => data.settings.logging = defaults.logging,
+        Some("metrics") => data.settings.metrics = defaults.metrics,
+        Some("health") => data.settings.health = defaults.health,
         None => data.settings = defaults,
         _ => {
             return api_error_response(ApiErrorCode::NotFound, "settings section not found", StatusCode::NOT_FOUND);
@@ -3122,6 +3128,45 @@ mod tests {
             .iter()
             .any(|entry| entry.target == "postnode::audit" && entry.message == "config_change");
         assert!(has_audit);
+    }
+
+    #[tokio::test]
+    async fn settings_section_includes_observability() {
+        let mut state = test_state().await;
+        state.auth.admin_token_hash = Some(hash_token("token"));
+        let state = Arc::new(state);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/admin/v1/settings/logging")
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value.get("redact_iids").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[tokio::test]
+    async fn reset_settings_supports_logging_section() {
+        let mut state = test_state().await;
+        state.auth.admin_token_hash = Some(hash_token("token"));
+        {
+            let mut data = state.admin.data.lock().await;
+            data.settings.logging.redact_iids = false;
+        }
+        let state = Arc::new(state);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/admin/v1/settings/reset")
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::from(r#"{"section":"logging"}"#))
+            .unwrap();
+        let resp = handle_request(req, state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = state.admin.data.lock().await;
+        assert!(data.settings.logging.redact_iids);
     }
 
     #[tokio::test]
