@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin_types::NodeSettings;
 use crate::error::{PostUrbitError, Result};
+use crate::node::NodeConfig;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DaemonConfig {
@@ -58,6 +59,25 @@ pub fn load_config(path: Option<&str>, overrides: HashMap<String, String>) -> Re
     settings
         .try_deserialize()
         .map_err(|_| PostUrbitError::InvalidInput("config deserialize"))
+}
+
+pub fn build_node_config(config: DaemonConfig, bootstrap_peers: Vec<String>) -> Result<NodeConfig> {
+    let http_addr = config
+        .http_addr
+        .unwrap_or_else(|| "127.0.0.1:8080".to_string())
+        .parse()
+        .map_err(|_| PostUrbitError::InvalidInput("http addr"))?;
+    Ok(NodeConfig {
+        port: config.port,
+        data_dir: config.data_dir,
+        bootstrap_peers,
+        http_addr,
+        metrics_enabled: config.metrics_enabled,
+        admin_password_hash: config.admin_password_hash,
+        admin_token_hash: config.admin_token_hash,
+        session_secret: config.session_secret,
+        session_timeout_hours: config.session_timeout_hours,
+    })
 }
 
 pub fn default_node_settings(data_dir: &str, log_dir: &str) -> NodeSettings {
@@ -131,5 +151,23 @@ mod tests {
         assert_eq!(settings.metrics_enabled, false);
 
         env::remove_var("POST_URBIT__PORT");
+    }
+
+    #[test]
+    fn build_node_config_parses_http_addr() {
+        let config = DaemonConfig {
+            port: 4444,
+            data_dir: "./data".to_string(),
+            metrics_enabled: true,
+            admin_password_hash: None,
+            admin_token_hash: None,
+            session_secret: None,
+            session_timeout_hours: 12,
+            http_addr: Some("127.0.0.1:9999".to_string()),
+        };
+        let node = build_node_config(config, Vec::new()).unwrap();
+        assert_eq!(node.port, 4444);
+        assert_eq!(node.http_addr.to_string(), "127.0.0.1:9999");
+        assert_eq!(node.session_timeout_hours, 12);
     }
 }

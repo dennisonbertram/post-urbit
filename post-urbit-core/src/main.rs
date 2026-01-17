@@ -2,10 +2,10 @@ use clap::{Args, Parser, Subcommand};
 use tracing::info;
 
 use post_urbit_core::diagnostics;
-use post_urbit_core::node::{NodeConfig, PostUrbitNode};
+use post_urbit_core::node::PostUrbitNode;
 use post_urbit_core::admin_state::AdminState;
 use post_urbit_core::identity::IdentityManager;
-use post_urbit_core::node_config::default_node_settings;
+use post_urbit_core::node_config::{build_node_config, default_node_settings, load_config};
 
 #[derive(Parser)]
 #[command(name = "post-urbit-node")]
@@ -23,17 +23,21 @@ enum Command {
 
 #[derive(Args)]
 struct RunArgs {
+    /// Path to config file (TOML/JSON)
+    #[arg(long)]
+    config: Option<String>,
+
     /// Port to listen on for QUIC connections
-    #[arg(long, default_value = "4433")]
-    port: u16,
+    #[arg(long)]
+    port: Option<u16>,
 
     /// Data directory for node state
-    #[arg(long, default_value = "./data")]
-    data_dir: String,
+    #[arg(long)]
+    data_dir: Option<String>,
 
     /// HTTP listen address for admin API
-    #[arg(long, default_value = "127.0.0.1:8080")]
-    http_addr: String,
+    #[arg(long)]
+    http_addr: Option<String>,
 
     /// Admin password hash (argon2id)
     #[arg(long)]
@@ -48,12 +52,28 @@ struct RunArgs {
     session_secret: Option<String>,
 
     /// Session timeout in hours
-    #[arg(long, default_value = "24")]
-    session_timeout_hours: u32,
+    #[arg(long)]
+    session_timeout_hours: Option<u32>,
 
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+}
+
+impl Default for RunArgs {
+    fn default() -> Self {
+        Self {
+            config: None,
+            port: None,
+            data_dir: None,
+            http_addr: None,
+            admin_password_hash: None,
+            admin_token_hash: None,
+            session_secret: None,
+            session_timeout_hours: None,
+            verbose: false,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -82,33 +102,39 @@ enum DiagnosticsCommand {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    match cli.command.unwrap_or(Command::Run(RunArgs {
-        port: 4433,
-        data_dir: "./data".to_string(),
-        http_addr: "127.0.0.1:8080".to_string(),
-        admin_password_hash: None,
-        admin_token_hash: None,
-        session_secret: None,
-        session_timeout_hours: 24,
-        verbose: false,
-    })) {
+    match cli.command.unwrap_or(Command::Run(RunArgs::default())) {
         Command::Run(args) => {
             let log_level = if args.verbose { "debug" } else { "info" };
             tracing_subscriber::fmt().with_env_filter(log_level).init();
 
-            let config = NodeConfig {
-                port: args.port,
-                data_dir: args.data_dir,
-                bootstrap_peers: vec![
-                    "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWAbc123...".to_string(),
-                ],
-                http_addr: args.http_addr.parse()?,
-                metrics_enabled: true,
-                admin_password_hash: args.admin_password_hash,
-                admin_token_hash: args.admin_token_hash,
-                session_secret: args.session_secret,
-                session_timeout_hours: args.session_timeout_hours,
-            };
+            let mut overrides = std::collections::HashMap::new();
+            if let Some(port) = args.port {
+                overrides.insert("port".to_string(), port.to_string());
+            }
+            if let Some(data_dir) = args.data_dir.clone() {
+                overrides.insert("data_dir".to_string(), data_dir);
+            }
+            if let Some(http_addr) = args.http_addr.clone() {
+                overrides.insert("http_addr".to_string(), http_addr);
+            }
+            if let Some(hash) = args.admin_password_hash.clone() {
+                overrides.insert("admin_password_hash".to_string(), hash);
+            }
+            if let Some(hash) = args.admin_token_hash.clone() {
+                overrides.insert("admin_token_hash".to_string(), hash);
+            }
+            if let Some(secret) = args.session_secret.clone() {
+                overrides.insert("session_secret".to_string(), secret);
+            }
+            if let Some(timeout) = args.session_timeout_hours {
+                overrides.insert("session_timeout_hours".to_string(), timeout.to_string());
+            }
+
+            let daemon = load_config(args.config.as_deref(), overrides)?;
+            let config = build_node_config(
+                daemon,
+                vec!["/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWAbc123...".to_string()],
+            )?;
 
             let node = PostUrbitNode::new(config).await?;
             info!("Node initialized, entering run loop");
