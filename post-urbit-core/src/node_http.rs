@@ -74,6 +74,10 @@ pub async fn run_http_server(addr: SocketAddr, state: HttpServerState) -> Result
 async fn handle_request(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
     let path = req.uri().path().to_string();
 
+    if path.starts_with("/apps/") && path.contains("/api/") {
+        return handle_app_api(req, state).await;
+    }
+
     if let Some(resp) = handle_public(&req, &path, &state).await {
         return resp;
     }
@@ -2125,6 +2129,78 @@ fn serve_app(path: &str, state: &HttpServerState) -> Response<Body> {
     Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap()
 }
 
+async fn handle_app_api(req: Request<Body>, state: Arc<HttpServerState>) -> Response<Body> {
+    let path = req.uri().path();
+    let mut parts = path.trim_start_matches("/apps/").splitn(2, '/');
+    let app_id = match parts.next() {
+        Some(id) if !id.is_empty() => id,
+        _ => return Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap(),
+    };
+    let rest = parts.next().unwrap_or("");
+    let api_suffix = rest.strip_prefix("api/").unwrap_or("");
+
+    let Some(base_url) = app_api_base_url(&state, app_id).await else {
+        return Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap();
+    };
+    let mut full = base_url.trim_end_matches('/').to_string();
+    if !api_suffix.is_empty() {
+        full.push('/');
+        full.push_str(api_suffix);
+    }
+    if let Some(query) = req.uri().query() {
+        full.push('?');
+        full.push_str(query);
+    }
+
+    let method = reqwest::Method::from_bytes(req.method().as_str().as_bytes())
+        .unwrap_or(reqwest::Method::GET);
+    let mut builder = reqwest::Client::new().request(method, full);
+    for (name, value) in req.headers() {
+        if name == hyper::header::HOST || name == CONTENT_LENGTH {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+    let body = match hyper::body::to_bytes(req.into_body()).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap(),
+    };
+    if !body.is_empty() {
+        builder = builder.body(body.to_vec());
+    }
+    let response = match builder.send().await {
+        Ok(resp) => resp,
+        Err(_) => return Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap(),
+    };
+
+    let mut out = Response::builder().status(response.status());
+    for (name, value) in response.headers() {
+        if name == hyper::header::CONNECTION || name == hyper::header::TRANSFER_ENCODING {
+            continue;
+        }
+        out = out.header(name, value);
+    }
+    match response.bytes().await {
+        Ok(bytes) => out.body(Body::from(bytes)).unwrap(),
+        Err(_) => Response::builder().status(StatusCode::BAD_GATEWAY).body(Body::empty()).unwrap(),
+    }
+}
+
+async fn app_api_base_url(state: &HttpServerState, app_id: &str) -> Option<String> {
+    let data = state.admin.data.lock().await;
+    let settings = data.app_settings.get(app_id)?;
+    let custom = settings.get("customConfig").and_then(|value| value.as_object())?;
+    let direct = custom
+        .get("api_base_url")
+        .and_then(|value| value.as_str())
+        .or_else(|| custom.get("apiBaseUrl").and_then(|value| value.as_str()))?;
+    if direct.trim().is_empty() {
+        None
+    } else {
+        Some(direct.to_string())
+    }
+}
+
 fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
     let candidate = root.join(relative);
     if candidate.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
@@ -2447,5 +2523,17 @@ mod tests {
         let payload: LogsResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(!payload.entries.is_empty());
         assert_eq!(payload.entries[0].message, "test log entry");
+    }
+
+    #[tokio::test]
+    async fn app_api_missing_config_returns_bad_gateway() {
+        let state = Arc::new(test_state().await);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/apps/com.example.app/api/test")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 }
