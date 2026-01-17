@@ -1539,6 +1539,7 @@ async fn handle_reset_settings(req: Request<Body>, state: Arc<HttpServerState>) 
         Err(resp) => return resp,
     };
     let section = body.get("section").and_then(|v| v.as_str());
+    let section_label = section.unwrap_or("all").to_string();
     let mut data = state.admin.data.lock().await;
     let defaults = default_node_settings(&data.settings.storage.data_dir, &data.settings.storage.log_dir);
     match section {
@@ -1556,6 +1557,14 @@ async fn handle_reset_settings(req: Request<Body>, state: Arc<HttpServerState>) 
     let response = data.settings.clone();
     drop(data);
     let _ = state.admin.persist().await;
+    log_entry(
+        &state,
+        "info",
+        "postnode::admin",
+        "settings reset",
+        Some(json!({"section": section_label})),
+    )
+    .await;
     json_response(response)
 }
 
@@ -2827,6 +2836,24 @@ mod tests {
         let data = state.admin.data.lock().await;
         let entry = data.logs.last().expect("log entry");
         assert_eq!(entry.message, "settings updated");
+    }
+
+    #[tokio::test]
+    async fn reset_settings_writes_audit_log() {
+        let mut state = test_state().await;
+        state.auth.admin_token_hash = Some(hash_token("token"));
+        let state = Arc::new(state);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/admin/v1/settings/reset")
+            .header(hyper::header::AUTHORIZATION, "Bearer token")
+            .body(Body::from(json!({"section": "network"}).to_string()))
+            .unwrap();
+        let resp = handle_request(req, state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let data = state.admin.data.lock().await;
+        let entry = data.logs.last().expect("log entry");
+        assert_eq!(entry.message, "settings reset");
     }
 
     #[tokio::test]
