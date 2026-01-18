@@ -214,7 +214,7 @@ function hlc_receive(local: HLC, remote: HLC, now: number, origin: IdentityIdent
 
 ## CRDT Operation CBOR Schema (Normative)
 
-All CRDT operations MUST be encoded using deterministic CBOR (RFC 8949 §4.2) with integer keys. This ensures `operation_id` computation is consistent across implementations.
+All CRDT operations MUST be encoded using deterministic CBOR (RFC 8949 §4.2) with integer keys. This ensures `operation_id` computation is consistent across implementations. [REQ-SYNC-001]
 
 **General format:** CBOR map with integer key 0 = operation type (unsigned integer), remaining keys defined per type.
 
@@ -397,17 +397,17 @@ SYNC_ERROR = {
 
 **Connection vs Stream Closure:**
 
-Implementations MUST NOT close the QUIC connection for recoverable errors; stream closure is sufficient for fatal sync errors. Only `INVALID_CBOR` warrants stream closure, as it indicates a fundamental protocol violation that cannot be recovered from on the current stream.
+Implementations MUST NOT close the QUIC connection for recoverable errors; stream closure is sufficient for fatal sync errors. Only `INVALID_CBOR` warrants stream closure, as it indicates a fundamental protocol violation that cannot be recovered from on the current stream. [REQ-SYNC-002]
 
 For all other errors, the sync stream remains open and processing continues for subsequent messages.
 
 ### CBOR Canonicalization (Normative)
 
-All CBOR encoding in the sync protocol MUST follow deterministic encoding rules (RFC 8949 §4.2):
+All CBOR encoding in the sync protocol MUST follow deterministic encoding rules (RFC 8949 §4.2): [REQ-SYNC-003]
 
-1. **Map key ordering:** Keys MUST be sorted in bytewise lexicographic order of their CBOR encoding (shortest first, then byte comparison)
+1. **Map key ordering:** Keys MUST be sorted in bytewise lexicographic order of their CBOR encoding (shortest first, then byte comparison) [REQ-SYNC-004]
 2. **Preferred encoding:** Use smallest integer encoding; indefinite-length prohibited
-3. **No duplicates:** Map keys MUST NOT repeat
+3. **No duplicates:** Map keys MUST NOT repeat [REQ-SYNC-005]
 4. **Type constraints:** Use CBOR major types 0-5 and 7 (for true/false/null). Tags and other special values (undefined, break) are prohibited
 
 **CBOR Schemas for Sync Messages:**
@@ -551,7 +551,7 @@ The Merkle tree is built over operation IDs (32-byte SHA256 hashes):
 
 6. **Root hash:** The root node's hash represents the full document state.
 
-**SYNC_REQUEST `depth` field:** In v1, the `depth` field is informational only (for future subtree exchange). Responders SHOULD ignore it and send complete operation lists.
+**SYNC_REQUEST `depth` field:** In v1, the `depth` field is informational only (for future subtree exchange). Responders SHOULD ignore it and send complete operation lists. [REQ-SYNC-006]
 
 **Wire Format for SYNC_REQUEST:**
 
@@ -611,7 +611,7 @@ The Sync Protocol uses a **different security model** than the Messaging Protoco
 
 ### Operation Signature
 
-Every `SyncOperation` MUST be signed by the origin identity.
+Every `SyncOperation` MUST be signed by the origin identity. [REQ-SYNC-007]
 
 **Normative Encoding (for signature and operation_id):**
 
@@ -665,7 +665,7 @@ operation_id_string = hex(operation_id_bytes)  // 64-char hex for display/JSON
 
 Where all fields use the encodings specified above. The raw bytes form is used in signatures; the hex string form is used in JSON representations.
 
-**operation_bytes definition:** `operation_bytes` is the EXACT byte string carried in the `SyncOperation.operation` CBOR bstr field. Implementations MUST NOT decode and re-encode for hashing/signature. Senders MUST encode using deterministic CBOR. Receivers MUST reject sync messages whose CBOR payload is not deterministically encoded per RFC 8949 Section 4.2. This ensures all implementations compute identical operation IDs.
+**operation_bytes definition:** `operation_bytes` is the EXACT byte string carried in the `SyncOperation.operation` CBOR bstr field. Implementations MUST NOT decode and re-encode for hashing/signature. Senders MUST encode using deterministic CBOR. Receivers MUST reject sync messages whose CBOR payload is not deterministically encoded per RFC 8949 Section 4.2. This ensures all implementations compute identical operation IDs. [REQ-SYNC-008]
 
 **Signature Construction:**
 
@@ -683,7 +683,7 @@ signature = Ed25519Sign(origin_signing_key, signature_input)
 
 **Verification:**
 
-Receivers MUST verify:
+Receivers MUST verify: [REQ-SYNC-009]
 1. Signature is valid for claimed origin
 2. Origin has write permission for the document
 3. Operation is causally consistent (dependencies satisfied)

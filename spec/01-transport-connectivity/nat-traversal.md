@@ -53,7 +53,7 @@ All multi-byte integers in PUDS messages are big-endian (network byte order) per
 
 ### Parsing Rules (Normative)
 
-Implementations MUST enforce strict packet length validation:
+Implementations MUST enforce strict packet length validation: [REQ-TRANS-001]
 
 | Packet Type | Required Length | Description |
 |-------------|-----------------|-------------|
@@ -63,11 +63,11 @@ Implementations MUST enforce strict packet length validation:
 
 **Normative Requirements:**
 
-1. **Request packets** MUST be exactly 21 bytes (4 magic + 1 version + 16 transaction_id)
-2. **Response packets** MUST be exactly 24 bytes (IPv4) or 36 bytes (IPv6)
-3. **Packets with incorrect length** MUST be silently dropped
-4. **Unknown version values** MUST cause silent drop (no response)
-5. **Unknown address type values** in responses MUST be ignored by clients
+1. **Request packets** MUST be exactly 21 bytes (4 magic + 1 version + 16 transaction_id) [REQ-TRANS-002]
+2. **Response packets** MUST be exactly 24 bytes (IPv4) or 36 bytes (IPv6) [REQ-TRANS-003]
+3. **Packets with incorrect length** MUST be silently dropped [REQ-TRANS-004]
+4. **Unknown version values** MUST cause silent drop (no response) [REQ-TRANS-005]
+5. **Unknown address type values** in responses MUST be ignored by clients [REQ-TRANS-006]
 
 **Rationale:** Strict parsing prevents amplification attacks where malformed packets could trigger error responses larger than the request. Silent dropping ensures no bandwidth amplification.
 
@@ -113,7 +113,7 @@ For NAT types that allow it, hole punching enables direct connections.
 
 ### Coordination Message Transport (Normative)
 
-This section specifies how hole-punch coordination messages are transported between peers. Implementations MUST follow these requirements for interoperability.
+This section specifies how hole-punch coordination messages are transported between peers. Implementations MUST follow these requirements for interoperability. [REQ-TRANS-007]
 
 #### Transport Channels
 
@@ -137,7 +137,7 @@ When peers have an existing authenticated QUIC connection (e.g., through a relay
 └────────────────────────────────────────┘
 ```
 
-**Authentication Requirement:** Control stream messages require a **completed identity handshake**. Coordination messages MUST NOT be sent until both peers are mutually authenticated (connection state = CONNECTED per RFC-0002 §8.1).
+**Authentication Requirement:** Control stream messages require a **completed identity handshake**. Coordination messages MUST NOT be sent until both peers are mutually authenticated (connection state = CONNECTED per RFC-0002 §8.1). [REQ-TRANS-008]
 
 **Message Type Field:** All coordination messages include a `type` field:
 - `"hole_punch_request"` - Initiator requests hole punch
@@ -175,15 +175,15 @@ When peers have no direct connection, a relay can coordinate hole punching using
 4. Relay forwards the **entire PURL packet** to Bob's bound IP:port (same as DATA forwarding per RFC-0002 §7.6)
 5. Bob decapsulates PURL header and processes JSON payload
 
-**Authentication:** COORDINATE packets are authenticated by the allocation token. The sender MUST have a valid allocation. The JSON payload MAY include signed fields for additional verification (see Message Schemas below).
+**Authentication:** COORDINATE packets are authenticated by the allocation token. The sender MUST have a valid allocation. The JSON payload MAY include signed fields for additional verification (see Message Schemas below). [REQ-TRANS-009]
 
-**Max Payload Size:** COORDINATE payloads MUST NOT exceed 1200 bytes (same limit as DATA payloads per RFC-0002 §7.4).
+**Max Payload Size:** COORDINATE payloads MUST NOT exceed 1200 bytes (same limit as DATA payloads per RFC-0002 §7.4). [REQ-TRANS-010]
 
 #### Message Schemas (Normative)
 
-All coordination messages MUST include the base fields specified below. The `signature` field requirement depends on the transport channel (see Signature Requirements section):
-- **Direct Peer (Control stream):** `signature` field MAY be omitted (field can be absent or null)
-- **Relay-Assisted (PURL COORDINATE):** `signature` field MUST be present
+All coordination messages MUST include the base fields specified below. The `signature` field requirement depends on the transport channel (see Signature Requirements section): [REQ-TRANS-011]
+- **Direct Peer (Control stream):** `signature` field MAY be omitted (field can be absent or null) [REQ-TRANS-012]
+- **Relay-Assisted (PURL COORDINATE):** `signature` field MUST be present [REQ-TRANS-013]
 
 **hole_punch_request:**
 ```json
@@ -206,12 +206,12 @@ All coordination messages MUST include the base fields specified below. The `sig
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| type | MUST | Literal `"hole_punch_request"` |
-| transaction_id | MUST | 16 random bytes, Base64url no padding (22 chars) |
-| initiator | MUST | Initiator's IID (Crockford Base32, 32 chars) |
-| target | MUST | Target's IID (Crockford Base32, 32 chars) |
-| initiator_endpoints | MUST | Array of candidate endpoints (at least 1) |
-| timestamp | MUST | RFC3339 UTC canonical (`YYYY-MM-DDTHH:MM:SSZ`) |
+| type | MUST | Literal `"hole_punch_request"`  [REQ-TRANS-014]|
+| transaction_id | MUST | 16 random bytes, Base64url no padding (22 chars)  [REQ-TRANS-015]|
+| initiator | MUST | Initiator's IID (Crockford Base32, 32 chars)  [REQ-TRANS-016]|
+| target | MUST | Target's IID (Crockford Base32, 32 chars)  [REQ-TRANS-017]|
+| initiator_endpoints | MUST | Array of candidate endpoints (at least 1)  [REQ-TRANS-018]|
+| timestamp | MUST | RFC3339 UTC canonical (`YYYY-MM-DDTHH:MM:SSZ`)  [REQ-TRANS-019]|
 | signature | Transport-dependent | See Signature Requirements below |
 
 **hole_punch_offer** (relay-generated or forwarded):
@@ -230,11 +230,11 @@ All coordination messages MUST include the base fields specified below. The `sig
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| type | MUST | Literal `"hole_punch_offer"` |
-| transaction_id | MUST | Same as originating request |
-| initiator | MUST | Initiator's IID |
-| initiator_endpoints | MUST | Initiator's candidate endpoints |
-| timestamp | MUST | From original request |
+| type | MUST | Literal `"hole_punch_offer"`  [REQ-TRANS-020]|
+| transaction_id | MUST | Same as originating request  [REQ-TRANS-021]|
+| initiator | MUST | Initiator's IID  [REQ-TRANS-022]|
+| initiator_endpoints | MUST | Initiator's candidate endpoints  [REQ-TRANS-023]|
+| timestamp | MUST | From original request  [REQ-TRANS-024]|
 | signature | Transport-dependent | Original initiator's signature; see Signature Requirements below |
 
 **hole_punch_accept:**
@@ -253,11 +253,11 @@ All coordination messages MUST include the base fields specified below. The `sig
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| type | MUST | Literal `"hole_punch_accept"` |
-| transaction_id | MUST | Same as originating request (for correlation) |
-| responder | MUST | Responder's IID |
-| responder_endpoints | MUST | Responder's candidate endpoints (at least 1) |
-| timestamp | MUST | RFC3339 UTC canonical |
+| type | MUST | Literal `"hole_punch_accept"`  [REQ-TRANS-025]|
+| transaction_id | MUST | Same as originating request (for correlation)  [REQ-TRANS-026]|
+| responder | MUST | Responder's IID  [REQ-TRANS-027]|
+| responder_endpoints | MUST | Responder's candidate endpoints (at least 1)  [REQ-TRANS-028]|
+| timestamp | MUST | RFC3339 UTC canonical  [REQ-TRANS-029]|
 | signature | Transport-dependent | See Signature Requirements below |
 
 **hole_punch_reject** (optional):
@@ -276,14 +276,14 @@ Signature requirements depend on the transport channel used for coordination:
 
 | Transport Channel | Signature Requirement | Verification Requirement |
 |-------------------|----------------------|--------------------------|
-| **Direct Peer (Control stream)** | MAY be omitted | If present, recipients SHOULD verify |
-| **Relay-Assisted (PURL COORDINATE)** | MUST be present | Recipients MUST verify |
+| **Direct Peer (Control stream)** | MAY be omitted | If present, recipients SHOULD verify  [REQ-TRANS-030]|
+| **Relay-Assisted (PURL COORDINATE)** | MUST be present | Recipients MUST verify  [REQ-TRANS-031]|
 
 **Rationale:**
 - **Direct Peer:** The QUIC connection is already mutually authenticated via the identity handshake (connection state = CONNECTED per RFC-0002 §8.1). The authenticated channel proves the sender's identity, making signatures redundant but optionally permitted for defense-in-depth.
 - **Relay-Assisted:** The relay connection authenticates the allocation token but does NOT prove the originator's identity. Signatures are required to prevent impersonation attacks where a malicious relay or attacker forges coordination messages.
 
-**Implementation Note:** Implementations MUST reject relay-assisted coordination messages (PURL COORDINATE packets) that lack a valid signature. Implementations MAY accept direct peer coordination messages without signatures when the peer is already authenticated.
+**Implementation Note:** Implementations MUST reject relay-assisted coordination messages (PURL COORDINATE packets) that lack a valid signature. Implementations MAY accept direct peer coordination messages without signatures when the peer is already authenticated. [REQ-TRANS-032]
 
 #### Signature Construction
 
@@ -326,20 +326,20 @@ signature = Ed25519_Sign(signing_key, SHA256(signature_input))
 
 Endpoints are bound into the signature via SHA256 of their JCS-canonical JSON representation. This binding is critical for security:
 
-- Recipients MUST verify the signature covers the received endpoints
+- Recipients MUST verify the signature covers the received endpoints [REQ-TRANS-033]
 - This prevents relay tampering with endpoint lists
 - JCS (JSON Canonicalization Scheme, RFC 8785) ensures deterministic serialization
 
-**Verification:** When verification is required or when a signature is present and SHOULD be verified, recipients fetch the signer's identity document and verify using the current signing key. Recipients MUST reconstruct the `signature_input` using the received endpoint arrays and verify that the signature is valid over that input.
+**Verification:** When verification is required or when a signature is present and SHOULD be verified, recipients fetch the signer's identity document and verify using the current signing key. Recipients MUST reconstruct the `signature_input` using the received endpoint arrays and verify that the signature is valid over that input. [REQ-TRANS-034]
 
 #### Response Correlation
 
-All responses (offer, accept, reject) MUST include the same `transaction_id` as the originating request. This enables:
+All responses (offer, accept, reject) MUST include the same `transaction_id` as the originating request. This enables: [REQ-TRANS-035]
 - Matching responses to pending requests
 - Detecting duplicate/replayed messages
 - Timeout management per transaction
 
-Implementations SHOULD maintain a pending transaction table with 10-second timeout per transaction.
+Implementations SHOULD maintain a pending transaction table with 10-second timeout per transaction. [REQ-TRANS-036]
 
 #### Sequence Diagram (Relay-Assisted)
 

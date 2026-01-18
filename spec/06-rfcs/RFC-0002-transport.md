@@ -35,7 +35,7 @@ The transport layer provides reliable, authenticated communication between Post-
 
 ### 1.3 Requirements Notation
 
-The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119].
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in [RFC 2119]. [REQ-TRANS-069]
 
 ## 2. Terminology
 
@@ -74,11 +74,11 @@ IIDs and DIDs are encoded as **32-character lowercase Crockford Base32** strings
 
 **Decoding** reverses this: map each character to its 5-bit value, concatenate all 160 bits in order, interpret as big-endian 20-byte value.
 
-**Encoding:** Standard 5-bit grouping per Crockford Base32. Encoders MUST output lowercase.
+**Encoding:** Standard 5-bit grouping per Crockford Base32. Encoders MUST output lowercase. [REQ-TRANS-070]
 
-**Decoding:** Decoders MUST reject any character not in the lowercase alphabet. No normalization is performed on wire data.
+**Decoding:** Decoders MUST reject any character not in the lowercase alphabet. No normalization is performed on wire data. [REQ-TRANS-071]
 
-**UI Input:** User interfaces MAY normalize uppercase to lowercase before creating wire/signed artifacts.
+**UI Input:** User interfaces MAY normalize uppercase to lowercase before creating wire/signed artifacts. [REQ-TRANS-072]
 
 **Example:**
 ```
@@ -126,13 +126,13 @@ This alphabet was chosen for human readability (avoids ambiguous characters like
 
 ### 4.1 ALPN Protocol String
 
-All Post-Urbit QUIC connections MUST use the ALPN protocol identifier:
+All Post-Urbit QUIC connections MUST use the ALPN protocol identifier: [REQ-TRANS-073]
 
 ```
 post-urbit/1
 ```
 
-Implementations MUST reject connections with mismatched ALPN.
+Implementations MUST reject connections with mismatched ALPN. [REQ-TRANS-074]
 
 ### 4.2 Transport Parameters
 
@@ -148,33 +148,33 @@ Implementations MUST reject connections with mismatched ALPN.
 
 | Parameter | Requirement |
 |-----------|-------------|
-| TLS version | 1.3 only (MUST) |
-| Cipher suites | MUST support both: TLS_CHACHA20_POLY1305_SHA256 AND TLS_AES_128_GCM_SHA256 |
-| Key exchange | X25519 (MUST support) |
+| TLS version | 1.3 only (MUST)  [REQ-TRANS-075]|
+| Cipher suites | MUST support both: TLS_CHACHA20_POLY1305_SHA256 AND TLS_AES_128_GCM_SHA256  [REQ-TRANS-076]|
+| Key exchange | X25519 (MUST support)  [REQ-TRANS-077]|
 | Certificate | Self-signed, ephemeral (identity proven via handshake) |
-| SNI | SHOULD be empty or ignored |
+| SNI | SHOULD be empty or ignored  [REQ-TRANS-078]|
 
 **Cipher Suite Requirements (Normative):**
-- Implementations MUST support `TLS_CHACHA20_POLY1305_SHA256` (mandatory for software-only performance)
-- Implementations MUST support `TLS_AES_128_GCM_SHA256` (mandatory for hardware AES-NI support)
-- Implementations SHOULD support `TLS_AES_256_GCM_SHA384` (optional, for environments requiring 256-bit AES)
-- Peers MUST offer ALL mandatory suites in ClientHello/ServerHello
+- Implementations MUST support `TLS_CHACHA20_POLY1305_SHA256` (mandatory for software-only performance) [REQ-TRANS-079]
+- Implementations MUST support `TLS_AES_128_GCM_SHA256` (mandatory for hardware AES-NI support) [REQ-TRANS-080]
+- Implementations SHOULD support `TLS_AES_256_GCM_SHA384` (optional, for environments requiring 256-bit AES) [REQ-TRANS-081]
+- Peers MUST offer ALL mandatory suites in ClientHello/ServerHello [REQ-TRANS-082]
 - This ensures interoperability between implementations with different optimization profiles (ChaCha-preferred vs AES-preferred)
 
 **Certificate Policy (Normative)**: TLS certificates are NOT used for identity verification. Identity authentication is performed exclusively via the identity handshake (Section 5). Implementations:
 
-- MUST accept ANY certificate presented during TLS handshake
-- MUST NOT reject certificates due to: expiration (NotBefore/NotAfter), self-signed status, unknown CA, hostname mismatch, or missing/wrong Extended Key Usage
-- MUST NOT perform certificate chain validation
-- SHOULD generate fresh ephemeral certificates on each daemon restart
+- MUST accept ANY certificate presented during TLS handshake [REQ-TRANS-083]
+- MUST NOT reject certificates due to: expiration (NotBefore/NotAfter), self-signed status, unknown CA, hostname mismatch, or missing/wrong Extended Key Usage [REQ-TRANS-084]
+- MUST NOT perform certificate chain validation [REQ-TRANS-085]
+- SHOULD generate fresh ephemeral certificates on each daemon restart [REQ-TRANS-086]
 
 The only requirement is that the certificate enables TLS 1.3 handshake completion. This policy exists because the identity handshake provides all necessary authentication guarantees.
 
-**ALPN Scope (Normative):** This "accept any certificate" policy applies ONLY to connections using ALPN `post-urbit/1`. For DHT/libp2p connections (ALPN `libp2p`), implementations MUST follow standard libp2p-tls certificate requirements where the certificate authenticates the PeerID. See `spec/00-shared/layer-integration.md` "TLS Certificate Policy by ALPN" for the complete policy.
+**ALPN Scope (Normative):** This "accept any certificate" policy applies ONLY to connections using ALPN `post-urbit/1`. For DHT/libp2p connections (ALPN `libp2p`), implementations MUST follow standard libp2p-tls certificate requirements where the certificate authenticates the PeerID. See `spec/00-shared/layer-integration.md` "TLS Certificate Policy by ALPN" for the complete policy. [REQ-TRANS-087]
 
 ### 4.4 TLS Binding
 
-To bind the identity handshake to the TLS session, implementations MUST derive a `tls_binding` value using the TLS Exporter (RFC 8446 §7.5):
+To bind the identity handshake to the TLS session, implementations MUST derive a `tls_binding` value using the TLS Exporter (RFC 8446 §7.5): [REQ-TRANS-088]
 
 ```
 tls_binding = TLS-Exporter(
@@ -184,7 +184,7 @@ tls_binding = TLS-Exporter(
 )
 ```
 
-This value MUST be included in ClientHello and ServerHello messages.
+This value MUST be included in ClientHello and ServerHello messages. [REQ-TRANS-089]
 
 ## 5. Identity Handshake Protocol
 
@@ -194,12 +194,12 @@ After QUIC establishes a TLS-encrypted connection, peers perform an identity han
 
 ### 5.2 Handshake Stream
 
-The identity handshake MUST occur on the **first client-initiated bidirectional stream**.
+The identity handshake MUST occur on the **first client-initiated bidirectional stream**. [REQ-TRANS-090]
 
 **Rules:**
 - Client opens this stream immediately after QUIC handshake completes
 - Client writes stream type byte `0x01` (Control) as first byte
-- Implementations MUST NOT open any other application streams until handshake completes
+- Implementations MUST NOT open any other application streams until handshake completes [REQ-TRANS-091]
 - QUIC assigns stream IDs automatically; do not hardcode stream ID 0
 
 **Rationale:** This avoids race conditions and ensures handshake completes before any application traffic.
@@ -290,22 +290,22 @@ Stream Layout:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| type | MUST | Literal "client_hello" |
-| version | MUST | Protocol version (1) |
-| client_iid | MUST | Client's Identity Identifier (Crockford Base32, 32 chars) |
-| client_did | MAY | Client's Device Identifier for per-device binding |
-| expected_server_iid | MUST/MAY | MUST when connecting to a known IID; MAY omit only for discovery scenarios. If provided, MUST verify match. See IID Binding Requirement in `spec/01-transport-connectivity/peer-handshake.md`. |
-| client_nonce | MUST | 32 random bytes (Base64 standard, no padding) |
-| timestamp | MUST | RFC3339 UTC, canonical form: `YYYY-MM-DDTHH:MM:SSZ` |
-| tls_binding | MUST | TLS exporter value (Base64 standard, no padding) |
+| type | MUST | Literal "client_hello"  [REQ-TRANS-092]|
+| version | MUST | Protocol version (1)  [REQ-TRANS-093]|
+| client_iid | MUST | Client's Identity Identifier (Crockford Base32, 32 chars)  [REQ-TRANS-094]|
+| client_did | MAY | Client's Device Identifier for per-device binding  [REQ-TRANS-095]|
+| expected_server_iid | MUST/MAY | MUST when connecting to a known IID; MAY omit only for discovery scenarios. If provided, MUST verify match. See IID Binding Requirement in `spec/01-transport-connectivity/peer-handshake.md`.  [REQ-TRANS-096]|
+| client_nonce | MUST | 32 random bytes (Base64 standard, no padding)  [REQ-TRANS-097]|
+| timestamp | MUST | RFC3339 UTC, canonical form: `YYYY-MM-DDTHH:MM:SSZ`  [REQ-TRANS-098]|
+| tls_binding | MUST | TLS exporter value (Base64 standard, no padding)  [REQ-TRANS-099]|
 
-**Optional Field Handling (Normative):** Fields marked MAY or SHOULD may be either:
+**Optional Field Handling (Normative):** Fields marked MAY or SHOULD may be either: [REQ-TRANS-100]
 - Omitted from the JSON object entirely, OR
 - Present with value `null`
 
-Receivers MUST treat both representations equivalently (absent == null). Senders MAY use either form. This applies to all optional handshake fields in §5.5, §5.6, and §5.9.
+Receivers MUST treat both representations equivalently (absent == null). Senders MAY use either form. This applies to all optional handshake fields in §5.5, §5.6, and §5.9. [REQ-TRANS-101]
 
-**Timestamp Canonicalization:** For signature input, timestamps MUST use the canonical form `YYYY-MM-DDTHH:MM:SSZ` (UTC, no fractional seconds, `Z` suffix). Implementations MUST reject non-canonical forms.
+**Timestamp Canonicalization:** For signature input, timestamps MUST use the canonical form `YYYY-MM-DDTHH:MM:SSZ` (UTC, no fractional seconds, `Z` suffix). Implementations MUST reject non-canonical forms. [REQ-TRANS-102]
 
 ### 5.6 ServerHello Message
 
@@ -375,7 +375,7 @@ challenge_signature = Ed25519_Sign(
 
 ### 5.8 Device Signature (Optional)
 
-If a Device Identifier (DID) is provided, the party MUST also prove device ownership.
+If a Device Identifier (DID) is provided, the party MUST also prove device ownership. [REQ-TRANS-103]
 
 **Domain Separator:** `post-urbit-device-v1` (20 ASCII bytes)
 
@@ -424,7 +424,7 @@ client_device_signature = Ed25519_Sign(
 4. Check `device_document.did` matches claimed DID
 5. If `device_document.expires_at` exists, check not expired
 
-**Note:** Device documents may be signed with a key that was subsequently rotated. Verification MUST accept any identity signing key that was valid at the time of signing (per key history lookup rules).
+**Note:** Device documents may be signed with a key that was subsequently rotated. Verification MUST accept any identity signing key that was valid at the time of signing (per key history lookup rules). [REQ-TRANS-104]
 
 ### 5.9 ClientAuth Message
 
@@ -463,7 +463,7 @@ On failure:
 
 ### 5.11 Verification Procedures
 
-**Key Encoding Note:** All key fields in identity/device documents (`keys.signing.genesis`, `keys.signing.current`, `device_signing_key`) are Base64-encoded raw 32-byte Ed25519 public keys. Implementations MUST decode these to raw bytes before use in `derive_iid()` or `Ed25519_Verify()`.
+**Key Encoding Note:** All key fields in identity/device documents (`keys.signing.genesis`, `keys.signing.current`, `device_signing_key`) are Base64-encoded raw 32-byte Ed25519 public keys. Implementations MUST decode these to raw bytes before use in `derive_iid()` or `Ed25519_Verify()`. [REQ-TRANS-105]
 
 **Server Verifies Client:**
 1. Check `client_iid` is well-formed (32 chars, Base32 lowercase)
@@ -510,21 +510,21 @@ On failure:
 
 ### 5.14 Handshake Failure Behavior (Normative)
 
-When a handshake fails, implementations MUST follow these rules:
+When a handshake fails, implementations MUST follow these rules: [REQ-TRANS-106]
 
 | Condition | Behavior |
 |-----------|----------|
-| Framing error (e.g., length prefix exceeds max, truncated message) | MUST close connection with `HANDSHAKE_FAILED` (0x101) |
-| JSON parse error (invalid UTF-8, malformed JSON) | MUST close connection with `HANDSHAKE_FAILED` (0x101) |
-| Unknown handshake message type | MUST close connection with `HANDSHAKE_FAILED` (0x101) |
-| Signature verification failure | Server MAY send `handshake_complete(success=false)` before closing |
-| Document validation failure | Server MAY send `handshake_complete(success=false)` before closing |
+| Framing error (e.g., length prefix exceeds max, truncated message) | MUST close connection with `HANDSHAKE_FAILED` (0x101)  [REQ-TRANS-107]|
+| JSON parse error (invalid UTF-8, malformed JSON) | MUST close connection with `HANDSHAKE_FAILED` (0x101)  [REQ-TRANS-108]|
+| Unknown handshake message type | MUST close connection with `HANDSHAKE_FAILED` (0x101)  [REQ-TRANS-109]|
+| Signature verification failure | Server MAY send `handshake_complete(success=false)` before closing  [REQ-TRANS-110]|
+| Document validation failure | Server MAY send `handshake_complete(success=false)` before closing  [REQ-TRANS-111]|
 
 **Server Response Timing:**
-- Server MAY send `handshake_complete` with `success: false` and an error object before closing the connection
-- Server MUST NOT wait indefinitely for client acknowledgment after sending failure response
-- Server SHOULD close the connection within 1 second of sending `handshake_complete(success=false)`
-- If sending `handshake_complete` fails (write error), server MUST close connection immediately
+- Server MAY send `handshake_complete` with `success: false` and an error object before closing the connection [REQ-TRANS-112]
+- Server MUST NOT wait indefinitely for client acknowledgment after sending failure response [REQ-TRANS-113]
+- Server SHOULD close the connection within 1 second of sending `handshake_complete(success=false)` [REQ-TRANS-114]
+- If sending `handshake_complete` fails (write error), server MUST close connection immediately [REQ-TRANS-115]
 
 ### 5.15 Anonymous Connections (Out of Scope)
 
@@ -535,7 +535,7 @@ Anonymous connections (where `client_iid` is null) are NOT defined in this RFC.
 - DHT queries (separate protocol)
 - Discovery servers (separate protocol)
 
-For v1, all peer-to-peer connections MUST be mutually authenticated. Anonymous mode MAY be defined in a future RFC.
+For v1, all peer-to-peer connections MUST be mutually authenticated. Anonymous mode MAY be defined in a future RFC. [REQ-TRANS-116]
 
 ## 6. Stream Types
 
@@ -592,8 +592,8 @@ Message Frame:
 | Bulk (0x05) | Binary | First 2 bytes = opcode |
 
 **JSON Streams (0x01-0x02):**
-- Payload MUST be valid UTF-8 JSON
-- JSON object MUST have a `type` field (string) identifying message kind
+- Payload MUST be valid UTF-8 JSON [REQ-TRANS-117]
+- JSON object MUST have a `type` field (string) identifying message kind [REQ-TRANS-118]
 - Example: `{"type": "identity_update", ...}`
 - **Identity stream (0x02) schemas:** See `spec/00-shared/layer-integration.md` "Identity Message JSON Schemas (Normative)" for the authoritative message type definitions (`identity_update`, `identity_request`, `identity_response`, `identity_ack`). These schemas are normative for interoperability.
 
@@ -640,8 +640,8 @@ This aligns with PUSE max envelope size: a max-size PUSE envelope (1,048,576 byt
 | Bulk (0x05) | Multiple allowed | Per-transfer |
 
 **Rules:**
-1. **Control stream:** The client MUST open exactly one Control stream immediately after QUIC handshake (§5.2). Additional Control streams MUST be rejected.
-2. **Long-lived streams (Identity, Sync):** Each peer MAY open at most one outgoing bidirectional stream of each type. Peers MUST accept at most one incoming stream per type. Opening a second stream of the same type is a protocol error (close connection with DUPLICATE_STREAM_TYPE 0x108).
+1. **Control stream:** The client MUST open exactly one Control stream immediately after QUIC handshake (§5.2). Additional Control streams MUST be rejected. [REQ-TRANS-119]
+2. **Long-lived streams (Identity, Sync):** Each peer MAY open at most one outgoing bidirectional stream of each type. Peers MUST accept at most one incoming stream per type. Opening a second stream of the same type is a protocol error (close connection with DUPLICATE_STREAM_TYPE 0x108). [REQ-TRANS-120]
 3. **Per-message streams (Message):** Multiple concurrent bidirectional Message streams are allowed.
 4. **Bulk streams:** Multiple unidirectional Bulk streams are allowed for concurrent transfers.
 
@@ -650,9 +650,9 @@ This aligns with PUSE max envelope size: a max-size PUSE envelope (1,048,576 byt
 **Status:** Stream type 0x05 (Bulk) is **reserved for future use**. The wire protocol is not fully specified in this version.
 
 **V1 Requirement (Normative):**
-- Implementations MUST NOT open streams with type byte 0x05
-- Implementations MUST reject incoming streams with type byte 0x05 with error code `STREAM_TYPE_UNKNOWN` (0x102)
-- The stream type code 0x05 is reserved; implementations MUST NOT reassign it
+- Implementations MUST NOT open streams with type byte 0x05 [REQ-TRANS-121]
+- Implementations MUST reject incoming streams with type byte 0x05 with error code `STREAM_TYPE_UNKNOWN` (0x102) [REQ-TRANS-122]
+- The stream type code 0x05 is reserved; implementations MUST NOT reassign it [REQ-TRANS-123]
 
 **Rationale:** Bulk transfer protocols require careful specification of:
 - Transfer initiation and metadata exchange
@@ -859,8 +859,8 @@ Operational guidance:
 
 | Packet Type | Payload Semantics |
 |-------------|-------------------|
-| DATA (0x01) | Payload MUST be a QUIC UDP payload. Recipients MUST pass it to their QUIC stack. |
-| COORDINATE (0x09) | Payload MUST be UTF-8 JSON per `spec/01-transport-connectivity/nat-traversal.md`. Recipients MUST NOT pass it to QUIC stack; handle at coordination layer. |
+| DATA (0x01) | Payload MUST be a QUIC UDP payload. Recipients MUST pass it to their QUIC stack.  [REQ-TRANS-124]|
+| COORDINATE (0x09) | Payload MUST be UTF-8 JSON per `spec/01-transport-connectivity/nat-traversal.md`. Recipients MUST NOT pass it to QUIC stack; handle at coordination layer.  [REQ-TRANS-125]|
 | PING (0x02), PONG (0x03), REFRESH (0x05), RELEASE (0x06) | Empty payload (0 bytes). |
 | ERROR (0x07) | Binary error payload per §7.12. |
 | REBIND (0x08) | UTF-8 JSON per §7.11. |
@@ -896,11 +896,11 @@ Operational guidance:
 - Destination client decapsulates PURL and passes inner payload to QUIC stack
 
 **Receiver Decapsulation (Normative):**
-- For relay-forwarded PURL packets including DATA (0x01) and COORDINATE (0x09), the destination peer MUST ignore the allocation token field (the relay validates it)
-- Recipients MUST NOT validate the allocation token on received (forwarded) packets
+- For relay-forwarded PURL packets including DATA (0x01) and COORDINATE (0x09), the destination peer MUST ignore the allocation token field (the relay validates it) [REQ-TRANS-126]
+- Recipients MUST NOT validate the allocation token on received (forwarded) packets [REQ-TRANS-127]
 - Only relays validate allocation tokens; recipients ignore them during decapsulation
 - For COORDINATE packets, the destination peer validates the coordination message using the message-level signature (per nat-traversal.md §Signature Requirements), not the allocation token
-- Recipients MAY sanity-check that `Destination IID == my IID` and drop misrouted packets
+- Recipients MAY sanity-check that `Destination IID == my IID` and drop misrouted packets [REQ-TRANS-128]
 
 **Control Packets (non-DATA):**
 - PING/PONG/REFRESH/RELEASE/REBIND/ERROR are relay control plane
@@ -963,7 +963,7 @@ Content-Type: application/json
 **Note:** `identity_doc_sequence` is a decimal string (not number) to avoid JSON uint64 precision issues.
 
 **HTTPS TLS Policy (Normative):**
-Clients MUST perform WebPKI certificate validation and hostname verification for allocation requests. Self-signed certificates MUST be rejected. This policy is distinct from the `post-urbit/1` QUIC "accept any certificate" policy (§4.3), which applies only to peer-to-peer QUIC connections. Relay allocation is an HTTPS API call to a relay operator's infrastructure, and standard web security practices apply.
+Clients MUST perform WebPKI certificate validation and hostname verification for allocation requests. Self-signed certificates MUST be rejected. This policy is distinct from the `post-urbit/1` QUIC "accept any certificate" policy (§4.3), which applies only to peer-to-peer QUIC connections. Relay allocation is an HTTPS API call to a relay operator's infrastructure, and standard web security practices apply. [REQ-TRANS-129]
 
 **Signature Construction:**
 
@@ -1003,19 +1003,19 @@ The HTTPS allocation returns `(allocation_id, token)` but does NOT establish the
 - **Validation:** Subsequent DATA packets must come from the bound UDP address; different source with same token is rejected (potential token theft)
 
 **Valid Packet Types for Initial Binding (Normative):**
-A relay MUST establish initial UDP binding upon receiving ANY well-formed PURL packet with a valid token (matching an existing `pending` allocation), regardless of Packet Type. Specifically:
+A relay MUST establish initial UDP binding upon receiving ANY well-formed PURL packet with a valid token (matching an existing `pending` allocation), regardless of Packet Type. Specifically: [REQ-TRANS-130]
 - PING (0x02), PONG (0x03), DATA (0x01): Bind immediately
 - REFRESH (0x05), RELEASE (0x06): Bind immediately
 - REBIND (0x08): Bind after payload signature validation passes
 
-The Destination IID field is NOT validated for binding purposes (it may be all-zeros for control packets, or any IID for DATA). A packet with correct token but any Destination IID value MUST trigger binding if other validation passes.
+The Destination IID field is NOT validated for binding purposes (it may be all-zeros for control packets, or any IID for DATA). A packet with correct token but any Destination IID value MUST trigger binding if other validation passes. [REQ-TRANS-131]
 
 **Binding Timestamp (Normative):**
-Relays MUST record a `bound_at` timestamp for each allocation equal to the relay's **local monotonic time** (e.g., Unix milliseconds) when the binding is established or updated. This timestamp is used for routing selection (§7.13). The signed `timestamp` inside REBIND JSON is used only for authorization validation (±5 min window), NOT for routing selection.
+Relays MUST record a `bound_at` timestamp for each allocation equal to the relay's **local monotonic time** (e.g., Unix milliseconds) when the binding is established or updated. This timestamp is used for routing selection (§7.13). The signed `timestamp` inside REBIND JSON is used only for authorization validation (±5 min window), NOT for routing selection. [REQ-TRANS-132]
 
 **Allocation Lifetime Bounds (Normative):**
-- Relays MUST reject or clamp `lifetime` values outside the range [60, 86400] seconds (1 minute to 24 hours)
-- The allocation response MUST include the effective `granted_lifetime` (which may differ from requested `lifetime` if clamped)
+- Relays MUST reject or clamp `lifetime` values outside the range [60, 86400] seconds (1 minute to 24 hours) [REQ-TRANS-133]
+- The allocation response MUST include the effective `granted_lifetime` (which may differ from requested `lifetime` if clamped) [REQ-TRANS-134]
 - REFRESH operations extend the allocation by the `granted_lifetime` from the original allocation, NOT the originally requested `lifetime`
 
 ### 7.9 Allocation Response
@@ -1033,12 +1033,12 @@ Relays MUST record a `bound_at` timestamp for each allocation equal to the relay
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| allocation_id | MUST | Unique identifier for this allocation |
-| relay_address | MUST | Hostname of the relay |
-| relay_port | MUST | UDP port for PURL packets |
-| expires_at | MUST | RFC3339 UTC timestamp when allocation expires |
-| granted_lifetime | MUST | Effective lifetime in seconds (may differ from requested if clamped) |
-| token | MUST | 22-character Base64url allocation token |
+| allocation_id | MUST | Unique identifier for this allocation  [REQ-TRANS-135]|
+| relay_address | MUST | Hostname of the relay  [REQ-TRANS-136]|
+| relay_port | MUST | UDP port for PURL packets  [REQ-TRANS-137]|
+| expires_at | MUST | RFC3339 UTC timestamp when allocation expires  [REQ-TRANS-138]|
+| granted_lifetime | MUST | Effective lifetime in seconds (may differ from requested if clamped)  [REQ-TRANS-139]|
+| token | MUST | 22-character Base64url allocation token  [REQ-TRANS-140]|
 
 ### 7.10 Allocation Binding
 
@@ -1069,7 +1069,7 @@ When a client's IP changes (NAT rebinding, network handoff), it sends a PURL pac
 }
 ```
 
-**Relay MUST verify:**
+**Relay MUST verify:** [REQ-TRANS-141]
 1. Payload `token` matches header token
 2. Signature is valid for the IID that created the allocation
 3. Timestamp is within ±5 minutes
@@ -1129,14 +1129,14 @@ ERROR Packet Payload:
 | Concurrent connections | 100 | Resource protection |
 | Allocation lifetime | 3600s | Reclaim unused |
 
-**Allocation Routing Selection (Normative):** When multiple allocations exist for the same IID on a relay, the relay MUST use deterministic selection for inbound packet routing:
+**Allocation Routing Selection (Normative):** When multiple allocations exist for the same IID on a relay, the relay MUST use deterministic selection for inbound packet routing: [REQ-TRANS-142]
 1. Route to the allocation with the highest `bound_at` timestamp (per §7.8 "Binding Timestamp")
 2. If `bound_at` values are **exactly equal** (same millisecond), route to the allocation with the lexicographically smallest `allocation_id`
 3. Allocations in `pending` state (no UDP binding yet, `bound_at` undefined) are NOT considered for routing
 
 **Timestamp Comparison:** The `bound_at` timestamp is relay-local monotonic time in milliseconds. Compare as unsigned 64-bit integers. Do NOT use "within N seconds" approximations—exact comparison only.
 
-**Allocation ID Comparison:** The `allocation_id` is an ASCII string matching `[a-z0-9-]+`. Comparison MUST be bytewise lexicographic over UTF-8/ASCII bytes, case-sensitive. No Unicode normalization is applied.
+**Allocation ID Comparison:** The `allocation_id` is an ASCII string matching `[a-z0-9-]+`. Comparison MUST be bytewise lexicographic over UTF-8/ASCII bytes, case-sensitive. No Unicode normalization is applied. [REQ-TRANS-143]
 
 This ensures consistent routing behavior across relay implementations when multiple devices share an IID.
 
@@ -1217,9 +1217,9 @@ For previously connected peers:
 
 **Post-Urbit Data in 0-RTT (Normative):**
 
-In Post-Urbit v1, implementations MUST NOT send application-layer data (control stream messages, identity handshake, or any stream data) in QUIC 0-RTT early data. The `tls_binding` required for identity handshake is only available after TLS 1.3 handshake completion, making 0-RTT impossible for authenticated streams.
+In Post-Urbit v1, implementations MUST NOT send application-layer data (control stream messages, identity handshake, or any stream data) in QUIC 0-RTT early data. The `tls_binding` required for identity handshake is only available after TLS 1.3 handshake completion, making 0-RTT impossible for authenticated streams. [REQ-TRANS-144]
 
-QUIC 0-RTT MAY be used by the underlying transport for connection resumption (TLS session tickets), but all Post-Urbit protocol bytes MUST be sent in 1-RTT or later.
+QUIC 0-RTT MAY be used by the underlying transport for connection resumption (TLS session tickets), but all Post-Urbit protocol bytes MUST be sent in 1-RTT or later. [REQ-TRANS-145]
 
 **0-RTT Security Rationale (Informative):**
 
@@ -1228,17 +1228,17 @@ The restriction on 0-RTT application data exists because:
 - The `tls_binding` required for Post-Urbit identity authentication is not available until after TLS handshake completion
 - Even theoretically "safe" operations (identity_request, ping) cannot be sent because they would lack authentication context
 
-Future protocol versions MAY define specific 0-RTT-safe message types, but v1 prohibits all Post-Urbit protocol bytes in 0-RTT early data.
+Future protocol versions MAY define specific 0-RTT-safe message types, but v1 prohibits all Post-Urbit protocol bytes in 0-RTT early data. [REQ-TRANS-146]
 
 ### 8.4 Abbreviated Handshake (Resumption) [OUT OF SCOPE FOR V1]
 
-**Status:** This section describes a future optimization. For v1, implementations MUST NOT use abbreviated handshake resumption. All connections MUST use the full handshake (§5.3-§5.11).
+**Status:** This section describes a future optimization. For v1, implementations MUST NOT use abbreviated handshake resumption. All connections MUST use the full handshake (§5.3-§5.11). [REQ-TRANS-147]
 
 **Reserved Fields:** The `resume` field in `client_hello` and the `resume_accepted` message type are reserved for future use. v1 implementations:
-- MUST NOT include `resume` in `client_hello`
-- MUST ignore `resume` if received (proceed with full handshake)
-- MUST NOT send `resume_accepted`
-- MUST treat `resume_accepted` as an unknown message type (error)
+- MUST NOT include `resume` in `client_hello` [REQ-TRANS-148]
+- MUST ignore `resume` if received (proceed with full handshake) [REQ-TRANS-149]
+- MUST NOT send `resume_accepted` [REQ-TRANS-150]
+- MUST treat `resume_accepted` as an unknown message type (error) [REQ-TRANS-151]
 
 **Future Direction:** A future protocol version will specify the complete abbreviated handshake, including:
 - Full `resume_accepted` message schema
@@ -1263,7 +1263,7 @@ After the identity handshake completes on both ends:
 
 **Resolution Algorithm (Normative):**
 
-When glare is detected, peers MUST resolve as follows:
+When glare is detected, peers MUST resolve as follows: [REQ-TRANS-152]
 
 1. Compare the initiator's `(iid, did)` tuple of each connection lexicographically
 2. The connection initiated by the **smaller** `(iid, did)` tuple survives
@@ -1292,7 +1292,7 @@ def tuple_less_than(a: tuple[str, str|None], b: tuple[str, str|None]) -> bool:
     return a[1] < b[1]  # Compare DIDs lexicographically
 ```
 
-**Ordering Domain (Normative):** Glare resolution uses ASCII lexicographic comparison of the 32-character lowercase Crockford Base32 string representations. Implementations MUST NOT decode IIDs/DIDs to raw bytes for glare ordering. This differs from cryptographic salt ordering (e.g., RFC-0003 `kdf_initial` which uses raw-byte comparison for determining initiator/responder roles).
+**Ordering Domain (Normative):** Glare resolution uses ASCII lexicographic comparison of the 32-character lowercase Crockford Base32 string representations. Implementations MUST NOT decode IIDs/DIDs to raw bytes for glare ordering. This differs from cryptographic salt ordering (e.g., RFC-0003 `kdf_initial` which uses raw-byte comparison for determining initiator/responder roles). [REQ-TRANS-153]
 
 **Example:**
 
@@ -1312,8 +1312,8 @@ Bob   (IID: b4c5d6..., DID: e7f8g9...)
 
 **Timing:**
 
-- Glare resolution MUST occur immediately after handshake completion
-- Implementations SHOULD NOT delay resolution or race to close first
+- Glare resolution MUST occur immediately after handshake completion [REQ-TRANS-154]
+- Implementations SHOULD NOT delay resolution or race to close first [REQ-TRANS-155]
 - The deterministic algorithm ensures both peers close the same connection
 
 ## 9. Error Handling
@@ -1351,9 +1351,9 @@ They do NOT provide:
 - Identity authentication (done via handshake)
 - Long-term trust (identity documents handle this)
 
-As specified in §4.3, implementations MUST accept ANY certificate and MUST NOT perform validation (expiration, chain, hostname, EKU). The identity handshake provides all authentication guarantees.
+As specified in §4.3, implementations MUST accept ANY certificate and MUST NOT perform validation (expiration, chain, hostname, EKU). The identity handshake provides all authentication guarantees. [REQ-TRANS-156]
 
-**ALPN Scope:** This policy applies ONLY to Post-Urbit protocol connections (ALPN `post-urbit/1`). DHT/libp2p connections (ALPN `libp2p`) use libp2p's standard TLS certificate requirements where the certificate cryptographically proves the PeerID. Implementations MUST NOT apply "accept any certificate" to libp2p connections. See `spec/00-shared/layer-integration.md` "TLS Certificate Policy by ALPN" for normative requirements.
+**ALPN Scope:** This policy applies ONLY to Post-Urbit protocol connections (ALPN `post-urbit/1`). DHT/libp2p connections (ALPN `libp2p`) use libp2p's standard TLS certificate requirements where the certificate cryptographically proves the PeerID. Implementations MUST NOT apply "accept any certificate" to libp2p connections. See `spec/00-shared/layer-integration.md` "TLS Certificate Policy by ALPN" for normative requirements. [REQ-TRANS-157]
 
 ### 10.2 Replay Protection
 
@@ -1537,7 +1537,7 @@ Full input (hex):
 |---------|------|---------|
 | 1.0 | 2026-01-14 | Initial draft |
 | 1.1 | 2026-01-14 | Fixed BLOCKING issues from GPT-5.2 review: Base32 spec, stream identification, error code registry, PURL packet types, domain separators, encapsulation model, test vectors |
-| 1.2 | 2026-01-15 | Added §6.6 Bulk Stream Wire Protocol: marked stream type 0x05 as reserved for v2 with normative requirement that v1 implementations MUST NOT use it; included non-normative future direction with anticipated message formats |
+| 1.2 | 2026-01-15 | Added §6.6 Bulk Stream Wire Protocol: marked stream type 0x05 as reserved for v2 with normative requirement that v1 implementations MUST NOT use it; included non-normative future direction with anticipated message formats  [REQ-TRANS-158]|
 
 ## 15. Appendix: Wire Format Summary
 
@@ -1585,4 +1585,4 @@ Max Payload: 65535 bytes
 | ServerHello | "server_hello" | Server → Client |
 | ClientAuth | "client_auth" | Client → Server |
 | HandshakeComplete | "handshake_complete" | Server → Client |
-| ResumeAccepted | "resume_accepted" | Server → Client (Reserved, v1 MUST NOT use) |
+| ResumeAccepted | "resume_accepted" | Server → Client (Reserved, v1 MUST NOT use)  [REQ-TRANS-159]|

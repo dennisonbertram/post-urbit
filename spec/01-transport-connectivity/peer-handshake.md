@@ -8,7 +8,7 @@ The peer handshake establishes an **identity-authenticated connection** on top o
 
 **Optional Field Handling (Normative):**
 
-Per RFC-0002 §5.5, optional handshake fields MAY be omitted entirely or present with value `null`. Receivers MUST treat both forms equivalently:
+Per RFC-0002 §5.5, optional handshake fields MAY be omitted entirely or present with value `null`. Receivers MUST treat both forms equivalently: [REQ-TRANS-037]
 
 ```json
 // These are semantically identical:
@@ -17,9 +17,9 @@ Per RFC-0002 §5.5, optional handshake fields MAY be omitted entirely or present
 ```
 
 Implementations:
-- Senders MAY omit optional fields or include them as `null`
-- Receivers MUST accept both forms without error
-- Receivers MUST NOT require a specific representation
+- Senders MAY omit optional fields or include them as `null` [REQ-TRANS-038]
+- Receivers MUST accept both forms without error [REQ-TRANS-039]
+- Receivers MUST NOT require a specific representation [REQ-TRANS-040]
 
 This ensures interoperability between implementations that serialize optionals differently.
 
@@ -110,7 +110,7 @@ This ensures interoperability between implementations that serialize optionals d
 | `client_did` | No | Client's device identifier (Crockford Base32, 32 chars) |
 | `expected_server_iid` | No | Expected server IID (Crockford Base32, 32 chars) |
 | `client_nonce` | Yes | 32 random bytes, Base64 standard alphabet (RFC 4648 §4), **no padding** |
-| `timestamp` | Yes | Canonical RFC3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`, no fractional seconds); must be within ±5 minutes. Implementations MUST reject non-canonical forms. |
+| `timestamp` | Yes | Canonical RFC3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`, no fractional seconds); must be within ±5 minutes. Implementations MUST reject non-canonical forms.  [REQ-TRANS-041]|
 | `tls_binding` | Yes | 32 bytes from TLS exporter, Base64 standard alphabet, **no padding** |
 
 ### ServerHello
@@ -136,7 +136,7 @@ This ensures interoperability between implementations that serialize optionals d
 | `server_iid` | Yes | Server's identity identifier (Crockford Base32, 32 chars) |
 | `server_did` | No | Server's device identifier (Crockford Base32, 32 chars) |
 | `server_nonce` | Yes | 32 random bytes, Base64 standard alphabet, **no padding** |
-| `timestamp` | Yes | Canonical RFC3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`, no fractional seconds); must be within ±5 minutes. Implementations MUST reject non-canonical forms. |
+| `timestamp` | Yes | Canonical RFC3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`, no fractional seconds); must be within ±5 minutes. Implementations MUST reject non-canonical forms.  [REQ-TRANS-042]|
 | `tls_binding` | Yes | 32 bytes from TLS exporter, Base64 standard alphabet, **no padding** |
 | `identity_document` | Yes | Full identity document (JSON object) |
 | `device_document` | If `server_did` | Device document proving DID ownership |
@@ -161,7 +161,7 @@ challenge_data = concat(
 challenge_signature = Ed25519_Sign(server_signing_key, SHA256(challenge_data))
 ```
 
-**Note:** IIDs MUST be decoded from Base32 to 20 raw bytes. Nonces and tls_binding are decoded from Base64 standard (no padding).
+**Note:** IIDs MUST be decoded from Base32 to 20 raw bytes. Nonces and tls_binding are decoded from Base64 standard (no padding). [REQ-TRANS-043]
 
 ### Device Signature (if DID provided)
 
@@ -287,7 +287,7 @@ Each Message:
 
 - **Stream type** is written ONCE at stream start (1 byte)
 - **Each message** is prefixed with 4-byte big-endian length
-- Implementations MUST buffer partial reads to reassemble complete frames
+- Implementations MUST buffer partial reads to reassemble complete frames [REQ-TRANS-044]
 - Maximum message size: 64 KB (65536 bytes, includes identity document)
 
 ## Verification Steps
@@ -311,7 +311,7 @@ Each Message:
 3. Check `tls_binding` matches current TLS session
 4. Verify server's identity document
 5. Verify `server_iid` matches document's IID
-6. If client had `expected_server_iid`, verify it matches `server_iid`; MUST abort if mismatch
+6. If client had `expected_server_iid`, verify it matches `server_iid`; MUST abort if mismatch [REQ-TRANS-045]
 7. Reconstruct challenge data
 8. Verify `challenge_signature` with document's current signing key
 
@@ -319,11 +319,11 @@ Each Message:
 
 When the connection is initiated for a **specific known IID** (e.g., via `TransportService.connect(peerIID)` or equivalent API where the caller knows the intended peer):
 
-1. The client MUST include `expected_server_iid` in the ClientHello
-2. The client MUST abort the handshake with error `IDENTITY_MISMATCH` if `server_iid` differs from `expected_server_iid`
-3. The connection MUST NOT be established if the expected IID check fails
+1. The client MUST include `expected_server_iid` in the ClientHello [REQ-TRANS-046]
+2. The client MUST abort the handshake with error `IDENTITY_MISMATCH` if `server_iid` differs from `expected_server_iid` [REQ-TRANS-047]
+3. The connection MUST NOT be established if the expected IID check fails [REQ-TRANS-048]
 
-The `expected_server_iid` field MAY be omitted only in discovery scenarios where the client genuinely does not know who it is connecting to (e.g., connecting to a relay endpoint where the relay's IID was not pre-known). Such scenarios require explicit threat modeling and are not typical for peer-to-peer messaging.
+The `expected_server_iid` field MAY be omitted only in discovery scenarios where the client genuinely does not know who it is connecting to (e.g., connecting to a relay endpoint where the relay's IID was not pre-known). Such scenarios require explicit threat modeling and are not typical for peer-to-peer messaging. [REQ-TRANS-049]
 
 **Rationale:** This prevents wrong-peer acceptance attacks where a user could be induced to complete a valid handshake with an unintended identity (e.g., via DNS poisoning, misdirected endpoint hints, or UI confusion).
 
@@ -407,7 +407,7 @@ This ensures:
 
 ## Anonymous Connections
 
-**Note:** Anonymous connections are **OUT OF SCOPE for v1**. All peer-to-peer connections MUST be mutually authenticated. See RFC-0002 §5.14 for the authoritative specification.
+**Note:** Anonymous connections are **OUT OF SCOPE for v1**. All peer-to-peer connections MUST be mutually authenticated. See RFC-0002 §5.14 for the authoritative specification. [REQ-TRANS-050]
 
 Relay and DHT services use separate protocols (HTTPS for relay allocation, DHT-native authentication) that don't require the identity handshake.
 
@@ -415,17 +415,17 @@ Future versions may define anonymous connection modes for specific use cases.
 
 ## Abbreviated Handshake Resumption [OUT OF SCOPE FOR V1]
 
-**Status:** This section describes a future optimization. For v1, implementations MUST NOT use application-level abbreviated handshake resumption. The `resume` field and `resume_accepted` message are reserved for future use.
+**Status:** This section describes a future optimization. For v1, implementations MUST NOT use application-level abbreviated handshake resumption. The `resume` field and `resume_accepted` message are reserved for future use. [REQ-TRANS-051]
 
-This refers to Post-Urbit application-level handshake abbreviation, NOT QUIC/TLS session resumption. QUIC TLS resumption MAY be used for transport efficiency, but Post-Urbit protocol bytes MUST NOT be sent in 0-RTT early data.
+This refers to Post-Urbit application-level handshake abbreviation, NOT QUIC/TLS session resumption. QUIC TLS resumption MAY be used for transport efficiency, but Post-Urbit protocol bytes MUST NOT be sent in 0-RTT early data. [REQ-TRANS-052]
 
 **V1 Requirements (Normative):**
-- Implementations MUST NOT include `resume` in `client_hello`
-- Implementations MUST ignore `resume` if received (proceed with full handshake)
-- Implementations MUST NOT send `resume_accepted`
-- Implementations MUST treat `resume_accepted` as an unknown message type (error)
+- Implementations MUST NOT include `resume` in `client_hello` [REQ-TRANS-053]
+- Implementations MUST ignore `resume` if received (proceed with full handshake) [REQ-TRANS-054]
+- Implementations MUST NOT send `resume_accepted` [REQ-TRANS-055]
+- Implementations MUST treat `resume_accepted` as an unknown message type (error) [REQ-TRANS-056]
 
-All v1 connections MUST use the full handshake flow (§Handshake Flow above).
+All v1 connections MUST use the full handshake flow (§Handshake Flow above). [REQ-TRANS-057]
 
 ---
 

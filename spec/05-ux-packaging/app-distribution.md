@@ -86,7 +86,7 @@ Every `.postapp` must be signed by the author's identity signing key.
 |-------|------|-------------|
 | `author_iid` | string | Author's Identity Identifier (Crockford Base32) |
 | `timestamp` | string | RFC3339 UTC timestamp when signed |
-| `signature` | string | Base64-encoded Ed25519 signature (RFC 4648 standard alphabet, NO padding; verifiers MUST reject strings ending with `=`) |
+| `signature` | string | Base64-encoded Ed25519 signature (RFC 4648 standard alphabet, NO padding; verifiers MUST reject strings ending with `=`)  [REQ-OPS-001]|
 | `signed_manifest_hash` | string | `"sha256:" + hex(SHA256(JCS(manifest.json)))` |
 
 ### Signing Process
@@ -129,7 +129,7 @@ Every `.postapp` must be signed by the author's identity signing key.
 
 **Signature Key Selection (Normative):**
 
-Verifiers MUST attempt signature verification using the publisher's signing keys in the following order:
+Verifiers MUST attempt signature verification using the publisher's signing keys in the following order: [REQ-OPS-002]
 1. `keys.signing.current`
 2. `keys.signing.previous` (if present and non-null)
 3. `keys.signing.history[]` entries (in order, regardless of `expires_at`)
@@ -139,11 +139,11 @@ Accept the signature if ANY key successfully verifies. This algorithm ensures:
 - No dependency on historical IDOC version availability
 - Consistent behavior with PUSE signature verification (RFC-0003 §3.8)
 
-**`expires_at` Handling:** For package signatures, `expires_at` on historical keys is NOT a rejection criterion. This aligns with real-time message verification (RFC-0003 §3.8) which also treats `expires_at` as UI metadata only. Package signatures represent a point-in-time assertion that must remain verifiable indefinitely. Implementations SHOULD display a warning if the signing key's `expires_at` has passed, but MUST NOT reject the package solely for this reason.
+**`expires_at` Handling:** For package signatures, `expires_at` on historical keys is NOT a rejection criterion. This aligns with real-time message verification (RFC-0003 §3.8) which also treats `expires_at` as UI metadata only. Package signatures represent a point-in-time assertion that must remain verifiable indefinitely. Implementations SHOULD display a warning if the signing key's `expires_at` has passed, but MUST NOT reject the package solely for this reason. [REQ-OPS-003]
 
 ### Revocation Check Algorithm (Normative)
 
-When verifying a package signature, implementations MUST check for applicable revocations:
+When verifying a package signature, implementations MUST check for applicable revocations: [REQ-OPS-004]
 
 ```
 1. Query DHT key SHA256("post-urbit:revocation:" || author_iid) for revocation records
@@ -176,9 +176,9 @@ When verifying a package signature, implementations MUST check for applicable re
 
 Package signatures reference a specific signing key by its public key bytes. The spec requires signatures to be "verifiable indefinitely" but key history is normally limited to 2 years (per identity-document-schema.md). To support long-term verification:
 
-1. **Extended key retention (RECOMMENDED):** Signing keys used for package signatures SHOULD be retained in `keys.signing.history` beyond the normal 2-year retention limit. Authors who publish packages SHOULD configure extended retention for keys used in active package signatures.
+1. **Extended key retention (RECOMMENDED):** Signing keys used for package signatures SHOULD be retained in `keys.signing.history` beyond the normal 2-year retention limit. Authors who publish packages SHOULD configure extended retention for keys used in active package signatures. [REQ-OPS-005]
 
-2. **Embedded signing key (ALTERNATIVE):** Package manifests MAY embed the full signing key used for signing in the `distribution` section:
+2. **Embedded signing key (ALTERNATIVE):** Package manifests MAY embed the full signing key used for signing in the `distribution` section: [REQ-OPS-006]
    ```json
    {
      "distribution": {
@@ -186,11 +186,11 @@ Package signatures reference a specific signing key by its public key bytes. The
      }
    }
    ```
-   When present, verifiers MAY use this embedded key for self-contained verification, after confirming the key was valid for the author at some point (by checking if it matches genesis, current, previous, or any history[] entry).
+   When present, verifiers MAY use this embedded key for self-contained verification, after confirming the key was valid for the author at some point (by checking if it matches genesis, current, previous, or any history[] entry). [REQ-OPS-007]
 
-3. **Installation-time caching (ALTERNATIVE):** Implementations MAY cache the author's identity document at package installation time. This cached document can be used for offline verification and provides a snapshot of valid keys at installation time.
+3. **Installation-time caching (ALTERNATIVE):** Implementations MAY cache the author's identity document at package installation time. This cached document can be used for offline verification and provides a snapshot of valid keys at installation time. [REQ-OPS-008]
 
-**Recommendation:** Authors publishing long-lived packages (>2 years expected lifetime) SHOULD use approach (1) or (2) to ensure continued verifiability.
+**Recommendation:** Authors publishing long-lived packages (>2 years expected lifetime) SHOULD use approach (1) or (2) to ensure continued verifiability. [REQ-OPS-009]
 
 ### Timestamp Semantics
 
@@ -302,7 +302,7 @@ Repositories are curated collections of apps with additional metadata.
 
 **Repository Manifest Signing:**
 
-Repository manifests MUST be signed by the operator's identity signing key, following the same pattern as package signing:
+Repository manifests MUST be signed by the operator's identity signing key, following the same pattern as package signing: [REQ-OPS-010]
 
 ```
 Repository Signature Process:
@@ -320,7 +320,7 @@ Repository Signature Process:
    }
 ```
 
-All `sig` fields MUST use RFC 4648 Base64 standard alphabet with NO padding. Verifiers MUST reject padded input (strings ending with `=`).
+All `sig` fields MUST use RFC 4648 Base64 standard alphabet with NO padding. Verifiers MUST reject padded input (strings ending with `=`). [REQ-OPS-011]
 
 **Verification:**
 - Fetch operator's identity document from DHT
@@ -444,7 +444,7 @@ Apps can specify an update URL in their manifest:
 
 **Update Manifest Signing:**
 
-Update manifests MUST be signed by the app author (same `author_iid` as the installed app):
+Update manifests MUST be signed by the app author (same `author_iid` as the installed app): [REQ-OPS-012]
 
 ```
 Update Signature Process:
@@ -457,11 +457,11 @@ Update Signature Process:
 6. Add signature object (see above)
 ```
 
-All `sig` fields MUST use RFC 4648 Base64 standard alphabet with NO padding. Verifiers MUST reject padded input (strings ending with `=`).
+All `sig` fields MUST use RFC 4648 Base64 standard alphabet with NO padding. Verifiers MUST reject padded input (strings ending with `=`). [REQ-OPS-013]
 
 **Update Verification:**
-- `author_iid` MUST match installed app's author (prevents takeover)
-- `app_id` MUST match installed app's ID
+- `author_iid` MUST match installed app's author (prevents takeover) [REQ-OPS-014]
+- `app_id` MUST match installed app's ID [REQ-OPS-015]
 - Signature must be valid for author's current or historical key
 - Freshness: warn if signature >7 days old (but don't reject)
 

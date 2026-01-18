@@ -17,7 +17,7 @@ This specification depends on the following documents in this repository:
 | Peer Handshake | `spec/01-transport-connectivity/peer-handshake.md` | Challenge signature construction |
 | Recovery Mechanisms | `spec/02-identity-trust/recovery-mechanisms.md` | Recovery proof format |
 
-**All referenced specifications MUST be consulted for complete implementation.** This document provides integration glue; the RFCs are authoritative for wire formats.
+**All referenced specifications MUST be consulted for complete implementation.** This document provides integration glue; the RFCs are authoritative for wire formats. [REQ-SHARED-001]
 
 ## Documentation Notation Convention
 
@@ -33,7 +33,7 @@ Throughout this specification, the following notation is used:
 
 ## Common TypeScript Types
 
-The following types are used across all layer interface definitions. Implementations MUST use these definitions for cross-layer compatibility.
+The following types are used across all layer interface definitions. Implementations MUST use these definitions for cross-layer compatibility. [REQ-SHARED-002]
 
 ```typescript
 /**
@@ -142,18 +142,18 @@ This specification defines an **abstract DHT interface** with the following oper
 
 **Implementation Requirements:**
 
-Implementations MUST use a DHT that provides:
+Implementations MUST use a DHT that provides: [REQ-SHARED-003]
 1. **Fixed-length keyspace**: Keys are exactly 32 raw bytes (SHA-256 outputs derived from identifier namespaces, NOT content hashes)
 2. **Replication**: Values are stored on multiple nodes for availability
-3. **TTL enforcement**: Nodes MUST expire records after TTL seconds
-4. **Signature verification**: Nodes MUST verify IDOC signatures before storing (see DHT Record Format below)
+3. **TTL enforcement**: Nodes MUST expire records after TTL seconds [REQ-SHARED-004]
+4. **Signature verification**: Nodes MUST verify IDOC signatures before storing (see DHT Record Format below) [REQ-SHARED-005]
 
 **Recommended Implementation:** Kademlia-based DHT (e.g., libp2p-kad-dht) with the following parameters:
 - Replication factor (k): 20
 - Alpha (concurrent lookups): 3
 - Refresh interval: 1 hour
 
-**Bootstrap:** Implementations SHOULD support configurable bootstrap nodes. A reference bootstrap list will be published separately.
+**Bootstrap:** Implementations SHOULD support configurable bootstrap nodes. A reference bootstrap list will be published separately. [REQ-SHARED-006]
 
 **Conflict Resolution (Normative):**
 
@@ -162,25 +162,25 @@ When `getAll` returns multiple valid documents with the same IID:
 1. **Different sequences:** Select the document with the highest sequence number (numeric comparison).
 2. **Same sequence, same content:** No conflict; documents are equivalent (compare via JCS canonical bytes).
 3. **Same sequence, different content:** This indicates a bug or attack. Resolution:
-   - MUST NOT auto-resolve using hash comparison (hash tiebreakers are gameable by attackers)
-   - SHOULD keep the first-seen document locally (TOFU - Trust On First Use)
-   - MUST enter "conflict" state and log the conflict for operator investigation
-   - SHOULD notify user/operator for manual resolution
-   - MAY attempt to fetch genesis document and additional sources to gather evidence
+   - MUST NOT auto-resolve using hash comparison (hash tiebreakers are gameable by attackers) [REQ-SHARED-007]
+   - SHOULD keep the first-seen document locally (TOFU - Trust On First Use) [REQ-SHARED-008]
+   - MUST enter "conflict" state and log the conflict for operator investigation [REQ-SHARED-009]
+   - SHOULD notify user/operator for manual resolution [REQ-SHARED-010]
+   - MAY attempt to fetch genesis document and additional sources to gather evidence [REQ-SHARED-011]
 
 **Rationale:** Same-sequence conflicts are rare in normal operation and typically indicate key compromise or protocol bugs. Automatic resolution would allow attackers with key access to force a "winning" document by crafting low-hash variants. Manual resolution preserves security at the cost of availability.
 
-**Note:** This differs from DHT *storage* node behavior. DHT nodes MAY use deterministic selection (e.g., smallest hash) for storage consistency, but clients MUST treat same-sequence conflicts as requiring investigation.
+**Note:** This differs from DHT *storage* node behavior. DHT nodes MAY use deterministic selection (e.g., smallest hash) for storage consistency, but clients MUST treat same-sequence conflicts as requiring investigation. [REQ-SHARED-012]
 
-**DHT Query Completeness:** `dhtGet(key)` MUST query at least k=20 closest peers (or until a 2-second timeout, whichever comes first) and return all distinct values discovered (deduplicated by exact byte equality).
+**DHT Query Completeness:** `dhtGet(key)` MUST query at least k=20 closest peers (or until a 2-second timeout, whichever comes first) and return all distinct values discovered (deduplicated by exact byte equality). [REQ-SHARED-013]
 
 ### DHT Wire Protocol (Normative)
 
-This section specifies the required DHT wire protocol for interoperability. Two compliant implementations MUST be able to join the same DHT overlay and discover each other.
+This section specifies the required DHT wire protocol for interoperability. Two compliant implementations MUST be able to join the same DHT overlay and discover each other. [REQ-SHARED-014]
 
 #### Required Protocol: libp2p Kademlia DHT
 
-Implementations MUST use the **libp2p Kademlia DHT** protocol with the following configuration:
+Implementations MUST use the **libp2p Kademlia DHT** protocol with the following configuration: [REQ-SHARED-015]
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
@@ -211,7 +211,7 @@ DHT node identity is derived from the Post-Urbit identity signing keypair:
 
 **libp2p PeerID Derivation (Normative):**
 
-Implementations MUST use standard libp2p PeerID derivation for Ed25519 public keys per the [libp2p peer-ids specification](https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md). The derivation is:
+Implementations MUST use standard libp2p PeerID derivation for Ed25519 public keys per the [libp2p peer-ids specification](https://github.com/libp2p/specs/blob/master/peer-ids/peer-ids.md). The derivation is: [REQ-SHARED-016]
 
 1. **Multicodec prefix**: The Ed25519 public key multicodec is `0xed` (237 decimal). In unsigned varint encoding, this becomes `0xed 0x01` (two bytes).
 2. **Key encoding**: `0xed 0x01 || pubkey` = 34 bytes
@@ -248,7 +248,7 @@ def derive_dht_node_id(ed25519_pubkey: bytes) -> bytes:
     return sha256(peer_id)  # 32 bytes
 ```
 
-**Interoperability Note:** Any compliant libp2p implementation (go-libp2p, rust-libp2p, js-libp2p) will produce identical PeerIDs from the same Ed25519 public key bytes. Implementations SHOULD use their platform's libp2p library for PeerID derivation rather than reimplementing.
+**Interoperability Note:** Any compliant libp2p implementation (go-libp2p, rust-libp2p, js-libp2p) will produce identical PeerIDs from the same Ed25519 public key bytes. Implementations SHOULD use their platform's libp2p library for PeerID derivation rather than reimplementing. [REQ-SHARED-017]
 
 **PeerID Derivation Test Vector (Normative):**
 
@@ -273,7 +273,7 @@ Step 4 - DHT Node ID = SHA256(PeerID bytes):
   5e2b9f3c8a7d4f1e6b0c2a8d5f3e7b9c4a6d8f0e2b4c6a8d0f2e4b6c8a0d2e4f
 ```
 
-Implementations MUST verify they produce identical PeerID bytes and Base58btc encoding for this test case. Different encodings indicate a derivation bug that will break DHT interoperability.
+Implementations MUST verify they produce identical PeerID bytes and Base58btc encoding for this test case. Different encodings indicate a derivation bug that will break DHT interoperability. [REQ-SHARED-018]
 
 **Single Home Node Model (v1):** In v1, the home node's DHT PeerID is derived from the **identity signing key** (`keys.signing.current`). Individual devices do not participate in the DHT directly; they connect to the home node which handles DHT operations on behalf of the identity. This simplifies DHT routing: one identity = one DHT presence. Future versions may support multi-device DHT participation.
 
@@ -320,13 +320,13 @@ The DHT operates over the following transport stack:
 
 | Transport | Security | Notes |
 |-----------|----------|-------|
-| QUIC (`/quic-v1`) | TLS 1.3 (built-in) | MUST support; TLS 1.3 is integral to QUIC handshake |
-| TCP (fallback) | Noise XX or TLS 1.3 | MAY support; Noise XX RECOMMENDED, TLS 1.3 acceptable |
+| QUIC (`/quic-v1`) | TLS 1.3 (built-in) | MUST support; TLS 1.3 is integral to QUIC handshake  [REQ-SHARED-019]|
+| TCP (fallback) | Noise XX or TLS 1.3 | MAY support; Noise XX RECOMMENDED, TLS 1.3 acceptable  [REQ-SHARED-020]|
 
 **Security Clarification:**
-- For QUIC transport (`/quic-v1`), connection security is provided by QUIC's integrated TLS 1.3 handshake; Noise is not applicable and MUST NOT be negotiated over QUIC.
+- For QUIC transport (`/quic-v1`), connection security is provided by QUIC's integrated TLS 1.3 handshake; Noise is not applicable and MUST NOT be negotiated over QUIC. [REQ-SHARED-021]
 - The multiaddr `/quic-v1` already implies TLS 1.3 security—no additional security negotiation is needed.
-- For TCP fallback, a separate security layer (Noise XX or TLS 1.3) MUST be negotiated via multistream-select before protocol streams.
+- For TCP fallback, a separate security layer (Noise XX or TLS 1.3) MUST be negotiated via multistream-select before protocol streams. [REQ-SHARED-022]
 - When TCP is used, stream multiplexing (yamux or mplex) is also required since TCP lacks native multiplexing.
 
 | Layer | QUIC | TCP Fallback |
@@ -335,7 +335,7 @@ The DHT operates over the following transport stack:
 | Multiplexing | Native QUIC streams | yamux or mplex required |
 | Addressing | `/ip4/.../udp/4433/quic-v1` | `/ip4/.../tcp/4433` |
 
-**Port:** DHT nodes SHOULD listen on UDP port **4433** (same as Post-Urbit QUIC connections). This allows a single UDP socket to serve both DHT and direct peer connections via ALPN-based demultiplexing.
+**Port:** DHT nodes SHOULD listen on UDP port **4433** (same as Post-Urbit QUIC connections). This allows a single UDP socket to serve both DHT and direct peer connections via ALPN-based demultiplexing. [REQ-SHARED-023]
 
 #### ALPN Demultiplexing (Normative)
 
@@ -353,7 +353,7 @@ Post-Urbit nodes run **two logical QUIC endpoints** on the same UDP port, distin
    - If ALPN is `libp2p` → route to libp2p/DHT protocol handler
    - If ALPN is unrecognized or absent → reject connection with TLS alert `no_application_protocol`
 
-2. **Outgoing connections:** Clients MUST offer exactly one ALPN based on the intended protocol:
+2. **Outgoing connections:** Clients MUST offer exactly one ALPN based on the intended protocol: [REQ-SHARED-024]
    - For messaging/sync: offer `post-urbit/1`
    - For DHT operations: offer `libp2p`
 
@@ -366,11 +366,11 @@ Most QUIC libraries support multiple ALPN handlers on a single UDP socket. For e
 
 **No Connection Reuse Between Protocols:**
 
-Post-Urbit and DHT connections MUST NOT share QUIC connections. The stream framing is incompatible:
+Post-Urbit and DHT connections MUST NOT share QUIC connections. The stream framing is incompatible: [REQ-SHARED-025]
 - Post-Urbit streams begin with a 1-byte stream type (0x01-0x05) followed by length-prefixed frames
 - libp2p streams begin with multistream-select negotiation (variable-length protocol strings)
 
-Attempting to reuse a Post-Urbit connection for DHT operations (or vice versa) would cause protocol errors. Implementations MUST open separate QUIC connections for each protocol, even to the same peer.
+Attempting to reuse a Post-Urbit connection for DHT operations (or vice versa) would cause protocol errors. Implementations MUST open separate QUIC connections for each protocol, even to the same peer. [REQ-SHARED-026]
 
 **Rationale:** While connection reuse would reduce connection overhead, the incompatible stream framing between Post-Urbit (simple byte prefix) and libp2p (multistream-select) makes it impractical without a complex bridging layer. For v1, separate connections provide clean isolation with minimal complexity.
 
@@ -390,7 +390,7 @@ DHT nodes store and validate the following record types:
 
 **Record Validation Rules:**
 
-Before storing ANY record, DHT nodes MUST:
+Before storing ANY record, DHT nodes MUST: [REQ-SHARED-027]
 1. Parse the record according to its type (type is determined by reconstructing the expected DHT key from the record's identifier field and comparing)
 2. Verify all required signatures per the relevant specification
 3. Reject records that fail validation (do not store, do not forward)
@@ -399,26 +399,26 @@ For identity documents specifically, see "DHT Record Format" section below for d
 
 **Validation Failure Behavior (Normative):**
 
-When a record fails validation, DHT nodes MUST follow these requirements:
+When a record fails validation, DHT nodes MUST follow these requirements: [REQ-SHARED-028]
 
 | Action | Requirement |
 |--------|-------------|
-| Storage | MUST NOT store the record |
-| Forwarding | MUST NOT forward/republish the record |
-| Error response | SHOULD respond with libp2p Kademlia error status if the underlying library supports it |
-| Peer scoring | SHOULD apply peer scoring penalties for repeated invalid records |
-| Logging | MUST log validation failures with: `record_type`, `claimed_iid`, `failure_reason` |
+| Storage | MUST NOT store the record  [REQ-SHARED-029]|
+| Forwarding | MUST NOT forward/republish the record  [REQ-SHARED-030]|
+| Error response | SHOULD respond with libp2p Kademlia error status if the underlying library supports it  [REQ-SHARED-031]|
+| Peer scoring | SHOULD apply peer scoring penalties for repeated invalid records  [REQ-SHARED-032]|
+| Logging | MUST log validation failures with: `record_type`, `claimed_iid`, `failure_reason`  [REQ-SHARED-033]|
 
 **Rationale:** Strict rejection prevents propagation of invalid records through the DHT. Peer scoring helps identify and deprioritize misbehaving nodes. Logging enables operators to detect attacks or bugs.
 
 **JCS Canonical JSON Requirement (Normative):**
 
-DHT nodes MUST reject PUT requests where the value bytes are not JCS-canonical JSON (for record types using JSON: device documents, device index, and revocation records). This ensures consistent conflict resolution and byte-identical refresh semantics. Specifically:
-- Device documents (`post-urbit:device:`): JSON value MUST be JCS-canonical
-- Device index records (`post-urbit:devices-for:`): JSON value MUST be JCS-canonical
-- Revocation records (`post-urbit:revocation:`, `post-urbit:device-revocation:`): JSON value MUST be JCS-canonical
+DHT nodes MUST reject PUT requests where the value bytes are not JCS-canonical JSON (for record types using JSON: device documents, device index, and revocation records). This ensures consistent conflict resolution and byte-identical refresh semantics. Specifically: [REQ-SHARED-034]
+- Device documents (`post-urbit:device:`): JSON value MUST be JCS-canonical [REQ-SHARED-035]
+- Device index records (`post-urbit:devices-for:`): JSON value MUST be JCS-canonical [REQ-SHARED-036]
+- Revocation records (`post-urbit:revocation:`, `post-urbit:device-revocation:`): JSON value MUST be JCS-canonical [REQ-SHARED-037]
 
-Identity documents (IDOC envelope) have their own canonicalization requirement: the JSON payload within the envelope MUST be JCS-canonical per RFC-0001.
+Identity documents (IDOC envelope) have their own canonicalization requirement: the JSON payload within the envelope MUST be JCS-canonical per RFC-0001. [REQ-SHARED-038]
 
 **DHT Key Format (Normative):**
 
@@ -429,7 +429,7 @@ Hash Input:  prefix_string + identifier    (UTF-8 string)
 DHT Key:     SHA256(hash_input)            (32 raw bytes)
 ```
 
-**IMPORTANT:** The DHT key is NOT a string. It is 32 raw bytes passed directly to the DHT API. Implementations MUST NOT use string-formatted keys like `/namespace/` + hex encoding. Such string formats would cause interoperability failures because different implementations would store records at different keys.
+**IMPORTANT:** The DHT key is NOT a string. It is 32 raw bytes passed directly to the DHT API. Implementations MUST NOT use string-formatted keys like `/namespace/` + hex encoding. Such string formats would cause interoperability failures because different implementations would store records at different keys. [REQ-SHARED-039]
 
 Example:
 ```python
@@ -446,7 +446,7 @@ await dht.get(dht_key)  # Returns records stored at these 32 bytes
 
 #### Bootstrap Nodes
 
-Implementations MUST support configurable bootstrap nodes for initial DHT entry.
+Implementations MUST support configurable bootstrap nodes for initial DHT entry. [REQ-SHARED-040]
 
 **Bootstrap Node Configuration:**
 
@@ -476,14 +476,14 @@ Implementations MUST support configurable bootstrap nodes for initial DHT entry.
 
 | Field | Requirement |
 |-------|-------------|
-| `peer_id` | REQUIRED. Base58btc-encoded PeerID multihash (36 bytes → starts with "12D3KooW" for Ed25519). |
-| `multiaddrs` | REQUIRED. Array of multiaddr strings WITHOUT `/p2p/<peerid>` suffix. |
+| `peer_id` | REQUIRED. Base58btc-encoded PeerID multihash (36 bytes → starts with "12D3KooW" for Ed25519).  [REQ-SHARED-041]|
+| `multiaddrs` | REQUIRED. Array of multiaddr strings WITHOUT `/p2p/<peerid>` suffix.  [REQ-SHARED-042]|
 
 **Multiaddr Format:**
-- Multiaddrs in the `multiaddrs` array MUST NOT include the `/p2p/<peerid>` component
+- Multiaddrs in the `multiaddrs` array MUST NOT include the `/p2p/<peerid>` component [REQ-SHARED-043]
 - The `peer_id` field provides the PeerID separately for clarity and validation
-- When connecting, implementations MUST construct the full multiaddr as: `<multiaddr>/p2p/<peer_id>`
-- If a multiaddr includes `/p2p/...`, implementations MUST verify it matches `peer_id` or reject the entry
+- When connecting, implementations MUST construct the full multiaddr as: `<multiaddr>/p2p/<peer_id>` [REQ-SHARED-044]
+- If a multiaddr includes `/p2p/...`, implementations MUST verify it matches `peer_id` or reject the entry [REQ-SHARED-045]
 
 **Bootstrap Requirements:**
 
@@ -501,18 +501,18 @@ The Post-Urbit project WILL operate reference bootstrap nodes. The canonical boo
 - HTTPS: `https://bootstrap.post-urbit.net/nodes.json`
 - DNS: `_dnsaddr.bootstrap.post-urbit.net` (dnsaddr multiaddr format)
 
-Implementations SHOULD ship with a hardcoded fallback list that is updated with each release.
+Implementations SHOULD ship with a hardcoded fallback list that is updated with each release. [REQ-SHARED-046]
 
 **Private Networks:**
 
-For private deployments, operators MAY configure custom bootstrap nodes. The `bootstrap_nodes` configuration MUST support:
+For private deployments, operators MAY configure custom bootstrap nodes. The `bootstrap_nodes` configuration MUST support: [REQ-SHARED-047]
 - Empty list (isolated node, DHT disabled)
 - Custom nodes only (private network)
 - Mixed custom + public nodes (bridged network)
 
 **Bootstrap List Integrity (Recommended):**
 
-The bootstrap list at `https://bootstrap.post-urbit.net/nodes.json` SHOULD be signed to prevent tampering.
+The bootstrap list at `https://bootstrap.post-urbit.net/nodes.json` SHOULD be signed to prevent tampering. [REQ-SHARED-048]
 
 **Signed Bootstrap List Format:**
 ```json
@@ -543,15 +543,15 @@ The bootstrap list at `https://bootstrap.post-urbit.net/nodes.json` SHOULD be si
 ```
 
 **Verification:**
-- Clients SHOULD verify the signature against a well-known project signing key
-- The project signing key SHOULD be distributed with client binaries
-- If signature verification fails, clients SHOULD warn the user before proceeding
-- Clients MAY refuse to use an unsigned or invalid bootstrap list in high-security deployments
+- Clients SHOULD verify the signature against a well-known project signing key [REQ-SHARED-049]
+- The project signing key SHOULD be distributed with client binaries [REQ-SHARED-050]
+- If signature verification fails, clients SHOULD warn the user before proceeding [REQ-SHARED-051]
+- Clients MAY refuse to use an unsigned or invalid bootstrap list in high-security deployments [REQ-SHARED-052]
 
 **DNS Fallback Security:**
-- DNS TXT records at `_dnsaddr.bootstrap.post-urbit.net` SHOULD use DNSSEC where available
-- Clients SHOULD prefer DNSSEC-validated responses when available
-- Unsigned DNS responses MAY be used with appropriate user warnings
+- DNS TXT records at `_dnsaddr.bootstrap.post-urbit.net` SHOULD use DNSSEC where available [REQ-SHARED-053]
+- Clients SHOULD prefer DNSSEC-validated responses when available [REQ-SHARED-054]
+- Unsigned DNS responses MAY be used with appropriate user warnings [REQ-SHARED-055]
 
 #### DHT Message Types
 
@@ -626,18 +626,18 @@ Identity documents are stored under TWO DHT keys:
 
 1. **`post-urbit:identity:`** - Stores the **current** (highest-sequence) identity document. Mutable; updates replace the previous document.
 
-2. **`post-urbit:genesis:`** - Stores the **genesis** (sequence=0) document. **Immutable**; once written, the genesis document MUST NOT be replaced.
+2. **`post-urbit:genesis:`** - Stores the **genesis** (sequence=0) document. **Immutable**; once written, the genesis document MUST NOT be replaced. [REQ-SHARED-056]
 
 **Storage rules:**
 - When publishing a genesis document (sequence=0), write to BOTH keys
 - When publishing an update (sequence>0), write ONLY to `post-urbit:identity:`
-- DHT nodes MUST reject writes to `post-urbit:genesis:` with sequence > 0
-- DHT nodes MUST reject writes to `post-urbit:genesis:` if a document already exists for that key, **UNLESS** the incoming value is **byte-identical** to the stored value (exact IDOC envelope bytes); if identical, treat as a TTL refresh and extend expiry
+- DHT nodes MUST reject writes to `post-urbit:genesis:` with sequence > 0 [REQ-SHARED-057]
+- DHT nodes MUST reject writes to `post-urbit:genesis:` if a document already exists for that key, **UNLESS** the incoming value is **byte-identical** to the stored value (exact IDOC envelope bytes); if identical, treat as a TTL refresh and extend expiry [REQ-SHARED-058]
 
 **Genesis TTL and Refresh (Normative):**
 - Genesis records use the same TTL as identity records (86400 seconds = 24 hours)
-- Identity owners SHOULD periodically refresh their genesis record before TTL expiry
-- DHT nodes MUST allow byte-identical refreshes (idempotent writes)
+- Identity owners SHOULD periodically refresh their genesis record before TTL expiry [REQ-SHARED-059]
+- DHT nodes MUST allow byte-identical refreshes (idempotent writes) [REQ-SHARED-060]
 - This preserves immutability (content cannot change) while ensuring liveness (records persist)
 
 **Rationale:** Preserving the genesis document enables TOFU verification and key continuity auditing. Clients can verify that the genesis key in any document matches the immutable genesis record.
@@ -675,7 +675,7 @@ DHT Value: IDOC binary envelope (see identity-document-schema.md)
 
 **No separate DHT signature required.** The IDOC envelope contains `signatures.current` which is validated using the embedded `keys.signing.current`. This internal signature provides authentication.
 
-**Verification (New Records)**: DHT nodes MUST verify identity documents before storing:
+**Verification (New Records)**: DHT nodes MUST verify identity documents before storing: [REQ-SHARED-061]
 1. Parse IDOC envelope
 2. Verify `iid == derive_iid(Base64Decode(keys.signing.genesis))` (decode Base64 key to raw 32 bytes, then derive IID)
 3. Verify `signatures.current` using `keys.signing.current` (with domain separation)
@@ -684,9 +684,9 @@ DHT Value: IDOC binary envelope (see identity-document-schema.md)
 **Update Authorization (Existing Records)**: When a DHT node receives a document for an IID it already stores:
 1. Parse the new IDOC envelope and verify basic signature (steps 1-3 above)
 2. If incoming value is **byte-identical** to stored value: Accept as TTL refresh (extend expiry, no further checks needed)
-3. Compare `sequence` numbers: new sequence MUST be > existing sequence
+3. Compare `sequence` numbers: new sequence MUST be > existing sequence [REQ-SHARED-062]
 4. If `keys.signing.current` differs from the stored document's key (key rotation):
-   a. **Key Continuity Binding** (per RFC-0001 §7.2): `keys.signing.previous` MUST be present (not null) in the new document AND MUST equal the stored document's `keys.signing.current` (byte-identical Base64 string comparison)
+   a. **Key Continuity Binding** (per RFC-0001 §7.2): `keys.signing.previous` MUST be present (not null) in the new document AND MUST equal the stored document's `keys.signing.current` (byte-identical Base64 string comparison) [REQ-SHARED-063]
    b. Verify `signatures.previous` is present in the new document
    c. Verify `signatures.previous` is valid using the stored document's `keys.signing.current`
    d. OR verify `recovery_proof` is valid (see recovery-mechanisms.md), in which case key continuity binding is not required
@@ -697,14 +697,14 @@ DHT Value: IDOC binary envelope (see identity-document-schema.md)
 
 **Rationale**: This ensures only the holder of the current signing key (or recovery mechanism) can update the identity. An attacker with only public keys cannot create a valid update because they cannot produce `signatures.previous` signed by the current key.
 
-**Genesis Document Verification**: For sequence 0 (genesis) documents, DHT nodes MUST verify per RFC-0001 §12.3:
+**Genesis Document Verification**: For sequence 0 (genesis) documents, DHT nodes MUST verify per RFC-0001 §12.3: [REQ-SHARED-064]
 1. Pass basic verification (steps 1-4 above)
 2. Verify `sequence == "0"`
 3. Verify `keys.signing.genesis == keys.signing.current` (genesis invariant)
 4. Verify `keys.signing.previous == null`
 5. Only store if all checks pass
 
-For the `post-urbit:genesis:` DHT key specifically, nodes MUST also reject writes if a different genesis record already exists (immutable; only byte-identical refresh allowed). First-seen-wins applies if multiple genesis documents appear for the same IID from concurrent sources (see concurrent updates section).
+For the `post-urbit:genesis:` DHT key specifically, nodes MUST also reject writes if a different genesis record already exists (immutable; only byte-identical refresh allowed). First-seen-wins applies if multiple genesis documents appear for the same IID from concurrent sources (see concurrent updates section). [REQ-SHARED-065]
 
 ### Transport API Bridge
 
@@ -794,7 +794,7 @@ DHT Value: Device document (JSON, signed by identity's signing key)
 }
 ```
 
-**Note**: This is the canonical Device Document format. Field names MUST match exactly:
+**Note**: This is the canonical Device Document format. Field names MUST match exactly: [REQ-SHARED-066]
 - `device_name` (not `name`)
 - `signature_by_identity` (not `signature`)
 - `endpoints` included for device-specific network presence
@@ -875,7 +875,7 @@ Device discovery via DHT (device index and device documents) is designed for **i
 
 **External Peer Connection (v1 Normative):**
 
-For v1, external peers (different identities) MUST connect using Identity Document endpoints, NOT device-specific endpoints from the device index. The flow is:
+For v1, external peers (different identities) MUST connect using Identity Document endpoints, NOT device-specific endpoints from the device index. The flow is: [REQ-SHARED-067]
 
 ```
 1. External peer wants to connect to identity "k5xq7z4m..."
@@ -952,7 +952,7 @@ Each Message Frame (repeated):
 | 0x02 | Identity | UTF-8 JSON | Has `type` field for message kind |
 | 0x03 | Message | Binary (PUSE) | Raw PUSE envelope bytes |
 | 0x04 | Sync | Binary (1-byte type + CBOR) | Message type prefix + CBOR data |
-| 0x05 | Bulk | Binary (2-byte opcode + data) | **Reserved for v2 - MUST NOT be used in v1** (see RFC-0002 §6.6) |
+| 0x05 | Bulk | Binary (2-byte opcode + data) | **Reserved for v2 - MUST NOT be used in v1** (see RFC-0002 §6.6)  [REQ-SHARED-068]|
 
 **JSON streams (0x01, 0x02):** Payload is UTF-8 JSON with a `type` field to distinguish message kinds.
 
@@ -1018,14 +1018,14 @@ Protocol streams use QUIC bidirectional or unidirectional streams as follows:
 | Identity (0x02) | Bidirectional | Either peer | At most 1 per direction | Connection lifetime |
 | Message (0x03) | Bidirectional | Either peer | Multiple allowed | Per-message or long-lived |
 | Sync (0x04) | Bidirectional | Either peer | At most 1 per direction | Connection lifetime |
-| Bulk (0x05) | **Unidirectional** | Sender | Multiple allowed | Per-transfer | **Reserved for v2 - MUST NOT be used in v1** |
+| Bulk (0x05) | **Unidirectional** | Sender | Multiple allowed | Per-transfer | **Reserved for v2 - MUST NOT be used in v1**  [REQ-SHARED-069]|
 
 **Rules:**
-1. **Control stream:** The client MUST open the first bidirectional stream with type 0x01 immediately after QUIC handshake (RFC-0002 §5.2). This stream is used for identity handshake and keepalive.
-2. **Long-lived streams (Identity, Sync):** Each peer MAY open at most one outgoing bidirectional stream of each type. Peers MUST accept at most one incoming stream per type. Opening a second stream of the same type is a protocol error (close with DUPLICATE_STREAM_TYPE 0x108 per RFC-0002 §9.2).
+1. **Control stream:** The client MUST open the first bidirectional stream with type 0x01 immediately after QUIC handshake (RFC-0002 §5.2). This stream is used for identity handshake and keepalive. [REQ-SHARED-070]
+2. **Long-lived streams (Identity, Sync):** Each peer MAY open at most one outgoing bidirectional stream of each type. Peers MUST accept at most one incoming stream per type. Opening a second stream of the same type is a protocol error (close with DUPLICATE_STREAM_TYPE 0x108 per RFC-0002 §9.2). [REQ-SHARED-071]
 3. **Per-message streams (Message):** Multiple concurrent bidirectional streams are allowed. Each stream carries one or more framed messages.
 4. **Bulk streams:** Bulk uses unidirectional streams for large data transfers. The sender opens a new unidirectional stream for each transfer.
-5. **Stream closure:** Long-lived streams remain open for the connection lifetime. Per-message and bulk streams MAY be closed after final message.
+5. **Stream closure:** Long-lived streams remain open for the connection lifetime. Per-message and bulk streams MAY be closed after final message. [REQ-SHARED-072]
 
 This framing pattern (stream type + length-prefixed frames) is consistent across all QUIC stream types. Payload encoding varies by stream type as specified above. See `06-rfcs/RFC-0002-transport.md` §6 for the authoritative specification.
 
@@ -1068,17 +1068,17 @@ Post-Urbit nodes handle two distinct ALPN protocols on the same UDP port (see AL
 
 **For ALPN `post-urbit/1` (Post-Urbit Protocol):**
 
-Implementations MUST accept ANY TLS certificate. No PKI validation, no hostname checks. Identity verification occurs at the Post-Urbit handshake layer, not TLS. The certificate merely enables TLS 1.3 encryption. See detailed requirements below.
+Implementations MUST accept ANY TLS certificate. No PKI validation, no hostname checks. Identity verification occurs at the Post-Urbit handshake layer, not TLS. The certificate merely enables TLS 1.3 encryption. See detailed requirements below. [REQ-SHARED-073]
 
 **For ALPN `libp2p` (DHT/libp2p Protocol):**
 
-Implementations MUST follow the libp2p QUIC/TLS identity requirements. The TLS certificate MUST authenticate the libp2p PeerID as required by the [libp2p-tls specification](https://github.com/libp2p/specs/blob/master/tls/tls.md). This is handled by libp2p libraries automatically. Do NOT apply the "accept any certificate" policy to libp2p connections.
+Implementations MUST follow the libp2p QUIC/TLS identity requirements. The TLS certificate MUST authenticate the libp2p PeerID as required by the [libp2p-tls specification](https://github.com/libp2p/specs/blob/master/tls/tls.md). This is handled by libp2p libraries automatically. Do NOT apply the "accept any certificate" policy to libp2p connections. [REQ-SHARED-074]
 
 **Rationale:** The DHT uses libp2p's native identity model where the TLS certificate cryptographically proves the PeerID. Post-Urbit direct connections use a separate identity handshake that doesn't rely on certificates. Conflating these policies would break DHT security.
 
-### Certificate Generation (Server SHOULD)
+### Certificate Generation (Server SHOULD) [REQ-SHARED-075]
 
-For Post-Urbit protocol connections (ALPN `post-urbit/1`), servers SHOULD generate certificates with these properties:
+For Post-Urbit protocol connections (ALPN `post-urbit/1`), servers SHOULD generate certificates with these properties: [REQ-SHARED-076]
 
 | Property | Recommended Value |
 |----------|-------------------|
@@ -1087,18 +1087,18 @@ For Post-Urbit protocol connections (ALPN `post-urbit/1`), servers SHOULD genera
 | Validity period | 1 hour to 30 days |
 | Subject/Issuer | Any value (not verified by clients) |
 
-### Certificate Acceptance (Client MUST) - Post-Urbit ALPN Only
+### Certificate Acceptance (Client MUST) - Post-Urbit ALPN Only [REQ-SHARED-077]
 
-**For ALPN `post-urbit/1` connections only:** Clients MUST accept ANY certificate that allows the TLS 1.3 handshake to complete. Specifically:
+**For ALPN `post-urbit/1` connections only:** Clients MUST accept ANY certificate that allows the TLS 1.3 handshake to complete. Specifically: [REQ-SHARED-078]
 
-1. Clients MUST NOT reject certificates based on:
+1. Clients MUST NOT reject certificates based on: [REQ-SHARED-079]
    - Signature algorithm (RSA, ECDSA, Ed25519, etc. all acceptable)
    - Validity period (expired or not-yet-valid certificates acceptable)
    - Subject/Issuer fields (any value acceptable)
    - Self-signed status (no chain validation required)
    - Trust anchors (no CA verification)
 
-2. Clients MUST only require:
+2. Clients MUST only require: [REQ-SHARED-080]
    - Valid TLS 1.3 handshake completion
    - Cipher suite from the supported list (see RFC-0002 §4.3)
 
@@ -1144,7 +1144,7 @@ In identity document (per RFC-0003 §7.2, using standard endpoint schema):
 
 **Mailbox Base URL Derivation (v1 Normative):**
 
-For v1, the mailbox API base path MUST be `/` (root). The endpoint schema does not include a `path` field. Implementations MUST derive the canonical mailbox URL following RFC-0003 §7.3 canonicalization rules:
+For v1, the mailbox API base path MUST be `/` (root). The endpoint schema does not include a `path` field. Implementations MUST derive the canonical mailbox URL following RFC-0003 §7.3 canonicalization rules: [REQ-SHARED-081]
 
 ```python
 def derive_mailbox_url(endpoint: dict) -> str:
@@ -1171,7 +1171,7 @@ API endpoints are relative to this base:
 - Retrieve: `GET {mailbox_url}messages`
 - Delete: `DELETE {mailbox_url}messages`
 
-**Rationale:** Mailbox auth tokens bind to the exact canonical URL (see RFC-0003 §7.3). Port 443 MUST be omitted to match RFC-0003's canonicalization rules. Requiring root path eliminates ambiguity about path discovery. Future versions MAY extend the endpoint schema with a `base_path` field if non-root paths are needed.
+**Rationale:** Mailbox auth tokens bind to the exact canonical URL (see RFC-0003 §7.3). Port 443 MUST be omitted to match RFC-0003's canonicalization rules. Requiring root path eliminates ambiguity about path discovery. Future versions MAY extend the endpoint schema with a `base_path` field if non-root paths are needed. [REQ-SHARED-082]
 
 ### API Summary
 
@@ -1255,8 +1255,8 @@ interface MailboxMessage {
 
 - Mailbox sees: sender IID (from token), recipient IID, encrypted blob, timing
 - Mailbox does NOT see: message contents (E2E encrypted)
-- Mailbox MAY: rate limit, charge for storage, impose size/duration limits
-- Mailbox MUST NOT: decrypt, modify, or selectively block messages
+- Mailbox MAY: rate limit, charge for storage, impose size/duration limits [REQ-SHARED-083]
+- Mailbox MUST NOT: decrypt, modify, or selectively block messages [REQ-SHARED-084]
 
 ### Message Format
 
@@ -1264,23 +1264,23 @@ Mailboxes store **raw PUSE envelopes** (see RFC-0003 §3). No additional wrapper
 
 ### Message Verification When Sender IDOC Unavailable (Normative)
 
-When verifying a received PUSE envelope, the receiver must fetch the sender's identity document to verify the signature. If the sender identity document cannot be resolved (DHT unavailable, cache miss, network partition), implementations MUST handle gracefully:
+When verifying a received PUSE envelope, the receiver must fetch the sender's identity document to verify the signature. If the sender identity document cannot be resolved (DHT unavailable, cache miss, network partition), implementations MUST handle gracefully: [REQ-SHARED-085]
 
-1. **Retain for retry:** If sender identity document cannot be resolved (DHT unavailable, cache miss), implementations MUST retain the envelope for retry
+1. **Retain for retry:** If sender identity document cannot be resolved (DHT unavailable, cache miss), implementations MUST retain the envelope for retry [REQ-SHARED-086]
 
 2. **Retry schedule:** Retry resolution at intervals: 1 min, 5 min, 15 min, 1 hour, then hourly for up to 7 days
 
-3. **Pending verification state:** Messages with unresolved sender MUST NOT be marked as verified; UI SHOULD show "pending verification" state
+3. **Pending verification state:** Messages with unresolved sender MUST NOT be marked as verified; UI SHOULD show "pending verification" state [REQ-SHARED-087]
 
-4. **Eventual discard:** After 7 days without resolution, message MAY be discarded or marked permanently unverified
+4. **Eventual discard:** After 7 days without resolution, message MAY be discarded or marked permanently unverified [REQ-SHARED-088]
 
 **Rationale:** Network partitions and DHT churn may temporarily prevent identity resolution. Retaining messages allows eventual verification when the sender's IDOC becomes available, improving reliability without compromising security. The 7-day limit prevents indefinite storage of potentially unverifiable messages.
 
-**Implementation Note:** Implementations SHOULD persist pending-verification messages across restarts. The retry timer resets on restart but the 7-day total window is measured from original receipt time.
+**Implementation Note:** Implementations SHOULD persist pending-verification messages across restarts. The retry timer resets on restart but the 7-day total window is measured from original receipt time. [REQ-SHARED-089]
 
 ## Domain Separator Registry (Normative)
 
-All cryptographic domain separators used across the Post-Urbit protocol. Implementations MUST use these exact byte sequences.
+All cryptographic domain separators used across the Post-Urbit protocol. Implementations MUST use these exact byte sequences. [REQ-SHARED-090]
 
 | Context | Domain Separator | Bytes | Used For |
 |---------|------------------|-------|----------|
@@ -1334,7 +1334,7 @@ All cryptographic domain separators used across the Post-Urbit protocol. Impleme
 
 Ed25519 signing can operate on raw bytes directly (single-pass) or on a prehashed digest. This table specifies the prehash policy for each signature context to ensure interoperability.
 
-**IMPORTANT: All signatures use standard Ed25519 (RFC 8032), NOT Ed25519ph.** When this specification says `Ed25519_Sign(key, SHA256(x))`, the 32-byte SHA-256 digest is passed as the **message input** to standard Ed25519. Ed25519ph (prehashed variant) MUST NOT be used—it produces different signatures despite similar naming. Implementations MUST use `crypto_sign(message, key)` with the computed digest as `message`, not Ed25519ph APIs.
+**IMPORTANT: All signatures use standard Ed25519 (RFC 8032), NOT Ed25519ph.** When this specification says `Ed25519_Sign(key, SHA256(x))`, the 32-byte SHA-256 digest is passed as the **message input** to standard Ed25519. Ed25519ph (prehashed variant) MUST NOT be used—it produces different signatures despite similar naming. Implementations MUST use `crypto_sign(message, key)` with the computed digest as `message`, not Ed25519ph APIs. [REQ-SHARED-091]
 
 | Context | Prehash | Input | Notes |
 |---------|---------|-------|-------|
@@ -1389,7 +1389,7 @@ All multi-byte integers in binary wire formats are **big-endian** (network byte 
 
 All timestamps are **RFC3339 UTC** (e.g., `2025-01-13T12:00:00Z`).
 
-**Canonical form for signature inputs:** Transport layer operations (handshakes, relay allocation/rebind) require the **canonical** timestamp format: `YYYY-MM-DDTHH:MM:SSZ` (no fractional seconds, `Z` suffix, exactly 20 bytes). Implementations MUST reject non-canonical forms in signature verification. See RFC-0002 §5.5 for normative requirements.
+**Canonical form for signature inputs:** Transport layer operations (handshakes, relay allocation/rebind) require the **canonical** timestamp format: `YYYY-MM-DDTHH:MM:SSZ` (no fractional seconds, `Z` suffix, exactly 20 bytes). Implementations MUST reject non-canonical forms in signature verification. See RFC-0002 §5.5 for normative requirements. [REQ-SHARED-092]
 
 ### Encoding
 
@@ -1415,8 +1415,8 @@ All identity identifiers (IID), device identifiers (DID), and group identifiers 
 - **Case:** Lowercase only
 - **Length:** 32 characters for 20-byte (160-bit) values
 - **Excluded characters:** `i`, `l`, `o`, `u` (to avoid ambiguity)
-- **Wire format:** Encoders MUST output lowercase; decoders MUST reject non-lowercase
-- **UI input:** User interfaces MAY normalize uppercase before creating wire/signed artifacts
+- **Wire format:** Encoders MUST output lowercase; decoders MUST reject non-lowercase [REQ-SHARED-093]
+- **UI input:** User interfaces MAY normalize uppercase before creating wire/signed artifacts [REQ-SHARED-094]
 
 Example valid IID: `abzy73bycgb9ybrg12tynyxgkfzyh3bk`
 
@@ -1426,7 +1426,7 @@ See RFC-0002 §2.1 for the authoritative Base32 specification.
 - **Keys and signatures**: Always use standard Base64 (`+/` chars)
 - **Tokens and URL-safe data**: Use Base64url (`-_` chars)
 - Both use no padding
-- Implementations MUST decode using the correct alphabet for each type
+- Implementations MUST decode using the correct alphabet for each type [REQ-SHARED-095]
 
 **UUID Serialization (Normative):**
 
@@ -1437,7 +1437,7 @@ UUID v4 values are used for message IDs (`message_id` in PUSE headers) and docum
 | **String** | RFC 4122 canonical (lowercase hex, hyphenated) | `550e8400-e29b-41d4-a716-446655440000` |
 | **Bytes** | 16 bytes, RFC 4122 network byte order | `55 0e 84 00 e2 9b 41 d4 a7 16 44 66 55 44 00 00` |
 
-**Canonical mapping (MUST be followed):**
+**Canonical mapping (MUST be followed):** [REQ-SHARED-096]
 - String form uses lowercase hex with hyphens: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
 - Bytes are the exact 16-byte sequence in RFC 4122 layout (NOT mixed-endian platform encodings)
 - UUID string position 0-7 = bytes 0-3, position 9-12 = bytes 4-5, position 14-17 = bytes 6-7, position 19-22 = bytes 8-9, position 24-35 = bytes 10-15
@@ -1448,4 +1448,4 @@ UUID string: 550e8400-e29b-41d4-a716-446655440000
 UUID bytes (hex): 550e8400e29b41d4a716446655440000
 ```
 
-Applications referencing messages (e.g., `reply_to`, `receipt.message_ids`) MUST use the canonical string form. The PUSE header `message_id` contains the 16-byte form.
+Applications referencing messages (e.g., `reply_to`, `receipt.message_ids`) MUST use the canonical string form. The PUSE header `message_id` contains the 16-byte form. [REQ-SHARED-097]

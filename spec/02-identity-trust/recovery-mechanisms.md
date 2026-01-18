@@ -22,13 +22,13 @@ For Post-Urbit v1 implementations:
 
 | Method | Status | Notes |
 |--------|--------|-------|
-| `none` | REQUIRED | All implementations MUST support `none` |
-| `social` | REQUIRED | All implementations MUST support `social` recovery |
-| `device-escrow` | OPTIONAL | MAY be implemented; signature scheme identical to `social` but with single "trustee" |
-| `threshold` | OPTIONAL | MAY be implemented; Shamir's Secret Sharing library required |
-| `provider` | OPTIONAL | MAY be implemented; requires trust in third-party |
+| `none` | REQUIRED | All implementations MUST support `none`  [REQ-ID-022]|
+| `social` | REQUIRED | All implementations MUST support `social` recovery  [REQ-ID-023]|
+| `device-escrow` | OPTIONAL | MAY be implemented; signature scheme identical to `social` but with single "trustee"  [REQ-ID-024]|
+| `threshold` | OPTIONAL | MAY be implemented; Shamir's Secret Sharing library required  [REQ-ID-025]|
+| `provider` | OPTIONAL | MAY be implemented; requires trust in third-party  [REQ-ID-026]|
 
-**Minimum v1 Conformance:** Implementations MUST support `none` and `social` recovery methods. Users SHOULD configure at least `social` recovery for any identity they care about retaining.
+**Minimum v1 Conformance:** Implementations MUST support `none` and `social` recovery methods. Users SHOULD configure at least `social` recovery for any identity they care about retaining. [REQ-ID-027]
 
 ## Method: `none`
 
@@ -144,13 +144,13 @@ Trusted contacts can collectively authorize recovery of the identity.
 
    **Note:** `keys.signing.genesis` is ALWAYS preserved (never changes). This allows verifiers to confirm the IID derivation even after recovery. The `encryption.previous` array starts empty after recovery since old encryption keys are typically unrecoverable.
 5. **Cooldown period**: Document is published with `status: "pending"`
-6. **Activation**: After `cooldown_expires_at`, verifiers MUST treat the document as active
+6. **Activation**: After `cooldown_expires_at`, verifiers MUST treat the document as active [REQ-ID-028]
 
 **Recovery Status Semantics (Normative):**
 
-The `recovery_proof.status` field is **informational only**. Verifiers MUST NOT rely on the `status` value to determine validity. Instead:
+The `recovery_proof.status` field is **informational only**. Verifiers MUST NOT rely on the `status` value to determine validity. Instead: [REQ-ID-029]
 
-- Verifiers MUST check: `now() >= cooldown_expires_at`
+- Verifiers MUST check: `now() >= cooldown_expires_at` [REQ-ID-030]
 - If true: document is active (regardless of `status` field value)
 - If false: document is pending (reject or queue)
 
@@ -357,7 +357,7 @@ When recovery is used, the new Identity Document includes proof:
 
 **Notes:**
 - `signatures.previous` is null because old key is unavailable. The `recovery_proof` substitutes for it.
-- `keys.signing.genesis` MUST be preserved unchanged (IID is derived from it).
+- `keys.signing.genesis` MUST be preserved unchanged (IID is derived from it). [REQ-ID-031]
 - `keys.encryption.previous` is an array (empty after recovery; old keys unrecoverable).
 
 ## Cooldown and Contestation
@@ -371,7 +371,7 @@ When recovery is used, the new Identity Document includes proof:
 
 **Normative (RFC-0001 §9.6):** Contestation is performed by publishing a higher-sequence IDOC update signed with the original key during the cooldown period. If valid, this supersedes the recovery attempt.
 
-**Experimental (Non-Normative for v1):** The contest document mechanism below is a proposed extension for explicit contestation signaling. Implementations MUST NOT treat contest documents as affecting identity validity in v1. The authoritative contestation method is the RFC-0001 §9.6 approach (higher-sequence IDOC update).
+**Experimental (Non-Normative for v1):** The contest document mechanism below is a proposed extension for explicit contestation signaling. Implementations MUST NOT treat contest documents as affecting identity validity in v1. The authoritative contestation method is the RFC-0001 §9.6 approach (higher-sequence IDOC update). [REQ-ID-032]
 
 ---
 
@@ -393,7 +393,7 @@ During cooldown, if the legitimate owner still has their keys they can optionall
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string | MUST be `"recovery_contest"` |
+| `type` | string | MUST be `"recovery_contest"`  [REQ-ID-033]|
 | `iid` | string | IID of identity being contested |
 | `contested_sequence` | string | Decimal string of recovery document's sequence number |
 | `reason` | string | Human-readable reason (max 256 chars) |
@@ -426,7 +426,7 @@ If valid contest received:
 
 ## Interfaces
 
-**Note:** The authoritative interface definitions are in `spec/02-identity-trust/interfaces.md`. The summary below is provided for convenience but MUST match the canonical definitions.
+**Note:** The authoritative interface definitions are in `spec/02-identity-trust/interfaces.md`. The summary below is provided for convenience but MUST match the canonical definitions. [REQ-ID-034]
 
 ```typescript
 // See interfaces.md for full type definitions including:

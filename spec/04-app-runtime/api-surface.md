@@ -211,7 +211,7 @@ type MessagingSendError =
   | 'PERMISSION_DENIED';
 ```
 
-**IMPORTANT:** The mapping between CBOR request/response content and PUSE plaintext JSON is specified in RFC-0003 Section 8.2 "Host API to PUSE Plaintext Mapping (Normative)". Implementations MUST follow this mapping for interoperability.
+**IMPORTANT:** The mapping between CBOR request/response content and PUSE plaintext JSON is specified in RFC-0003 Section 8.2 "Host API to PUSE Plaintext Mapping (Normative)". Implementations MUST follow this mapping for interoperability. [REQ-APP-028]
 
 **Message Size Limit (Normative):**
 
@@ -219,8 +219,8 @@ The Host runtime enforces the PUSE envelope limit of 1,048,576 bytes (1 MB) as f
 
 1. Apps provide plaintext content (JSON or CBOR)
 2. Host constructs the PUSE envelope (adds header, encrypts, signs)
-3. Host MUST verify the resulting envelope size ≤ 1,048,576 bytes
-4. If exceeded, Host MUST reject with error `MESSAGE_TOO_LARGE` before transmission
+3. Host MUST verify the resulting envelope size ≤ 1,048,576 bytes [REQ-APP-029]
+4. If exceeded, Host MUST reject with error `MESSAGE_TOO_LARGE` before transmission [REQ-APP-030]
 
 **Derived Plaintext Limits:**
 
@@ -228,7 +228,7 @@ Given PUSE overhead (~160-200 bytes depending on extension type), the maximum pl
 - Group messages (21-byte ext): ~1,048,375 bytes plaintext
 - Ratchet messages (41-byte ext): ~1,048,355 bytes plaintext
 
-Apps SHOULD stay well under these limits to account for JSON/CBOR encoding overhead.
+Apps SHOULD stay well under these limits to account for JSON/CBOR encoding overhead. [REQ-APP-031]
 
 ### messaging.subscribe
 
@@ -268,7 +268,7 @@ type MessagingSubscribeError =
   | 'PERMISSION_DENIED';
 ```
 
-**IMPORTANT:** The mapping between CBOR request/response content and PUSE plaintext JSON is specified in RFC-0003 Section 8.2 "Host API to PUSE Plaintext Mapping (Normative)". Implementations MUST follow this mapping for interoperability.
+**IMPORTANT:** The mapping between CBOR request/response content and PUSE plaintext JSON is specified in RFC-0003 Section 8.2 "Host API to PUSE Plaintext Mapping (Normative)". Implementations MUST follow this mapping for interoperability. [REQ-APP-032]
 
 ### Subscription Lifecycle
 

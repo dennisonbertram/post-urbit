@@ -2,7 +2,9 @@
 
 ## Iteration: 110
 ## Mode: HOLISTIC REVIEW (Continuous refinement)
-## Status: 100/100 completeness estimate
+## Status: 100/100 completeness estimate (layers 00-06 only)
+
+Note: 07-implementation, 08-security, and 09-governance are deferred and out of MVP scope until started.
 
 ### Fully Specified
 - **02-identity-trust**: Core identity system + Device Identifiers (DID) + signing key history (extended retention)
@@ -357,6 +359,14 @@ The specification is ready for implementation. Focus areas for Phase 0:
 - Parsing/crypto work requires at least one golden test vector.
 - Network behavior starts behind interfaces with in-memory fakes.
 - `go test ./...` stays green after every task.
+- Every test is tagged with a `TEST-*` ID and mapped to `SC-*` or `REQ-*`.
+- E2E runs emit evidence bundles per `spec/00-overview/verification-harness.md`.
+
+### Phase T0: Traceability And Harness Metadata
+- [ ] Add `SC-*` IDs to every bullet in `spec/00-overview/success-criteria.md`.
+- [ ] Add `REQ-*` IDs to every MUST/SHOULD statement across specs.
+- [ ] Create `spec/00-overview/traceability-matrix.yaml` with SC/REQ entries.
+- [ ] Define `spec/00-overview/scenarios.yaml` with `SCEN-*` IDs mapped to SC/REQ.
 
 ### Phase 0: Repo And Harness
 - [ ] Initialize Go module and minimal `cmd/postnode` main; Tests: `go test ./...`.
@@ -1072,6 +1082,49 @@ This section supersedes the "Detailed Tasks" section above. Use these micro-task
 - Do not parse `spec/` files at test runtime.
 - Every task ends with `go test ./...` passing.
 - Keep functions small and focused (target < 80 lines).
+- Every test case must include a `TEST-*` ID (test name suffix or file header comment).
+- Every test must map to at least one `REQ-*` or `SC-*` ID; update the traceability matrix as you add tests.
+- Evidence bundles (for harness runs) must follow `spec/00-overview/verification-harness.md` and be referenced with `EVID-*` IDs.
+- Vector-based tests should use `TEST-VEC-###` IDs that match the corresponding vector number.
+
+### Phase T0: Traceability And Harness Metadata (Ultra Detailed)
+
+#### T0.1 Add SC-* IDs to success criteria
+Files:
+- `spec/00-overview/success-criteria.md`
+Steps:
+- Prefix each bullet with a stable `SC-*` ID (e.g., `SC-NODE-01`, `SC-ID-01`, `SC-CONN-01`, `SC-MSG-01`, `SC-APP-01`, `SC-SYNC-01`, `SC-OPS-01`, `SC-JOURNEY-01`).
+- Keep IDs stable once assigned.
+Acceptance:
+- Every bullet in success criteria has an ID.
+
+#### T0.2 Add REQ-* IDs to normative statements
+Files:
+- All spec files that contain MUST/SHOULD requirements.
+Steps:
+- Add `REQ-*` IDs to each normative statement, schema, and state machine rule.
+- Use consistent prefixes (e.g., `REQ-IDOC-*`, `REQ-TRANS-*`, `REQ-MSG-*`, `REQ-SYNC-*`, `REQ-APP-*`, `REQ-OPS-*`).
+Acceptance:
+- Every MUST/SHOULD statement has a stable `REQ-*` ID.
+
+#### T0.3 Create the traceability matrix
+Files:
+- `spec/00-overview/traceability-matrix.yaml`
+Steps:
+- Create the matrix with columns: `requirement_id`, `description`, `spec_source`, `scenario_ids`, `test_ids`, `evidence_path`, `status`, `notes`.
+- Add an entry for each `SC-*` and `REQ-*` with status `blocked`.
+Acceptance:
+- Matrix exists and covers all SC/REQ IDs.
+
+#### T0.4 Define scenario catalog for the harness
+Files:
+- `spec/00-overview/scenarios.yaml`
+Steps:
+- Define `SCEN-*` entries for each user journey and key protocol flow.
+- Include `success_criteria`, `requirements`, and `tests` lists per scenario (IDs only).
+Acceptance:
+- Each SC-JOURNEY-* maps to at least one SCEN-*.
+- Each SCEN-* references at least one TEST-* ID.
 
 ### Phase 0: Repo And Harness (Ultra Detailed)
 
@@ -1265,11 +1318,12 @@ Steps:
 - Prefix strings must match domain separator registry.
 - Output is 32 raw bytes.
 Tests:
-- `TestDHTKey_Identity_Vector`: compare to vector (if present).
-- `TestDHTKey_Genesis_Vector`: compare to vector (if present).
+- `TestDHTKey_Identity_Vector1`: expected key = SHA256("post-urbit:identity:" || IID from Test Vector 1).
+- `TestDHTKey_Genesis_Vector1`: expected key = SHA256("post-urbit:genesis:" || IID from Test Vector 1).
+- `TestDHTKey_Device_Vector8`: expected key = SHA256("post-urbit:device:" || DID from Test Vector 8).
 - `TestDHTKey_Length`: always 32 bytes.
 Fixtures:
-- Use DHT key vectors from `spec/00-shared/test-vectors.md` if available; otherwise add local consts.
+- Embed expected key hex constants in the test file (compute once via a script; do not compute expected values during tests).
 
 ### Phase 2: Canonical JSON And Crypto Primitives (Ultra Detailed)
 
@@ -1345,11 +1399,11 @@ Steps:
 - Validate nonce length == 12.
 - Return error on auth failure.
 Tests:
-- `TestAEAD_RoundTrip`.
+- `TestAEAD_Vector10`: use Test Vector 10 message_key_0, nonce, AAD, plaintext, and expected ciphertext.
 - `TestAEAD_TamperDetect`.
 - `TestAEAD_InvalidNonceLength`.
 Fixtures:
-- If no vector in spec, add fixed key/nonce/plaintext consts in test.
+- Embed constants from Test Vectors 10 and 11 (message keys, nonces, AAD) and compare to expected ciphertexts.
 
 ### Phase 3: Identity Documents (Ultra Detailed)
 
@@ -1526,9 +1580,11 @@ API:
 Steps:
 - Encode IDOC.
 - Derive identity DHT key and store with TTL=24h.
+- If the same IDOC bytes are re-published, treat as TTL refresh (no sequence bump).
 Tests:
 - `TestPublishIdentity_WritesKeyValue`.
 - `TestPublishIdentity_UsesDefaultTTL`.
+- `TestPublishIdentity_AllowsByteIdenticalRefresh`.
 
 #### 4.5 Fetch identity from DHT with conflict rules
 Files:
@@ -1557,6 +1613,7 @@ Steps:
 Tests:
 - `TestGenesisPublish_WritesBothKeys`.
 - `TestGenesisPublish_RejectsOverwrite`.
+- `TestGenesisPublish_AllowsByteIdenticalRefresh`.
 
 ### Phase 5: Transport Framing And Handshake (Ultra Detailed)
 
@@ -1691,8 +1748,8 @@ API:
 Steps:
 - Use domain separators `post-urbit-relay-alloc-v1` and `post-urbit-rebind-v1`.
 Tests:
-- `TestRelayAllocSignature_Vector` (if vector exists).
-- `TestRelayRebindSignature_Vector` (if vector exists).
+- `TestRelayAllocSignature_Example`: use RFC-0002 allocation example inputs; embed expected signature bytes.
+- `TestRelayRebindSignature_Example`: use RFC-0002 rebind example inputs; embed expected signature bytes.
 - `TestRelaySignature_BadTimestamp`.
 
 #### 6.5 Relay client minimal flow (allocate + forward)
@@ -1750,10 +1807,11 @@ API:
 Steps:
 - Use ChaCha20-Poly1305 with AAD and nonce rules from RFC-0003.
 Tests:
-- `TestPUSE_EncryptDecrypt_RoundTrip`.
+- `TestPUSE_Vector10_InitialEnvelope`: full envelope bytes match Test Vector 10.
+- `TestPUSE_Vector11_RatchetEnvelope`: full envelope bytes match Test Vector 11.
 - `TestPUSE_RejectsTamper`.
 Fixtures:
-- Use any PUSE vector if present in `spec/00-shared/test-vectors.md`; otherwise add a fixed fixture.
+- Use Test Vectors 10 and 11 from `spec/00-shared/test-vectors.md` as canonical fixtures.
 
 #### 7.3 Message signature verify (Ed25519)
 Files:
@@ -1764,9 +1822,10 @@ API:
 Steps:
 - Check current and historical signing keys.
 Tests:
-- `TestPUSESignature_ValidCurrent`.
-- `TestPUSESignature_ValidHistorical`.
-- `TestPUSESignature_Invalid`.
+- `TestPUSESignature_Vector10`: verify signature matches Test Vector 10.
+- `TestPUSESignature_Vector11`: verify signature matches Test Vector 11.
+- `TestPUSESignature_ValidHistorical`: simulate rotated key history and verify.
+- `TestPUSESignature_Invalid`: tamper with envelope bytes and verify rejection.
 
 #### 7.4 Session setup (2DH) and ratchet state
 Files:
@@ -1871,7 +1930,7 @@ Tests:
 - `TestMerkleNode_Vector`.
 - `TestMerkleEmpty_Vector`.
 Fixtures:
-- Add const vectors if not already provided.
+- Embed constants derived from fixed inputs (e.g., leaf = "abc", empty hash, node hash of leaf+empty) and register as TEST-VEC IDs in the traceability matrix.
 
 #### 8.3 Sync message types encode/decode
 Files:
@@ -1886,6 +1945,7 @@ Tests:
 - `TestSyncMessage_RoundTrip_Request`.
 - `TestSyncMessage_RoundTrip_Response`.
 - `TestSyncMessage_RejectsUnknownType`.
+- `TestSyncOperation_Vector9_Signature`: verify signature and operation_id against Test Vector 9.
 
 #### 8.4 CRDT primitive (OR-Set or LWW-Map per spec)
 Files:
@@ -2091,6 +2151,8 @@ Tests:
 
 ### Phase 11: End-To-End (Ultra Detailed)
 
+**Traceability rule (Phase 11):** Each scenario must define `SCEN-*` and `TEST-*` IDs, map to `SC-*` and `REQ-*` IDs, and emit an evidence bundle in `runs/<run-id>/` per `spec/00-overview/verification-harness.md`.
+
 #### 11.1 Single-node smoke test: create identity and publish IDOC
 Files:
 - `internal/e2e/single_node_test.go`
@@ -2099,6 +2161,12 @@ Steps:
 - Create identity and publish.
 Tests:
 - `TestE2E_SingleNode_PublishIdentity`: DHT contains valid IDOC.
+Traceability:
+- SCEN: `SCEN-ID-01` (claim identity + publish).
+- TEST: `TEST-E2E-001`.
+- SC/REQ: map to `SC-ID-*` and `REQ-IDOC-*` IDs.
+Evidence:
+- Write `runs/<run-id>/summary.md`, `summary.json`, `events.ndjson`, and node snapshots; add EVID path to traceability matrix.
 
 #### 11.2 Two-node identity exchange over in-memory transport
 Files:
@@ -2108,6 +2176,12 @@ Steps:
 - Perform handshake and identity update.
 Tests:
 - `TestE2E_TwoNode_IdentityExchange`: both nodes store peer identity.
+Traceability:
+- SCEN: `SCEN-CONN-01` (peer handshake + identity exchange).
+- TEST: `TEST-E2E-002`.
+- SC/REQ: map to `SC-CONN-*`, `SC-ID-*`, `REQ-TRANS-*`, `REQ-IDOC-*`.
+Evidence:
+- Emit evidence bundle and record EVID path.
 
 #### 11.3 Two-node messaging with mailbox fallback
 Files:
@@ -2117,6 +2191,12 @@ Steps:
 - Node B comes online and retrieves messages.
 Tests:
 - `TestE2E_MailboxFallback_Delivers`.
+Traceability:
+- SCEN: `SCEN-JOURNEY-04` (message across NAT/offline).
+- TEST: `TEST-E2E-003`.
+- SC/REQ: map to `SC-MSG-*`, `SC-CONN-*`, `REQ-MSG-*`, `REQ-TRANS-*`.
+Evidence:
+- Emit evidence bundle and record EVID path.
 
 #### 11.4 Two-node sync replication
 Files:
@@ -2126,6 +2206,12 @@ Steps:
 - Sync to Node B; verify convergence.
 Tests:
 - `TestE2E_Sync_Converges`.
+Traceability:
+- SCEN: `SCEN-SYNC-01` (sync convergence).
+- TEST: `TEST-E2E-004`.
+- SC/REQ: map to `SC-SYNC-*`, `REQ-SYNC-*`.
+Evidence:
+- Emit evidence bundle and record EVID path.
 
 #### 11.5 Recovery flow test: lost key -> recovery proof -> publish
 Files:
@@ -2134,6 +2220,12 @@ Steps:
 - Simulate key loss, apply recovery proof, publish update.
 Tests:
 - `TestE2E_RecoveryFlow`.
+Traceability:
+- SCEN: `SCEN-ID-RECOVERY-01`.
+- TEST: `TEST-E2E-005`.
+- SC/REQ: map to `SC-ID-*`, `REQ-IDOC-*`, `REQ-RECOVERY-*`.
+Evidence:
+- Emit evidence bundle and record EVID path.
 
 #### 11.6 Upgrade test: migrate persisted state
 Files:
@@ -2142,3 +2234,9 @@ Steps:
 - Load old data fixture, run migration.
 Tests:
 - `TestE2E_Migration_Upgrade`.
+Traceability:
+- SCEN: `SCEN-OPS-01` (upgrade/compat).
+- TEST: `TEST-E2E-006`.
+- SC/REQ: map to `SC-OPS-*`, `REQ-OPS-*`.
+Evidence:
+- Emit evidence bundle and record EVID path.

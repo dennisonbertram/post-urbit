@@ -108,7 +108,7 @@ function resolve_dns(name):
 
 ### DNSSEC Requirement
 
-- **SHOULD** use DNSSEC for integrity
+- **SHOULD** use DNSSEC for integrity [REQ-ID-021]
 - If DNSSEC validation fails, treat result as untrusted
 - Still verify identity document signature after resolution
 

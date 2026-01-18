@@ -294,7 +294,7 @@ interface DependenciesConfig {
 
 The authoritative specification is in `05-ux-packaging/app-distribution.md`. Key points:
 
-1. **SIGNATURE file is REQUIRED** in the `.postapp` ZIP archive
+1. **SIGNATURE file is REQUIRED** in the `.postapp` ZIP archive [REQ-APP-034]
 2. **manifest.json does NOT contain a signature field**
 3. The SIGNATURE file contains:
    - `author_iid`: Signer's identity identifier
@@ -304,7 +304,7 @@ The authoritative specification is in `05-ux-packaging/app-distribution.md`. Key
 
 ### File Hashes
 
-File hashes are REQUIRED in manifest.json for package integrity:
+File hashes are REQUIRED in manifest.json for package integrity: [REQ-APP-035]
 
 ```typescript
 interface FilesConfig {
@@ -385,13 +385,13 @@ interface ValidationWarning {
 
 ### Forward Compatibility (Normative)
 
-**Unknown fields MUST be ignored for semantic validation:** Validators MUST ignore unrecognized top-level and nested fields in `manifest.json` for purposes of semantic validation. This enables:
+**Unknown fields MUST be ignored for semantic validation:** Validators MUST ignore unrecognized top-level and nested fields in `manifest.json` for purposes of semantic validation. This enables: [REQ-APP-036]
 - Future manifest extensions (e.g., `distribution` fields for app stores)
 - Cross-version compatibility as the schema evolves
 
-Validators MAY emit warnings for unknown fields but MUST NOT reject manifests solely due to unknown fields.
+Validators MAY emit warnings for unknown fields but MUST NOT reject manifests solely due to unknown fields. [REQ-APP-037]
 
-**Signature Verification MUST preserve all fields:** When computing manifest hashes for signature verification (see `app-distribution.md`), implementations MUST:
+**Signature Verification MUST preserve all fields:** When computing manifest hashes for signature verification (see `app-distribution.md`), implementations MUST: [REQ-APP-038]
 1. Parse `manifest.json` into a representation that preserves all fields (including unknown fields)
 2. Apply JCS canonicalization to the complete JSON object
 3. Hash the canonical bytes including all fields

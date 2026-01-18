@@ -178,7 +178,7 @@ The wire format for identity updates uses the schema defined in `spec/00-shared/
 
 **Note:** The `idoc` field contains the Base64-encoded IDOC binary envelope (magic + version + length + JCS JSON), NOT an inline JSON object. This ensures signature verification uses the exact bytes that were signed.
 
-For rotation urgency hints, implementations MAY use out-of-band signaling or extended fields (future versions may standardize urgency/reason fields), but the core wire format above is sufficient for v1.
+For rotation urgency hints, implementations MAY use out-of-band signaling or extended fields (future versions may standardize urgency/reason fields), but the core wire format above is sufficient for v1. [REQ-ID-020]
 
 | Urgency | Meaning |
 |---------|---------|

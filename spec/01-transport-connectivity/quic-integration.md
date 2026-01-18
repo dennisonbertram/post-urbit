@@ -155,7 +155,7 @@ Stream Types (see RFC-0002 §6.2 for authoritative registry):
 
 ## 0-RTT Resumption
 
-**0-RTT Usage (Normative):** Per RFC-0002 §8.3, Post-Urbit v1 implementations MUST NOT send application-layer data in QUIC 0-RTT early data. QUIC 0-RTT MAY be used for transport-level connection resumption, but all Post-Urbit protocol bytes (control messages, identity handshake, stream data) MUST wait until `tls_binding` is available after TLS 1.3 handshake completion. See RFC-0002 §8.3 for the authoritative specification.
+**0-RTT Usage (Normative):** Per RFC-0002 §8.3, Post-Urbit v1 implementations MUST NOT send application-layer data in QUIC 0-RTT early data. QUIC 0-RTT MAY be used for transport-level connection resumption, but all Post-Urbit protocol bytes (control messages, identity handshake, stream data) MUST wait until `tls_binding` is available after TLS 1.3 handshake completion. See RFC-0002 §8.3 for the authoritative specification. [REQ-TRANS-058]
 
 ## Connection Migration
 

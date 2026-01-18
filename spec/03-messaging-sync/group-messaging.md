@@ -31,8 +31,8 @@ group_id     = CrockfordBase32Lower(group_id_raw)  // 32 chars
 ```
 
 **Notes:**
-- Implementations MUST use the raw 20-byte IID for `creator_iid_raw`, not the Base32 string.
-- Implementations MUST use the canonical timestamp form to ensure deterministic IDs.
+- Implementations MUST use the raw 20-byte IID for `creator_iid_raw`, not the Base32 string. [REQ-MSG-003]
+- Implementations MUST use the canonical timestamp form to ensure deterministic IDs. [REQ-MSG-004]
 - In cryptographic KDF inputs (e.g., sender-key KDF), use the raw 20-byte `group_id_raw`.
 
 ### Group Metadata
@@ -76,11 +76,11 @@ group_id     = CrockfordBase32Lower(group_id_raw)  // 32 chars
 ```
 
 **Version Format (Normative):**
-The `version` field in both `GroupMembership` snapshots and `GroupStateUpdate` messages MUST use the format `"<logical_clock>.<first_8_chars_of_actor_iid>"` where:
+The `version` field in both `GroupMembership` snapshots and `GroupStateUpdate` messages MUST use the format `"<logical_clock>.<first_8_chars_of_actor_iid>"` where: [REQ-MSG-005]
 - `logical_clock`: decimal integer (e.g., "42")
 - `first_8_chars_of_actor_iid`: first 8 characters of the Crockford Base32-encoded IID of the actor who created this version (e.g., "a1b2c3d4")
 
-The genesis version (when group is created) MUST use `"0.<first_8_chars_of_creator_iid>"` with `previous_version` set to `null`.
+The genesis version (when group is created) MUST use `"0.<first_8_chars_of_creator_iid>"` with `previous_version` set to `null`. [REQ-MSG-006]
 
 ## Sender Keys
 
@@ -100,7 +100,7 @@ interface SenderKey {
 }
 ```
 
-**KDF encoding note:** When calling `kdf_sender_key()`, string fields MUST be decoded to raw bytes:
+**KDF encoding note:** When calling `kdf_sender_key()`, string fields MUST be decoded to raw bytes: [REQ-MSG-007]
 - `keyId`: Base64 decode → 16 bytes
 - `senderIid`: Crockford Base32 decode → 20 bytes
 - `group_id`: Crockford Base32 decode → 20 bytes (from group context)
@@ -211,7 +211,7 @@ Total: 21 bytes
 
 **Sender Key Iteration (Normative):**
 - The `iteration` field in the group header extension is **1-indexed**: the first encrypted group message uses iteration=1
-- Value **0 is invalid**; implementations MUST reject group envelopes with `iteration = 0`
+- Value **0 is invalid**; implementations MUST reject group envelopes with `iteration = 0` [REQ-MSG-008]
 - This differs from `sender_key_share.content.iteration = 0` which is a state hint (pre-first-message), not a wire value
 - See RFC-0003 §3.4.4 for the authoritative iteration counter specification
 
@@ -248,7 +248,7 @@ All membership changes are represented as **Group State Updates** - signed opera
 
 **Wire Format: See RFC-0003 §8.6 (Authoritative)**
 
-The `group_state_update` PUSE message content MUST follow RFC-0003 §8.6:
+The `group_state_update` PUSE message content MUST follow RFC-0003 §8.6: [REQ-MSG-009]
 
 ```typescript
 // Wire format (content of PUSE plaintext)
@@ -289,7 +289,7 @@ interface GroupStateUpdateInternal extends GroupStateUpdateContent {
 
 **Conflict Resolution (Normative):**
 
-Version comparison MUST use numeric ordering for the logical clock component:
+Version comparison MUST use numeric ordering for the logical clock component: [REQ-MSG-010]
 
 1. Parse version strings as `(logical_clock: int, actor_suffix: string)`
 2. Compare `logical_clock` as **unsigned integers** (NOT lexicographically)
@@ -372,15 +372,15 @@ Admin sends `group_state_update` PUSE message. Per RFC-0003 §8.6:
 }
 ```
 
-After removal, remaining members SHOULD rotate sender keys (removed member has old keys).
+After removal, remaining members SHOULD rotate sender keys (removed member has old keys). [REQ-MSG-011]
 
 **Wire Format (Normative per RFC-0003 §8.6):**
 
-- All group membership operations MUST be sent as PUSE messages with `"type": "group_state_update"`
-- The ad-hoc `"type": "group_event"` format is deprecated and MUST NOT be used
-- Implementations MUST reject messages with `"type": "group_event"`
+- All group membership operations MUST be sent as PUSE messages with `"type": "group_state_update"` [REQ-MSG-012]
+- The ad-hoc `"type": "group_event"` format is deprecated and MUST NOT be used [REQ-MSG-013]
+- Implementations MUST reject messages with `"type": "group_event"` [REQ-MSG-014]
 - No separate signature field exists in the content - authentication is via the PUSE envelope signature
-- Action types MUST match RFC-0003 §8.6: `add_member`, `remove_member`, `promote_admin`, `demote_admin`, `update_info`, `rotate_sender_key`
+- Action types MUST match RFC-0003 §8.6: `add_member`, `remove_member`, `promote_admin`, `demote_admin`, `update_info`, `rotate_sender_key` [REQ-MSG-015]
 
 ## History Visibility
 

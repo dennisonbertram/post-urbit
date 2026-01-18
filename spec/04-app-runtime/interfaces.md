@@ -11,7 +11,7 @@ This document specifies the complete TypeScript interface for the App Runtime la
 | **On-disk manifest.json** | snake_case | `manifest_version`, `initial_pages`, `background_task` |
 | **TypeScript interfaces** | camelCase | `manifestVersion`, `initialPages`, `backgroundTask` |
 
-**Normative rule**: The on-disk `manifest.json` format uses snake_case (as shown in manifest-schema.md). TypeScript interfaces use camelCase for developer ergonomics. Implementations MUST:
+**Normative rule**: The on-disk `manifest.json` format uses snake_case (as shown in manifest-schema.md). TypeScript interfaces use camelCase for developer ergonomics. Implementations MUST: [REQ-APP-033]
 1. Parse snake_case from `manifest.json` when loading packages
 2. Map to camelCase in TypeScript runtime structures
 3. Use the snake_case manifest format for package signature verification

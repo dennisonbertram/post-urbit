@@ -11,7 +11,7 @@ This document specifies the complete API surface for the Messaging & Sync layer.
 | **On-wire JSON (PUSE plaintext)** | snake_case | `thread_id`, `reply_to`, `is_typing`, `target_message_id` |
 | **TypeScript interfaces** | camelCase | `threadId`, `replyTo`, `isTyping`, `targetMessageId` |
 
-**Normative rule**: On-wire plaintext JSON inside PUSE envelopes uses snake_case; TypeScript interfaces use camelCase for developer ergonomics. Implementations MUST:
+**Normative rule**: On-wire plaintext JSON inside PUSE envelopes uses snake_case; TypeScript interfaces use camelCase for developer ergonomics. Implementations MUST: [REQ-MSG-016]
 1. Serialize to snake_case when creating PUSE plaintext
 2. Deserialize from snake_case when parsing received PUSE plaintext
 
@@ -75,7 +75,7 @@ type SequenceNumber = string;
 
 ## API↔Wire Encoding Mapping (Normative)
 
-The TypeScript interfaces above are **in-memory/app-facing only**. When encoding for the wire (sync stream 0x04 CBOR payloads), the following conversions MUST be applied:
+The TypeScript interfaces above are **in-memory/app-facing only**. When encoding for the wire (sync stream 0x04 CBOR payloads), the following conversions MUST be applied: [REQ-MSG-017]
 
 | API Type | String Format | Wire Format (CBOR) |
 |----------|---------------|-------------------|

@@ -152,7 +152,7 @@ All keys and signatures use these encodings:
 
 ## Field Specifications
 
-**Wire Encoding Requirement (per RFC-0001 §6.6):** All top-level fields MUST be present in the wire encoding. This ensures byte-identical comparison for DHT TTL refresh and deterministic conflict detection.
+**Wire Encoding Requirement (per RFC-0001 §6.6):** All top-level fields MUST be present in the wire encoding. This ensures byte-identical comparison for DHT TTL refresh and deterministic conflict detection. [REQ-ID-001]
 
 ### Top-Level Fields (All Wire-Required)
 
@@ -189,7 +189,7 @@ All keys and signatures use these encodings:
 - **Empty objects** where no values exist: `"claims": {}`, `"extensions": {}`
 - **`null`** for truly absent optional nested fields: `"keys.signing.previous": null`, `"recovery_proof": null`
 
-Verifiers MUST reject documents missing any required top-level field.
+Verifiers MUST reject documents missing any required top-level field. [REQ-ID-002]
 
 ### Signing Key History Entry
 
@@ -211,7 +211,7 @@ Previous signing keys are retained to support signature verification for message
 | `valid_until` | string | Sequence number when this key was rotated out |
 | `expires_at` | timestamp | Metadata for UI warnings and audit trails (see note below) |
 
-**Note on `expires_at`:** The `expires_at` field is metadata for UI warnings and audit trails; it MUST NOT be used as a signature rejection criterion during verification. Verifiers MUST accept valid signatures from historical keys regardless of `expires_at`. UIs MAY display warnings for signatures made with keys past their `expires_at`, but the signature itself remains valid if cryptographically correct.
+**Note on `expires_at`:** The `expires_at` field is metadata for UI warnings and audit trails; it MUST NOT be used as a signature rejection criterion during verification. Verifiers MUST accept valid signatures from historical keys regardless of `expires_at`. UIs MAY display warnings for signatures made with keys past their `expires_at`, but the signature itself remains valid if cryptographically correct. [REQ-ID-003]
 
 **Retention policy**: Keep at most **10 previous signing keys or 2 years**, whichever is less.
 
@@ -396,7 +396,7 @@ Each device publishes a Device Document, signed by the identity:
 
 1. Verify `did == Base32Lower(SHA256(Base64Decode(device_signing_key))[0:20])` (decode Base64 key to raw 32 bytes)
 2. Look up identity document for `iid`
-3. Verify `signature_by_identity` using identity's current or historical signing keys (see RFC-0001 §7.5 for key lookup order: current → previous → history; note that `expires_at` on historical keys is metadata only and MUST NOT be used as a rejection criterion)
+3. Verify `signature_by_identity` using identity's current or historical signing keys (see RFC-0001 §7.5 for key lookup order: current → previous → history; note that `expires_at` on historical keys is metadata only and MUST NOT be used as a rejection criterion) [REQ-ID-004]
 4. Check device document's `expires_at` if present (this is a valid rejection criterion for temporary device authorizations, distinct from signing key `expires_at`)
 
 ### Multi-Device Implications (v1: Identity-Level Sessions)
@@ -417,7 +417,7 @@ In v1, **messaging sessions are identity-level** (per IID pair), not per-device:
 
 In v1, the following constraint applies to ensure interoperability:
 
-- **Single Home Node Model**: For a given identity, all devices MUST connect to a single "home node" that manages the identity's ratchet state
+- **Single Home Node Model**: For a given identity, all devices MUST connect to a single "home node" that manages the identity's ratchet state [REQ-ID-005]
 - The home node handles:
   - Maintaining the single ratchet session state per (sender_iid, recipient_iid) pair
   - Forwarding outbound messages from any connected device
@@ -427,14 +427,14 @@ In v1, the following constraint applies to ensure interoperability:
 
 **External Peer Connectivity (v1 Normative):**
 
-External peers (different identities) MUST connect to the **Identity Document endpoints**, NOT to device-specific endpoints. The Identity Document endpoints represent the home node.
+External peers (different identities) MUST connect to the **Identity Document endpoints**, NOT to device-specific endpoints. The Identity Document endpoints represent the home node. [REQ-ID-006]
 
 - **Device documents and device indexes are for INTRA-identity use only** in v1
 - External peers look up the target identity's Identity Document from DHT and connect to its endpoints
 - Device discovery (fetching device index, device documents) is used by devices within the SAME identity to:
   - Find their home node
   - Find sibling devices for internal coordination
-- External peers MUST NOT enumerate or connect to device-specific endpoints
+- External peers MUST NOT enumerate or connect to device-specific endpoints [REQ-ID-007]
 
 See `00-shared/layer-integration.md` "Device Discovery Flow" for the complete connectivity model.
 
@@ -444,7 +444,7 @@ See `00-shared/layer-integration.md` "Device Discovery Flow" for the complete co
 - Ratchet state is managed by the home node, not individual devices
 - Sender does NOT need to maintain separate ratchets per recipient device
 
-**Note**: Future protocol versions MAY define a distributed ratchet state synchronization mechanism (e.g., via Sync streams) to support truly peer-to-peer multi-device messaging without a home node.
+**Note**: Future protocol versions MAY define a distributed ratchet state synchronization mechanism (e.g., via Sync streams) to support truly peer-to-peer multi-device messaging without a home node. [REQ-ID-008]
 
 ### Device Registration
 
@@ -471,11 +471,11 @@ To revoke a device, publish a signed revocation notice:
 }
 ```
 
-Peers MUST check for revocation before accepting connections from a device.
+Peers MUST check for revocation before accepting connections from a device. [REQ-ID-009]
 
 ## Canonical Serialization
 
-For signing, the document MUST be serialized canonically with domain separation:
+For signing, the document MUST be serialized canonically with domain separation: [REQ-ID-010]
 
 1. **JSON Canonicalization Scheme (JCS)** per RFC 8785
 2. Remove `signatures` field before signing
@@ -511,7 +511,7 @@ signature = Ed25519_Sign(signing_private_key, payload)
      - This proves the rotation was authorized by the previous key holder
    - **Recovery authorization**: If `signatures.previous` is null and `recovery_proof` exists:
      - Verify recovery proof according to the method (see recovery-mechanisms.md)
-     - Compute recovery finality from timestamps: if `now < recovery_proof.cooldown_expires_at`, treat document as provisional (pending cooldown). The `recovery_proof.status` field is informational only and MUST NOT be used for verification decisions.
+     - Compute recovery finality from timestamps: if `now < recovery_proof.cooldown_expires_at`, treat document as provisional (pending cooldown). The `recovery_proof.status` field is informational only and MUST NOT be used for verification decisions. [REQ-ID-011]
 
 ### Timestamp Validation Rules
 
@@ -519,15 +519,15 @@ The `timestamp` field prevents future-dated documents but does NOT enforce a max
 
 | Rule | Constraint | Rationale |
 |------|------------|-----------|
-| **Future limit** | MUST NOT be more than 24 hours ahead of verifier's clock | Prevents pre-dating attacks |
-| **Monotonicity** | MUST be ≥ previous document's timestamp (if known) | Prevents backdating |
-| **No max age** | MAY be arbitrarily old | Enables caching, offline, and archival |
+| **Future limit** | MUST NOT be more than 24 hours ahead of verifier's clock | Prevents pre-dating attacks  [REQ-ID-012]|
+| **Monotonicity** | MUST be ≥ previous document's timestamp (if known) | Prevents backdating  [REQ-ID-013]|
+| **No max age** | MAY be arbitrarily old | Enables caching, offline, and archival  [REQ-ID-014]|
 | **Clock skew** | Allow reasonable tolerance (~5 minutes) for sync errors | Network/device variance |
 
 **Implementation guidance**:
 - Reject documents with `timestamp > now + 24h`
 - Accept documents with old timestamps if sequence number is valid
-- UI MAY warn on "stale" documents (e.g., >30 days old), but MUST NOT auto-reject
+- UI MAY warn on "stale" documents (e.g., >30 days old), but MUST NOT auto-reject [REQ-ID-015]
 - Sequence number is the primary replay protection, not timestamp
 
 ### Handling Missed Sequence Numbers (Gaps)
@@ -629,8 +629,8 @@ A hash-based tiebreaker allows an attacker with key access to intentionally craf
 ```
 
 **JSON Canonicalization (Normative):**
-- The JSON body MUST be serialized using JSON Canonicalization Scheme (JCS) per RFC 8785
-- Implementations MUST reject IDOC envelopes where the JSON is not JCS-canonical
+- The JSON body MUST be serialized using JSON Canonicalization Scheme (JCS) per RFC 8785 [REQ-ID-016]
+- Implementations MUST reject IDOC envelopes where the JSON is not JCS-canonical [REQ-ID-017]
 - This ensures signature verification produces consistent results across implementations
 - See RFC-0001 §6.2 for detailed canonicalization rules
 
@@ -779,4 +779,4 @@ That document provides:
 - Key rotation with dual signatures
 - IID derivation from raw Ed25519 public keys (NOT DER/SPKI encoded)
 
-Implementers MUST validate against those vectors before claiming conformance.
+Implementers MUST validate against those vectors before claiming conformance. [REQ-ID-018]

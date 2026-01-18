@@ -1,0 +1,360 @@
+# Scenario Catalog (initial scaffold)
+# Each scenario maps to SC-* and (eventually) REQ-* IDs.
+
+- id: SCEN-JOURNEY-01
+  title: "Install a node and reach admin UI"
+  success_criteria:
+    - SC-JOURNEY-01
+    - SC-NODE-01
+  requirements:
+    - REQ-OPS-017
+  tests:
+    - TEST-JOURNEY-01
+  topology: [alice]
+  steps:
+    - id: S1
+      action: node.install
+      actor: alice
+    - id: S2
+      action: assert.admin_ui_reachable
+      actor: alice
+
+- id: SCEN-NODE-01
+  title: "Local storage and backup/restore"
+  success_criteria:
+    - SC-NODE-02
+    - SC-NODE-03
+  requirements:
+    - REQ-OPS-016
+  tests:
+    - TEST-NODE-01
+  topology: [alice]
+  steps:
+    - id: S1
+      action: node.write_data
+      actor: alice
+      params: { key: "k1", value: "v1" }
+    - id: S2
+      action: node.backup
+      actor: alice
+      params: { backup_id: "backup-1" }
+    - id: S3
+      action: node.restore
+      actor: alice
+      params: { backup_id: "backup-1" }
+    - id: S4
+      action: assert.data_restored
+      actor: alice
+      params: { key: "k1", value: "v1" }
+
+- id: SCEN-JOURNEY-02
+  title: "Claim an identity"
+  success_criteria:
+    - SC-JOURNEY-02
+    - SC-ID-01
+    - SC-ID-02
+  requirements:
+    - REQ-IDOC-003
+    - REQ-IDOC-017
+  tests:
+    - TEST-JOURNEY-02
+  topology: [alice]
+  steps:
+    - id: S1
+      action: node.create_identity
+      actor: alice
+    - id: S2
+      action: assert.identity_exists
+      actor: alice
+
+- id: SCEN-JOURNEY-03
+  title: "Add a contact"
+  success_criteria:
+    - SC-JOURNEY-03
+    - SC-CONN-01
+    - SC-ID-03
+  requirements:
+    - REQ-ID-004
+    - REQ-SHARED-013
+  tests:
+    - TEST-JOURNEY-03
+  topology: [alice, bob]
+  steps:
+    - id: S1
+      action: node.create_identity
+      actor: alice
+    - id: S2
+      action: node.create_identity
+      actor: bob
+    - id: S3
+      action: node.exchange_identity
+      actor: alice
+      params: { target: bob }
+    - id: S4
+      action: assert.contact_added
+      actor: alice
+      params: { target: bob }
+
+- id: SCEN-JOURNEY-04
+  title: "Message across NAT with relay fallback"
+  success_criteria:
+    - SC-JOURNEY-04
+    - SC-CONN-02
+    - SC-CONN-03
+    - SC-MSG-01
+  requirements:
+    - REQ-TRANS-007
+    - REQ-TRANS-066
+    - REQ-MSG-039
+  tests:
+    - TEST-JOURNEY-04
+  topology: [alice, bob, relay]
+  steps:
+    - id: S1
+      action: node.create_identity
+      actor: alice
+    - id: S2
+      action: node.create_identity
+      actor: bob
+    - id: S3
+      action: network.set_nat
+      params: { bob: "symmetric_nat" }
+    - id: S4
+      action: node.add_contact
+      actor: alice
+      params: { target: bob }
+    - id: S5
+      action: node.send_message
+      actor: alice
+      params: { to: bob, body: "hello" }
+    - id: S6
+      action: assert.message_received
+      actor: bob
+      params: { from: alice, body: "hello" }
+    - id: S7
+      action: assert.delivery_path
+      actor: bob
+      params: { via: "relay" }
+
+- id: SCEN-JOURNEY-05
+  title: "Install an app"
+  success_criteria:
+    - SC-JOURNEY-05
+    - SC-APP-01
+    - SC-APP-02
+  requirements:
+    - REQ-APP-034
+    - REQ-OPS-002
+  tests:
+    - TEST-JOURNEY-05
+  topology: [alice]
+  steps:
+    - id: S1
+      action: node.install_app
+      actor: alice
+      params: { app: "example.postapp" }
+    - id: S2
+      action: assert.app_installed
+      actor: alice
+      params: { app: "example" }
+
+- id: SCEN-JOURNEY-06
+  title: "Sync app data to a second node"
+  success_criteria:
+    - SC-JOURNEY-06
+    - SC-SYNC-01
+    - SC-SYNC-02
+    - SC-SYNC-03
+  requirements:
+    - REQ-SYNC-007
+    - REQ-SYNC-008
+  tests:
+    - TEST-JOURNEY-06
+  topology: [alice, bob]
+  steps:
+    - id: S1
+      action: node.create_identity
+      actor: alice
+    - id: S2
+      action: node.create_identity
+      actor: bob
+    - id: S3
+      action: app.create_document
+      actor: alice
+      params: { doc: "doc-1" }
+    - id: S4
+      action: node.sync
+      actor: alice
+      params: { target: bob, doc: "doc-1" }
+    - id: S5
+      action: assert.sync_converged
+      actor: bob
+      params: { doc: "doc-1" }
+
+- id: SCEN-JOURNEY-07
+  title: "Recover identity after key loss"
+  success_criteria:
+    - SC-JOURNEY-07
+    - SC-ID-01
+  requirements:
+    - REQ-ID-027
+    - REQ-ID-030
+  tests:
+    - TEST-JOURNEY-07
+  topology: [alice]
+  steps:
+    - id: S1
+      action: node.create_identity
+      actor: alice
+    - id: S2
+      action: node.simulate_key_loss
+      actor: alice
+    - id: S3
+      action: node.recover_identity
+      actor: alice
+    - id: S4
+      action: assert.identity_recovered
+      actor: alice
+
+- id: SCEN-GROUP-01
+  title: "Group messaging"
+  success_criteria:
+    - SC-MSG-02
+  requirements:
+    - REQ-MSG-012
+    - REQ-MSG-065
+  tests:
+    - TEST-GROUP-01
+  topology: [alice, bob, carol]
+  steps:
+    - id: S1
+      action: group.create
+      actor: alice
+      params: { group_id: "group-1", members: [bob, carol] }
+    - id: S2
+      action: group.send_message
+      actor: alice
+      params: { group_id: "group-1", body: "hello group" }
+    - id: S3
+      action: assert.group_message_received
+      actor: bob
+      params: { group_id: "group-1", from: alice, body: "hello group" }
+
+- id: SCEN-KEY-ROTATION-01
+  title: "Key rotation without breaking messaging"
+  success_criteria:
+    - SC-MSG-03
+  requirements:
+    - REQ-IDOC-020
+    - REQ-IDOC-022
+  tests:
+    - TEST-KEY-ROTATION-01
+  topology: [alice, bob]
+  steps:
+    - id: S1
+      action: node.rotate_identity_keys
+      actor: alice
+    - id: S2
+      action: node.send_message
+      actor: bob
+      params: { to: alice, body: "after-rotation" }
+    - id: S3
+      action: assert.message_received
+      actor: alice
+      params: { from: bob, body: "after-rotation" }
+
+- id: SCEN-OPS-01
+  title: "Upgrade path"
+  success_criteria:
+    - SC-OPS-01
+  requirements:
+    - REQ-OPS-012
+  tests:
+    - TEST-OPS-01
+  topology: [alice]
+  steps:
+    - id: S1
+      action: node.install_version
+      actor: alice
+      params: { version: "N" }
+    - id: S2
+      action: node.upgrade
+      actor: alice
+      params: { version: "N+1" }
+    - id: S3
+      action: assert.data_migrated
+      actor: alice
+
+- id: SCEN-OPS-02
+  title: "Observability does not leak user content"
+  success_criteria:
+    - SC-OPS-02
+  requirements:
+    - REQ-SHARED-033
+  tests:
+    - TEST-OPS-02
+  topology: [alice]
+  steps:
+    - id: S1
+      action: node.generate_activity
+      actor: alice
+    - id: S2
+      action: assert.logs_sanitized
+      actor: alice
+
+- id: SCEN-OPS-03
+  title: "Abuse controls"
+  success_criteria:
+    - SC-OPS-03
+  requirements:
+    - REQ-TRANS-068
+  tests:
+    - TEST-OPS-03
+  topology: [alice, bob]
+  steps:
+    - id: S1
+      action: node.simulate_abuse
+      actor: bob
+    - id: S2
+      action: assert.abuse_controls_applied
+      actor: alice
+
+- id: SCEN-CONF-01
+  title: "Protocol conformance vectors"
+  success_criteria: []
+  requirements:
+    - REQ-ID-018
+    - REQ-SHARED-018
+  tests:
+    - TEST-VEC-001
+    - TEST-VEC-002
+    - TEST-VEC-003
+    - TEST-VEC-004
+    - TEST-VEC-005
+    - TEST-VEC-006
+    - TEST-VEC-007
+    - TEST-VEC-008
+    - TEST-VEC-009
+    - TEST-VEC-010
+    - TEST-VEC-011
+  topology: []
+  steps:
+    - id: S1
+      action: vectors.run_all
+
+- id: SCEN-FAIL-01
+  title: "Invalid signature rejected"
+  success_criteria: []
+  requirements:
+    - REQ-MSG-051
+  tests:
+    - TEST-FAIL-01
+  topology: [alice, bob]
+  steps:
+    - id: S1
+      action: node.send_tampered_message
+      actor: alice
+      params: { to: bob }
+    - id: S2
+      action: assert.rejected
+      actor: bob

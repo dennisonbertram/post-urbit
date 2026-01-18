@@ -20,7 +20,7 @@ Format:
 
 - `SC-NODE-01`, `SC-ID-02`, `SC-CONN-01`, `SC-MSG-02`, `SC-APP-01`, `SC-SYNC-01`, `SC-OPS-01`, `SC-JOURNEY-01`, etc.
 
-Each bullet in the success criteria doc MUST have a stable ID.
+Each bullet in the success criteria doc MUST have a stable ID. [REQ-OVR-001]
 
 ### 2. Requirements (REQ)
 
@@ -33,7 +33,7 @@ Format:
 - `REQ-MSG-PUSE-12`
 - `REQ-APP-MANIFEST-05`
 
-Each normative statement ("MUST/SHOULD") MUST have a stable ID. If a requirement is implied by a state machine or data schema, it still needs an ID.
+Each normative statement ("MUST/SHOULD") MUST have a stable ID. If a requirement is implied by a state machine or data schema, it still needs an ID. [REQ-OVR-002]
 
 ### 3. Scenarios (SCEN)
 
@@ -42,6 +42,8 @@ Source: verification harness scenarios.
 Format:
 
 - `SCEN-JOURNEY-01`, `SCEN-CONF-07`, `SCEN-FAIL-03`
+
+Scenarios MUST include a `tests` list (TEST-* IDs) in `spec/00-overview/scenarios.yaml` so the matrix can map SC/REQ coverage to concrete tests. [REQ-OVR-009]
 
 ### 4. Tests (TEST)
 
@@ -67,6 +69,8 @@ The canonical matrix is a table (or machine-readable YAML/CSV) with at least:
 | Requirement ID | Description | Spec Source | Scenario IDs | Test IDs | Evidence Path | Status | Notes |
 |---------------|-------------|-------------|--------------|----------|---------------|--------|-------|
 
+`spec/00-overview/traceability-coverage.md` is a derived summary for quick coverage stats. Regenerate it whenever the matrix or scenarios change. Use `python3 spec/00-overview/traceability-update.py` to refresh both the matrix mappings and the coverage report.
+
 ### Status Values
 
 - `tested`: Evidence exists and passed
@@ -78,9 +82,9 @@ The canonical matrix is a table (or machine-readable YAML/CSV) with at least:
 
 ## Coverage Rules
 
-1. Every SC-* MUST map to at least one SCEN-* and one TEST-*.
+1. Every SC-* MUST map to at least one SCEN-* and one TEST-*. [REQ-OVR-003]
 2. Every REQ-* MUST map to at least one TEST-* (or be explicitly `manual` with a reason).
-3. Every SCEN-* MUST produce at least one evidence artifact.
+3. Every SCEN-* MUST produce at least one evidence artifact. [REQ-OVR-004]
 4. Every TEST-* MUST map back to one or more SC-* or REQ-*.
 
 ## Completeness Gate (Definition of Done)
@@ -91,6 +95,8 @@ The system is "complete" when:
 - 100% of REQ-* are `tested` or explicitly `manual` with a written rationale.
 - 0 `blocked` items remain in MVP scope.
 - Every harness suite produces a full evidence bundle for the release candidate.
+
+MVP scope is defined in `spec/progress.md`. Items outside MVP scope should be marked `n/a` in the traceability matrix until started.
 
 ## Change Management
 
@@ -114,4 +120,3 @@ When implementation changes:
 ## Relationship to Harness
 
 All scenario and test IDs referenced here must exist in the harness definition in `spec/00-overview/verification-harness.md`. The harness is the producer of evidence; this document is the index.
-

@@ -161,7 +161,7 @@ Revocations must propagate quickly to prevent attackers from impersonating.
 
 ### DHT Storage (Normative)
 
-Revocations MUST be stored in DHT for later discovery by nodes that were offline during propagation.
+Revocations MUST be stored in DHT for later discovery by nodes that were offline during propagation. [REQ-ID-035]
 
 **DHT Key for Revocations:**
 ```
@@ -175,14 +175,14 @@ Key = SHA256("post-urbit:revocation:" || iid)  # iid is 32-char Crockford Base32
 See RFC-0001 §10 for the exact document schemas and signature construction.
 
 **Storage Rules:**
-- DHT nodes MUST verify revocation signatures before storing:
+- DHT nodes MUST verify revocation signatures before storing: [REQ-ID-036]
   - For `key_revocation`: Verify `signatures.by_current_signing_key` and/or `signatures.by_new_signing_key` per RFC-0001 §10.1
   - For `identity_revocation`: Verify `signature` field per RFC-0001 §10.2
 - TTL: 365 days (revocations are long-lived)
 - Multiple revocations for same IID: keep **earliest** `effective_at` timestamp (security-conservative, per RFC-0001 §12.7)
 
 **Lookup Behavior:**
-When verifying an identity document, implementations SHOULD:
+When verifying an identity document, implementations SHOULD: [REQ-ID-037]
 1. Fetch identity from `SHA256("post-urbit:identity:" || iid)`
 2. Also fetch any revocation from `SHA256("post-urbit:revocation:" || iid)`
 3. If revocation exists and is valid, treat identity as revoked

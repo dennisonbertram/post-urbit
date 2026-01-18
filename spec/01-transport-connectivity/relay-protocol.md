@@ -63,17 +63,17 @@ def derive_allocation_url(relay_endpoint: dict) -> str:
     return f"https://{host}/allocate"
 ```
 
-**v1 Normative Rule:** For v1, the allocation endpoint is always `https://{relay.host}/allocate` on port 443. Relay operators MUST serve the allocation API on port 443 with a valid TLS certificate. The QUIC relay port (typically 4433) is separate from the HTTPS allocation port.
+**v1 Normative Rule:** For v1, the allocation endpoint is always `https://{relay.host}/allocate` on port 443. Relay operators MUST serve the allocation API on port 443 with a valid TLS certificate. The QUIC relay port (typically 4433) is separate from the HTTPS allocation port. [REQ-TRANS-059]
 
-**Future versions** MAY extend the relay endpoint schema to include an explicit `allocation_port` or `allocation_url` field.
+**Future versions** MAY extend the relay endpoint schema to include an explicit `allocation_port` or `allocation_url` field. [REQ-TRANS-060]
 
 ### HTTPS TLS Policy for Allocation (Normative)
 
-The HTTPS allocation request MUST use standard WebPKI TLS validation:
+The HTTPS allocation request MUST use standard WebPKI TLS validation: [REQ-TRANS-061]
 
-1. **Certificate validation:** Clients MUST verify the server certificate against the system trust store (WebPKI roots)
-2. **Hostname verification:** Clients MUST verify the certificate is valid for `relay.host`
-3. **No self-signed:** Self-signed certificates MUST be rejected for allocation requests
+1. **Certificate validation:** Clients MUST verify the server certificate against the system trust store (WebPKI roots) [REQ-TRANS-062]
+2. **Hostname verification:** Clients MUST verify the certificate is valid for `relay.host` [REQ-TRANS-063]
+3. **No self-signed:** Self-signed certificates MUST be rejected for allocation requests [REQ-TRANS-064]
 
 **Rationale:** Unlike Post-Urbit QUIC connections (which use identity-based authentication and can accept any TLS certificate), the allocation request occurs before the client has established identity-based trust with the relay. A MITM on the allocation channel could steal the allocation token and race to bind the allocation to their own IP:port, hijacking inbound traffic. WebPKI validation prevents this attack.
 
@@ -112,7 +112,7 @@ signature_input = concat(
 signature = Ed25519_Sign(signing_key, SHA256(signature_input))
 ```
 
-**Timestamp canonicalization:** Timestamps MUST use canonical RFC3339 UTC format: `YYYY-MM-DDTHH:MM:SSZ` (no fractional seconds, `Z` suffix). Implementations MUST reject non-canonical forms (see RFC-0002 §5.5).
+**Timestamp canonicalization:** Timestamps MUST use canonical RFC3339 UTC format: `YYYY-MM-DDTHH:MM:SSZ` (no fractional seconds, `Z` suffix). Implementations MUST reject non-canonical forms (see RFC-0002 §5.5). [REQ-TRANS-065]
 
 **Relay verification**:
 1. Parse request body
@@ -294,9 +294,9 @@ Alice ────────────────────────�
 
 1. **DATA packets forwarded unchanged**: The relay forwards the **entire PURL packet** (header + payload) to the destination without modification
 2. **Receiver decapsulates**: The receiving node strips the PURL header and passes only the inner QUIC payload to the QUIC stack
-3. **Token validation on receive**: Recipients MUST NOT validate the allocation token on forwarded DATA packets (only the relay validates tokens for routing)
-4. **Destination IID sanity check**: Receivers SHOULD verify the destination IID matches their own IID. **Note:** Per RFC-0002 §7.4, the PURL destination field is always an IID (20 bytes), not a DID. Device-level routing is NOT supported in v1.
-5. **Payload size limit**: Payload length MUST NOT exceed 1200 bytes; relays and receivers MUST silently drop oversized packets
+3. **Token validation on receive**: Recipients MUST NOT validate the allocation token on forwarded DATA packets (only the relay validates tokens for routing) [REQ-TRANS-066]
+4. **Destination IID sanity check**: Receivers SHOULD verify the destination IID matches their own IID. **Note:** Per RFC-0002 §7.4, the PURL destination field is always an IID (20 bytes), not a DID. Device-level routing is NOT supported in v1. [REQ-TRANS-067]
+5. **Payload size limit**: Payload length MUST NOT exceed 1200 bytes; relays and receivers MUST silently drop oversized packets [REQ-TRANS-068]
 
 ```
 Sender flow:

@@ -12,7 +12,7 @@ This document specifies the Post-Urbit Identity Document format, a self-certifyi
 
 ## Status of This Memo
 
-This is a draft specification. Implementations SHOULD follow this document but MAY diverge where noted as implementation-defined.
+This is a draft specification. Implementations SHOULD follow this document but MAY diverge where noted as implementation-defined. [REQ-IDOC-001]
 
 ## Table of Contents
 
@@ -68,7 +68,7 @@ This RFC does NOT cover:
 
 ## 2. Terminology
 
-The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119. [REQ-IDOC-002]
 
 | Term | Definition |
 |------|------------|
@@ -109,13 +109,13 @@ Where:
 
 ### 3.3 Validation
 
-Implementations MUST:
+Implementations MUST: [REQ-IDOC-003]
 - Validate IIDs against the regex: `^[0-9a-hjkmnpqrstvwxyz]{32}$`
 - Reject IIDs not exactly 32 characters long
 - Reject IIDs containing any uppercase characters (no normalization on wire)
 - Reject IIDs containing excluded characters (`i`, `l`, `o`, `u`)
 
-**Note:** User-interface input MAY normalize to lowercase before transmission, but wire validation MUST reject non-lowercase IIDs.
+**Note:** User-interface input MAY normalize to lowercase before transmission, but wire validation MUST reject non-lowercase IIDs. [REQ-IDOC-004]
 
 ### 3.4 Reference Implementation
 
@@ -199,11 +199,11 @@ def derive_iid(genesis_signing_public_key_raw: bytes) -> str:
 
 ### 4.2 Semantically Required Fields
 
-These fields MUST have meaningful values (cannot use defaults):
+These fields MUST have meaningful values (cannot use defaults): [REQ-IDOC-005]
 
 | Field | Type | Constraints | Description |
 |-------|------|-------------|-------------|
-| `version` | uint8 | MUST be `1` | Schema version |
+| `version` | uint8 | MUST be `1` | Schema version  [REQ-IDOC-006]|
 | `iid` | string | 32 chars, Base32 lowercase | Identity Identifier |
 | `sequence` | string | Decimal uint64, monotonic | Version counter |
 | `timestamp` | string | RFC 3339 UTC | Creation time |
@@ -214,7 +214,7 @@ These fields MUST have meaningful values (cannot use defaults):
 
 ### 4.3 Optional Fields (Wire-Required with Defaults)
 
-These fields MAY use default values but MUST be present in the wire encoding (see §6.6):
+These fields MAY use default values but MUST be present in the wire encoding (see §6.6): [REQ-IDOC-007]
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -228,7 +228,7 @@ These fields MAY use default values but MUST be present in the wire encoding (se
 | `recovery_proof` | object\|null | null | Present during recovery |
 | `signatures.previous` | string\|null | null | Required during key rotation |
 
-**IMPORTANT:** Per §6.6, all fields listed in §4.2 and §4.3 MUST be present in the wire encoding, even when using default values. This ensures byte-identical comparison for DHT operations. Verifiers MUST reject documents missing any of these fields.
+**IMPORTANT:** Per §6.6, all fields listed in §4.2 and §4.3 MUST be present in the wire encoding, even when using default values. This ensures byte-identical comparison for DHT operations. Verifiers MUST reject documents missing any of these fields. [REQ-IDOC-008]
 
 ### 4.4 Signing Key History Entry
 
@@ -313,7 +313,7 @@ Base64 alphabet: `A-Za-z0-9+/` (RFC 4648 standard, no padding).
 
 ### 5.2 NOT DER/SPKI
 
-Keys MUST be raw bytes, NOT wrapped in DER/SPKI/PEM encoding. A raw Ed25519 public key is exactly 32 bytes.
+Keys MUST be raw bytes, NOT wrapped in DER/SPKI/PEM encoding. A raw Ed25519 public key is exactly 32 bytes. [REQ-IDOC-009]
 
 **Incorrect** (DER-wrapped, starts with `MCow...`):
 ```
@@ -329,7 +329,7 @@ MCowBQYDK2VwAyEAb7YHv0KMZrt8VK4m5FJw6Qx2pL9dN3hR1sA0cE4gI8M=
 
 ### 6.1 Algorithm
 
-For signing, documents MUST be serialized using JSON Canonicalization Scheme (JCS) per RFC 8785:
+For signing, documents MUST be serialized using JSON Canonicalization Scheme (JCS) per RFC 8785: [REQ-IDOC-010]
 
 1. Remove the `signatures` field entirely
 2. Apply JCS canonicalization (lexicographic key ordering, no whitespace)
@@ -339,7 +339,7 @@ For signing, documents MUST be serialized using JSON Canonicalization Scheme (JC
 
 ### 6.2 Wire Encoding Canonicalization
 
-The JSON inside IDOC envelopes (Section 11) MUST also be JCS-canonicalized for the **full document including signatures**. This ensures byte-for-byte reproducibility across implementations.
+The JSON inside IDOC envelopes (Section 11) MUST also be JCS-canonicalized for the **full document including signatures**. This ensures byte-for-byte reproducibility across implementations. [REQ-IDOC-011]
 
 ### 6.3 JCS Rules
 
@@ -348,12 +348,12 @@ The JSON inside IDOC envelopes (Section 11) MUST also be JCS-canonicalized for t
 - Numbers in shortest form (no trailing zeros, no leading zeros except single `0`)
 - Strings use minimal escaping
 - `null`, `true`, `false` as literals
-- **No duplicate object keys at any level** - implementations MUST reject documents containing duplicate member names before signature verification
+- **No duplicate object keys at any level** - implementations MUST reject documents containing duplicate member names before signature verification [REQ-IDOC-012]
 - Strict RFC 8259 JSON only (no NaN, Infinity, or comments)
 
 ### 6.4 Sequence Number Constraints
 
-The `sequence` field MUST:
+The `sequence` field MUST: [REQ-IDOC-013]
 - Match regex: `^(0|[1-9][0-9]{0,19})$`
 - Parse to numeric value ≤ 18446744073709551615 (2^64 - 1)
 - Be strictly greater than previous known sequence (increase by at least 1)
@@ -361,27 +361,27 @@ The `sequence` field MUST:
 
 ### 6.5 Base64 Validation
 
-All Base64-encoded values MUST:
+All Base64-encoded values MUST: [REQ-IDOC-014]
 - Use standard alphabet `A-Za-z0-9+/` only
 - NOT include padding characters (`=`)
 - NOT include non-alphabet characters (whitespace, etc.)
 - Decode to exact expected lengths (32 bytes for keys, 64 bytes for signatures)
 
-Implementations MUST reject documents with padded or non-canonical Base64.
+Implementations MUST reject documents with padded or non-canonical Base64. [REQ-IDOC-015]
 
 ### 6.6 Field Presence and Defaults (Normative)
 
-**Wire Encoding Requirement:** For v1 IDOC, all fields defined in §4.1 and §4.2 MUST be present in the wire encoding, even if they have default values. This ensures:
+**Wire Encoding Requirement:** For v1 IDOC, all fields defined in §4.1 and §4.2 MUST be present in the wire encoding, even if they have default values. This ensures: [REQ-IDOC-016]
 - Byte-identical comparison for DHT TTL refresh (§12.2)
 - Deterministic conflict detection for same-sequence documents (§14.6)
 
-**Required Fields:** Producers MUST include:
+**Required Fields:** Producers MUST include: [REQ-IDOC-017]
 - All top-level fields (`version`, `iid`, `sequence`, `timestamp`, `keys`, `endpoints`, `claims`, `recovery`, `extensions`, `recovery_proof`, `signatures`)
 - Empty arrays where no values exist (e.g., `"endpoints": []`)
 - Empty objects where no values exist (e.g., `"claims": {}`, `"extensions": {}`)
 - `null` for truly absent optional nested fields (e.g., `"keys.signing.previous": null`, `"recovery_proof": null`)
 
-**Verification:** Verifiers MUST reject documents missing any required top-level field. The signature is over the literal JSON as received—no field materialization before verification.
+**Verification:** Verifiers MUST reject documents missing any required top-level field. The signature is over the literal JSON as received—no field materialization before verification. [REQ-IDOC-018]
 
 ### 6.7 Example
 
@@ -439,17 +439,17 @@ JCS output (single line, no whitespace):
    - **Key unchanged**: If `keys.signing.current` equals the previously accepted document's `keys.signing.current` (byte-identical), no additional authorization is required. The valid `signatures.current` is sufficient.
    - **Key changed**: If `keys.signing.current` differs from the previously accepted document's signing key, ONE of the following is required:
      - **Key continuity**: `signatures.previous` is present and valid when verified with the previous document's `keys.signing.current`
-     - **Recovery**: `recovery_proof` validates per Section 9 (in which case `signatures.previous` SHOULD be null)
+     - **Recovery**: `recovery_proof` validates per Section 9 (in which case `signatures.previous` SHOULD be null) [REQ-IDOC-019]
 
 **Key Continuity Binding (Normative):**
 
 When verifying a key rotation (where `keys.signing.current` differs from the previously accepted document):
 
-1. `keys.signing.previous` MUST be present (not null)
-2. `keys.signing.previous` MUST be byte-identical (as Base64 strings) to the previously accepted document's `keys.signing.current`
-3. `signatures.previous` MUST verify over the new document's canonical form using the key in `keys.signing.previous`
+1. `keys.signing.previous` MUST be present (not null) [REQ-IDOC-020]
+2. `keys.signing.previous` MUST be byte-identical (as Base64 strings) to the previously accepted document's `keys.signing.current` [REQ-IDOC-021]
+3. `signatures.previous` MUST verify over the new document's canonical form using the key in `keys.signing.previous` [REQ-IDOC-022]
 
-Verifiers MUST reject documents that fail any of these checks. This ensures unbroken chain-of-custody from genesis to current.
+Verifiers MUST reject documents that fail any of these checks. This ensures unbroken chain-of-custody from genesis to current. [REQ-IDOC-023]
 
 ### 7.3 Bootstrap Verification (First Encounter)
 
@@ -460,11 +460,11 @@ When a node encounters an IID for the first time with no prior cached state:
 3. **Cache genesis**: Store genesis as the trust anchor for this IID
 4. **Fetch latest**: Retrieve the highest-sequence document available
 5. **Validate chain**: If sequence gap exists:
-   - The latest document's `keys.signing.previous` MUST match a key in the chain
-   - The `signatures.previous` MUST be valid with that key
-   - If chain cannot be verified, the node MAY accept with TOFU semantics and warn the user
+   - The latest document's `keys.signing.previous` MUST match a key in the chain [REQ-IDOC-024]
+   - The `signatures.previous` MUST be valid with that key [REQ-IDOC-025]
+   - If chain cannot be verified, the node MAY accept with TOFU semantics and warn the user [REQ-IDOC-026]
 
-**TOFU (Trust On First Use)**: If genesis document is unavailable, implementations MAY accept the first document encountered as the trust anchor. This SHOULD be flagged to the user as "unverified first contact."
+**TOFU (Trust On First Use)**: If genesis document is unavailable, implementations MAY accept the first document encountered as the trust anchor. This SHOULD be flagged to the user as "unverified first contact." [REQ-IDOC-027]
 
 ```python
 def bootstrap_verify(iid: str) -> IdentityDocument:
@@ -497,18 +497,18 @@ def bootstrap_verify(iid: str) -> IdentityDocument:
 
 | Rule | Constraint |
 |------|------------|
-| Future limit | MUST NOT exceed `now + 24h` |
-| Monotonicity | MUST be >= previous document's timestamp (if known) |
-| No max age | MAY be arbitrarily old (enables caching/offline) |
-| Tolerance | SHOULD allow ~5 minutes for clock skew |
+| Future limit | MUST NOT exceed `now + 24h`  [REQ-IDOC-028]|
+| Monotonicity | MUST be >= previous document's timestamp (if known)  [REQ-IDOC-029]|
+| No max age | MAY be arbitrarily old (enables caching/offline)  [REQ-IDOC-030]|
+| Tolerance | SHOULD allow ~5 minutes for clock skew  [REQ-IDOC-031]|
 | Format | RFC 3339 with `Z` suffix (UTC), fractional seconds OPTIONAL |
 
-**Timestamp Comparison Algorithm (Normative):** For monotonicity checks, implementations MUST:
+**Timestamp Comparison Algorithm (Normative):** For monotonicity checks, implementations MUST: [REQ-IDOC-032]
 1. Parse both timestamps as RFC 3339 into UTC instants (calendar time)
 2. Compare the instants numerically (not as strings)
 3. Reject documents with unparseable timestamps
 
-String comparison MUST NOT be used because fractional seconds can cause incorrect ordering (e.g., `"2025-01-15T00:00:00.1Z"` is lexicographically less than `"2025-01-15T00:00:00Z"` despite representing a later instant).
+String comparison MUST NOT be used because fractional seconds can cause incorrect ordering (e.g., `"2025-01-15T00:00:00.1Z"` is lexicographically less than `"2025-01-15T00:00:00Z"` despite representing a later instant). [REQ-IDOC-033]
 
 ### 7.5 Signature Verification for Historical Keys
 
@@ -518,11 +518,11 @@ When verifying delayed messages (e.g., mailbox delivery), check keys in order:
 3. Try ALL `keys.signing.history[]` entries (regardless of `expires_at`)
 4. Accept if ANY key verifies
 
-**Note:** The `expires_at` field is metadata for UI warnings and audit; it MUST NOT be used as a verification rejection criterion.
+**Note:** The `expires_at` field is metadata for UI warnings and audit; it MUST NOT be used as a verification rejection criterion. [REQ-IDOC-034]
 
 **Verification Algorithm (Normative):**
 
-**Key Encoding:** All key fields in identity documents are Base64-encoded raw 32-byte Ed25519 public keys. Implementations MUST decode these to raw bytes before use in Ed25519 verification.
+**Key Encoding:** All key fields in identity documents are Base64-encoded raw 32-byte Ed25519 public keys. Implementations MUST decode these to raw bytes before use in Ed25519 verification. [REQ-IDOC-035]
 
 **Note:** This algorithm is used for PUSE envelope signature verification (see RFC-0003 §3.7). PUSE envelope signatures are **raw 64-byte values** in the binary envelope, not Base64-encoded. The caller extracts the raw signature bytes from the envelope and passes them directly to this function.
 
@@ -563,7 +563,7 @@ def verify_with_key_selection(sender_idoc: dict, signed_data: bytes, signature: 
     return False  # No matching key found
 ```
 
-**Important:** The `valid_from` and `valid_until` fields are **sequence numbers** (IDOC versions), not timestamps. They are useful for auditing which IDOC version used a key, but MUST NOT be used for message verification filtering because PUSE message timestamps are not available until after decryption. Similarly, `expires_at` MUST NOT be used for verification rejection - it is purely informational metadata for UI display and audit logging.
+**Important:** The `valid_from` and `valid_until` fields are **sequence numbers** (IDOC versions), not timestamps. They are useful for auditing which IDOC version used a key, but MUST NOT be used for message verification filtering because PUSE message timestamps are not available until after decryption. Similarly, `expires_at` MUST NOT be used for verification rejection - it is purely informational metadata for UI display and audit logging. [REQ-IDOC-036]
 
 ## 8. Key Rotation
 
@@ -654,9 +654,9 @@ def verify_rotation(old_doc, new_doc):
 ```
 
 **Constraints:**
-- `len(trustees)` MUST be >= `threshold`
-- `threshold` MUST be >= 2
-- `cooldown_hours` MUST be >= 24 and <= 720 (30 days max)
+- `len(trustees)` MUST be >= `threshold` [REQ-IDOC-037]
+- `threshold` MUST be >= 2 [REQ-IDOC-038]
+- `cooldown_hours` MUST be >= 24 and <= 720 (30 days max) [REQ-IDOC-039]
 
 ### 9.3 Recovery Attestation Format
 
@@ -746,7 +746,7 @@ def verify_social_recovery(old_doc, new_doc) -> bool:
 | Status: pending | `now < cooldown_expires_at` - accept but mark provisional |
 | Status: active | `now >= cooldown_expires_at` - fully trusted |
 | Computation | Verifier computes status from timestamps, ignores claimed status |
-| Maximum | `cooldown_hours` MUST be <= 720 (30 days) |
+| Maximum | `cooldown_hours` MUST be <= 720 (30 days)  [REQ-IDOC-040]|
 
 **Contestation:** During cooldown, the original key holder may publish a higher-sequence update signed with the old key. If valid, this supersedes the recovery attempt.
 
@@ -840,7 +840,7 @@ Maximum `length` value: 16384 (16 KB).
 
 ### 11.4 Parsing Algorithm
 
-**Trailing Bytes Rule (Normative):** Parsers MUST reject IDOC envelopes where `len(data) != 9 + length`. Trailing bytes after the JSON payload indicate corruption, padding attacks, or protocol confusion, and MUST NOT be silently ignored.
+**Trailing Bytes Rule (Normative):** Parsers MUST reject IDOC envelopes where `len(data) != 9 + length`. Trailing bytes after the JSON payload indicate corruption, padding attacks, or protocol confusion, and MUST NOT be silently ignored. [REQ-IDOC-041]
 
 ```python
 def parse_idoc_envelope(data: bytes) -> dict:
@@ -904,11 +904,11 @@ TTL:       86400 seconds (24 hours)
 
 **No separate DHT signature is required.** The IDOC envelope contains `signatures.current` which is validated using the embedded `keys.signing.current`. DHT nodes verify this internal signature before storing.
 
-**TTL Refresh Semantics:** Identity owners SHOULD refresh the current identity record before TTL expiry. DHT nodes MUST accept byte-identical writes as TTL refresh operations (idempotent writes extend TTL without requiring sequence increment). This allows liveness without requiring sequence bumps for purely administrative refresh.
+**TTL Refresh Semantics:** Identity owners SHOULD refresh the current identity record before TTL expiry. DHT nodes MUST accept byte-identical writes as TTL refresh operations (idempotent writes extend TTL without requiring sequence increment). This allows liveness without requiring sequence bumps for purely administrative refresh. [REQ-IDOC-042]
 
 ### 12.3 Genesis Document Storage
 
-For chain verification support, implementations MUST also store genesis documents:
+For chain verification support, implementations MUST also store genesis documents: [REQ-IDOC-043]
 
 ```
 DHT Key:   SHA256("post-urbit:genesis:" || iid)
@@ -918,8 +918,8 @@ TTL:       86400 seconds (24 hours), same as identity records
 
 **Refresh Semantics:**
 - Genesis records are immutable but require periodic refresh before TTL expiry
-- DHT nodes MUST reject writes to genesis keys if content differs from stored value
-- DHT nodes MUST accept byte-identical writes as TTL refresh operations
+- DHT nodes MUST reject writes to genesis keys if content differs from stored value [REQ-IDOC-044]
+- DHT nodes MUST accept byte-identical writes as TTL refresh operations [REQ-IDOC-045]
 - This preserves immutability while ensuring liveness
 
 ### 12.4 Device Index Record
@@ -930,7 +930,7 @@ DHT Value: JCS-canonical device index JSON (Section 13.4)
 TTL:       86400 seconds (24 hours)
 ```
 
-**Usage Context (v1 Normative):** Device index records are for **intra-identity device management only**. External peers (different identities) MUST NOT use device index records for connection establishment. External peers connect via Identity Document endpoints (the home node). See `spec/02-identity-trust/identity-document-schema.md` "Single Home Node Model" and `spec/00-shared/layer-integration.md` "Device Discovery Flow" for the complete connectivity model.
+**Usage Context (v1 Normative):** Device index records are for **intra-identity device management only**. External peers (different identities) MUST NOT use device index records for connection establishment. External peers connect via Identity Document endpoints (the home node). See `spec/02-identity-trust/identity-document-schema.md` "Single Home Node Model" and `spec/00-shared/layer-integration.md` "Device Discovery Flow" for the complete connectivity model. [REQ-IDOC-046]
 
 **Conflict Resolution (Normative):** If multiple valid device index records exist (possible during DHT convergence):
 1. Parse `updated_at` as RFC3339 instants (UTC)
@@ -938,7 +938,7 @@ TTL:       86400 seconds (24 hours)
 3. If timestamps are equal, compare JCS-canonical JSON bytes lexicographically; smaller bytes win
 4. If records differ but have same `updated_at` and same JCS bytes: impossible (same bytes = same record)
 
-DHT nodes SHOULD store only the winning record after conflict resolution.
+DHT nodes SHOULD store only the winning record after conflict resolution. [REQ-IDOC-047]
 
 ### 12.5 Device Document Record
 
@@ -948,14 +948,14 @@ DHT Value: JCS-canonical device document JSON (Section 13.2)
 TTL:       86400 seconds (24 hours)
 ```
 
-**Usage Context (v1 Normative):** Device document records are for **intra-identity device management only**. External peers (different identities) MUST NOT use device document endpoints for connection establishment. See §12.4 for rationale.
+**Usage Context (v1 Normative):** Device document records are for **intra-identity device management only**. External peers (different identities) MUST NOT use device document endpoints for connection establishment. See §12.4 for rationale. [REQ-IDOC-048]
 
 **Conflict Resolution (Normative):** If multiple valid device document records exist (possible during DHT convergence):
 1. Parse `updated_at` as RFC3339 instants (UTC)
 2. Select the record with the **latest** `updated_at` timestamp
 3. If timestamps are equal, compare JCS-canonical JSON bytes lexicographically; smaller bytes win
 
-Device document updates (e.g., endpoint changes) MUST increment `updated_at` to a strictly later timestamp than the previous version. DHT nodes SHOULD store only the winning record after conflict resolution.
+Device document updates (e.g., endpoint changes) MUST increment `updated_at` to a strictly later timestamp than the previous version. DHT nodes SHOULD store only the winning record after conflict resolution. [REQ-IDOC-049]
 
 ### 12.6 Device Revocation DHT Record
 
@@ -966,16 +966,16 @@ TTL:       31536000 seconds (365 days, same as key revocations)
 ```
 
 **Publication Rules:**
-- When revoking a device, the identity owner MUST publish the device revocation record to DHT
-- DHT nodes MUST verify the `signature_by_identity` field using the identity's signing key (current, previous, or historical per §7.5 key lookup order). See §13.5 for the signature scheme.
-- DHT nodes MUST accept the revocation if `iid` matches the identity document's IID
+- When revoking a device, the identity owner MUST publish the device revocation record to DHT [REQ-IDOC-050]
+- DHT nodes MUST verify the `signature_by_identity` field using the identity's signing key (current, previous, or historical per §7.5 key lookup order). See §13.5 for the signature scheme. [REQ-IDOC-051]
+- DHT nodes MUST accept the revocation if `iid` matches the identity document's IID [REQ-IDOC-052]
 
 **Lookup Rules:**
-- Peers MUST check for device revocation before accepting connections from a device
+- Peers MUST check for device revocation before accepting connections from a device [REQ-IDOC-053]
 - Query `SHA256("post-urbit:device-revocation:" || did)` where `did` is the 32-char Crockford Base32 lowercase DID
 - If a valid revocation record exists, reject the device connection
 
-**Multiple Records:** If multiple revocations exist for the same DID (due to network partitions), accept the one with the earliest `revoked_at` timestamp. Timestamps MUST be compared by parsing RFC3339 to UTC instants and comparing instants; do NOT compare as strings.
+**Multiple Records:** If multiple revocations exist for the same DID (due to network partitions), accept the one with the earliest `revoked_at` timestamp. Timestamps MUST be compared by parsing RFC3339 to UTC instants and comparing instants; do NOT compare as strings. [REQ-IDOC-054]
 
 ### 12.7 Key/Identity Revocation DHT Records
 
@@ -988,22 +988,22 @@ TTL:       31536000 seconds (365 days)
 ```
 
 **Publication Rules:**
-- When revoking an identity or key, the owner MUST publish the revocation record to DHT
-- DHT nodes MUST verify the `signature` field using the IID's signing key (current or historical per §7.5 key lookup order)
-- DHT nodes MUST verify the revocation `iid` matches the DHT key derivation
+- When revoking an identity or key, the owner MUST publish the revocation record to DHT [REQ-IDOC-055]
+- DHT nodes MUST verify the `signature` field using the IID's signing key (current or historical per §7.5 key lookup order) [REQ-IDOC-056]
+- DHT nodes MUST verify the revocation `iid` matches the DHT key derivation [REQ-IDOC-057]
 
 **Lookup Rules:**
-- Peers SHOULD check for identity/key revocation before establishing new connections
+- Peers SHOULD check for identity/key revocation before establishing new connections [REQ-IDOC-058]
 - Query `SHA256("post-urbit:revocation:" || iid)` where `iid` is the 32-char Crockford Base32 lowercase IID
 - If a valid revocation record exists, treat the identity/key as revoked
 
-**Multiple Records:** If multiple revocations exist for the same IID (due to network partitions), accept the one with the earliest `effective_at` timestamp (security-conservative: earliest revocation wins). Timestamps MUST be compared by parsing RFC3339 to UTC instants and comparing instants; do NOT compare as strings.
+**Multiple Records:** If multiple revocations exist for the same IID (due to network partitions), accept the one with the earliest `effective_at` timestamp (security-conservative: earliest revocation wins). Timestamps MUST be compared by parsing RFC3339 to UTC instants and comparing instants; do NOT compare as strings. [REQ-IDOC-059]
 
 **Note:** This covers identity-level and key-level revocations. Device revocations use a separate DHT key prefix (§12.6). See `spec/02-identity-trust/revocation.md` for revocation document schemas.
 
 ### 12.8 DHT Verification Rules
 
-**Verification (New Identity Records)**: DHT nodes MUST verify identity documents before storing:
+**Verification (New Identity Records)**: DHT nodes MUST verify identity documents before storing: [REQ-IDOC-060]
 1. Parse IDOC envelope
 2. Verify `iid == derive_iid(Base64Decode(keys.signing.genesis))` (binds IID to genesis key)
 3. Verify `signatures.current` using `keys.signing.current` (with domain separation)
@@ -1012,9 +1012,9 @@ TTL:       31536000 seconds (365 days)
 **Update Authorization (Existing Identity Records)**: When a DHT node receives a document for an IID it already stores:
 1. Parse the new IDOC envelope and verify basic signature (steps 1-3 above)
 2. If incoming document is **byte-identical** to stored document: Accept as TTL refresh (extend TTL, no further checks needed)
-3. Compare `sequence` numbers: new sequence MUST be > existing sequence
+3. Compare `sequence` numbers: new sequence MUST be > existing sequence [REQ-IDOC-061]
 4. If `keys.signing.current` differs from the stored document's key (key rotation):
-   - **Key Continuity Binding** (per §7.2): `keys.signing.previous` MUST be present (not null) in the new document AND MUST equal the stored document's `keys.signing.current` (byte-identical Base64 string comparison)
+   - **Key Continuity Binding** (per §7.2): `keys.signing.previous` MUST be present (not null) in the new document AND MUST equal the stored document's `keys.signing.current` (byte-identical Base64 string comparison) [REQ-IDOC-062]
    - Verify `signatures.previous` is present in the new document AND valid using the stored document's `keys.signing.current`
    - OR verify `recovery_proof` is valid (see recovery-mechanisms.md), in which case key continuity binding is not required
 5. If all checks pass, replace stored document with new document
@@ -1022,7 +1022,7 @@ TTL:       31536000 seconds (365 days)
 
 **Rationale:** Step 2 (byte-identical refresh) allows identity owners to maintain DHT liveness without incrementing sequence numbers for purely administrative refresh operations. This mirrors genesis refresh semantics (§12.3).
 
-**Genesis Document Verification**: For sequence 0 (genesis) documents, DHT nodes MUST verify:
+**Genesis Document Verification**: For sequence 0 (genesis) documents, DHT nodes MUST verify: [REQ-IDOC-063]
 1. Parse IDOC envelope and verify basic signature (steps 1-4 above)
 2. Verify `sequence == "0"`
 3. Verify `keys.signing.genesis == keys.signing.current` (genesis invariant per §7.1)
@@ -1030,15 +1030,15 @@ TTL:       31536000 seconds (365 days)
 5. Only store if all checks pass
 
 **Genesis Key Storage**: When storing under `post-urbit:genesis:` DHT key:
-- MUST reject writes where `sequence != "0"`
-- MUST reject writes that violate genesis invariants (steps 2-4 above)
-- MUST reject writes if existing genesis record exists with different content (genesis is immutable; only byte-identical refresh allowed per §12.3)
+- MUST reject writes where `sequence != "0"` [REQ-IDOC-064]
+- MUST reject writes that violate genesis invariants (steps 2-4 above) [REQ-IDOC-065]
+- MUST reject writes if existing genesis record exists with different content (genesis is immutable; only byte-identical refresh allowed per §12.3) [REQ-IDOC-066]
 
 **Device Documents**: Fetch parent identity document for `iid`, validate `signature_by_identity` using identity's current or historical signing keys. Try ALL history[] entries regardless of `expires_at`. The `expires_at` field is UI metadata only. See §13.3 for signature scheme and §7.5 for key lookup order.
 
 **Device Index**: Fetch identity document, validate `signature` using identity's signing key. See §13.5 for signature scheme.
 
-Nodes MUST reject documents that fail any verification check.
+Nodes MUST reject documents that fail any verification check. [REQ-IDOC-067]
 
 ## 13. Device Documents
 
@@ -1106,7 +1106,7 @@ signature_by_identity = Ed25519_Sign(identity_signing_key, signature_input)
 }
 ```
 
-**Note:** Device index entries MUST use `device_name` (matching the device document field name, not `name`).
+**Note:** Device index entries MUST use `device_name` (matching the device document field name, not `name`). [REQ-IDOC-068]
 
 **Device Index Signature Scheme (v1):**
 
@@ -1164,11 +1164,11 @@ Old documents replayed as current. Mitigations:
 
 ### 14.4 Timing Attacks
 
-Signature verification SHOULD use constant-time comparison.
+Signature verification SHOULD use constant-time comparison. [REQ-IDOC-069]
 
 ### 14.5 Metadata Leakage
 
-Claims and endpoints are public. Implementations SHOULD warn users that this information is visible to anyone who knows their IID.
+Claims and endpoints are public. Implementations SHOULD warn users that this information is visible to anyone who knows their IID. [REQ-IDOC-070]
 
 ### 14.6 Same-Sequence Conflicts
 
@@ -1216,7 +1216,7 @@ Signing seed (hex):
 033cb5927062653e49646945878c1a40c6c9ee4694c93c10886d45d320028f40
 ```
 
-**Note:** For the normative expected signature value, see Test Vector 2 (Identity Document Signature) in `spec/00-shared/test-vectors.md`. That test vector provides the concrete hex and Base64 signature that implementations MUST produce for the given inputs.
+**Note:** For the normative expected signature value, see Test Vector 2 (Identity Document Signature) in `spec/00-shared/test-vectors.md`. That test vector provides the concrete hex and Base64 signature that implementations MUST produce for the given inputs. [REQ-IDOC-071]
 
 ### 15.3 Second Identity (Bob)
 
@@ -1233,11 +1233,11 @@ IID:
 
 ### 15.4 Complete Genesis Document
 
-**Note:** For the complete genesis document with normative signature value, see Test Vector 2 (Identity Document Signature) in `spec/00-shared/test-vectors.md`. The test vector provides the canonical JSON structure with computed signature that implementations MUST match.
+**Note:** For the complete genesis document with normative signature value, see Test Vector 2 (Identity Document Signature) in `spec/00-shared/test-vectors.md`. The test vector provides the canonical JSON structure with computed signature that implementations MUST match. [REQ-IDOC-072]
 
 ### 15.5 DHT Key Derivation
 
-DHT keys are computed as `SHA256(prefix || identifier)`. The prefix MUST include the trailing colon.
+DHT keys are computed as `SHA256(prefix || identifier)`. The prefix MUST include the trailing colon. [REQ-IDOC-073]
 
 ```
 IID: b1anasr5h0bj3832xqexwy0f0987e1xb
@@ -1272,7 +1272,7 @@ Where:
 Full envelope: `IDOC` magic (4 bytes) + version (1 byte) + length (4 bytes, big-endian) + JCS-canonical JSON bytes.
 ```
 
-**Note**: The length field depends on the JCS-canonical JSON output. The JSON MUST be JCS-canonical for the full document including signatures. Implementers should validate their JCS canonicalization against Test Vector 2 (Document Signature) in `spec/00-shared/test-vectors.md`.
+**Note**: The length field depends on the JCS-canonical JSON output. The JSON MUST be JCS-canonical for the full document including signatures. Implementers should validate their JCS canonicalization against Test Vector 2 (Document Signature) in `spec/00-shared/test-vectors.md`. [REQ-IDOC-074]
 
 ### 15.7 Domain-Separated Signature Payload
 

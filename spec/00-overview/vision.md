@@ -30,6 +30,8 @@ A network where anyone can run a personal node (on a VPS, home server, or eventu
 
 ```
 ┌─────────────────────────────────────────┐
+│  6. Governance                          │
+├─────────────────────────────────────────┤
 │  5. UX, Packaging, Operations           │
 ├─────────────────────────────────────────┤
 │  4. App Runtime & Permissions           │
@@ -41,6 +43,8 @@ A network where anyone can run a personal node (on a VPS, home server, or eventu
 │  1. Transport & Connectivity            │
 └─────────────────────────────────────────┘
 ```
+
+MVP scope focuses on layers 1-5. Governance is specified separately in `spec/09-governance`. Security is cross-cutting and specified in `spec/08-security`.
 
 ## Technology Choices (Starting Points)
 

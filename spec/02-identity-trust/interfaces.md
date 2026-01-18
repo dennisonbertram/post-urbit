@@ -11,7 +11,7 @@ This document specifies the complete API surface for the Identity & Trust layer.
 | **On-wire JSON** | snake_case | `recovery_proof`, `initiated_at`, `signing_key` |
 | **TypeScript interfaces** | camelCase | `recoveryProof`, `initiatedAt`, `signingKey` |
 
-**Normative rule**: The on-wire JSON format uses snake_case (as shown in identity-document-schema.md). TypeScript interfaces use camelCase for developer ergonomics. Implementations MUST:
+**Normative rule**: The on-wire JSON format uses snake_case (as shown in identity-document-schema.md). TypeScript interfaces use camelCase for developer ergonomics. Implementations MUST: [REQ-ID-019]
 1. Serialize to snake_case when sending over the wire
 2. Deserialize from snake_case when receiving
 3. Use JCS (JSON Canonicalization Scheme) on the snake_case wire format for signature verification

@@ -179,10 +179,10 @@ If the app returns 0, no result is produced.
 
 **Return buffer ownership (Normative):**
 - Guest allocates and owns the result buffer
-- Guest MUST keep the buffer valid and unchanged until `handle` returns
-- Host MUST copy result bytes immediately upon `handle` return (host does NOT call `dealloc`)
-- Guest MAY reuse or free the buffer after `handle` returns
-- Host MUST validate `(ptr, len)`: if ptr is 0 and len > 0, or if `ptr + len` exceeds memory bounds, treat as trap
+- Guest MUST keep the buffer valid and unchanged until `handle` returns [REQ-APP-001]
+- Host MUST copy result bytes immediately upon `handle` return (host does NOT call `dealloc`) [REQ-APP-002]
+- Guest MAY reuse or free the buffer after `handle` returns [REQ-APP-003]
+- Host MUST validate `(ptr, len)`: if ptr is 0 and len > 0, or if `ptr + len` exceeds memory bounds, treat as trap [REQ-APP-004]
 - Maximum result size: 1 MB (1048576 bytes); larger results are truncated
 
 **Result format (CBOR):**
@@ -278,7 +278,7 @@ Application-level errors are always returned inside the CBOR envelope with `ok: 
 
 ## CBOR Encoding
 
-All structured data exchanged via `host.call` arguments and results, as well as `handle` input and output, uses CBOR (RFC 8949). This section specifies the **normative encoding rules** that implementations MUST follow to ensure interoperability.
+All structured data exchanged via `host.call` arguments and results, as well as `handle` input and output, uses CBOR (RFC 8949). This section specifies the **normative encoding rules** that implementations MUST follow to ensure interoperability. [REQ-APP-005]
 
 ### CBOR Wire Schema (Normative)
 
@@ -288,7 +288,7 @@ The TypeScript interfaces in this document and `api-surface.md` define the **log
 
 | TypeScript Type | CBOR Encoding | Notes |
 |-----------------|---------------|-------|
-| `string` | Text string (major type 3) | MUST be valid UTF-8 |
+| `string` | Text string (major type 3) | MUST be valid UTF-8  [REQ-APP-006]|
 | `number` (integer) | Unsigned/signed integer (major type 0/1) | Use smallest encoding that fits |
 | `number` (float) | Float64 (0xFB prefix) | Only when fractional; prefer integers |
 | `boolean` | `true` (0xF5) or `false` (0xF4) | Simple values |
@@ -299,19 +299,19 @@ The TypeScript interfaces in this document and `api-surface.md` define the **log
 
 #### Struct Encoding Rules
 
-1. **Map keys:** Structs MUST be encoded as CBOR maps with **text string keys** (major type 3). Keys MUST use `snake_case` matching the field names in the TypeScript interfaces.
+1. **Map keys:** Structs MUST be encoded as CBOR maps with **text string keys** (major type 3). Keys MUST use `snake_case` matching the field names in the TypeScript interfaces. [REQ-APP-007]
 
-2. **Required fields:** All required fields MUST be present in the map. Missing required fields MUST cause decoding to fail with error code `INVALID_ARGUMENT`.
+2. **Required fields:** All required fields MUST be present in the map. Missing required fields MUST cause decoding to fail with error code `INVALID_ARGUMENT`. [REQ-APP-008]
 
-3. **Optional fields:** Optional fields (marked with `?` in TypeScript) MUST be **omitted entirely** when the value is absent. Do NOT encode absent optional fields as CBOR `null`. This reduces message size and distinguishes "not provided" from "explicitly null".
+3. **Optional fields:** Optional fields (marked with `?` in TypeScript) MUST be **omitted entirely** when the value is absent. Do NOT encode absent optional fields as CBOR `null`. This reduces message size and distinguishes "not provided" from "explicitly null". [REQ-APP-009]
 
 4. **Nullable fields:** For fields that can hold an explicit `null` value (e.g., `value: T | null`), encode the null case as CBOR `null` (0xF6). These are distinct from optional fields.
 
-5. **Unknown fields:** Decoders MUST ignore unknown map keys (forward compatibility). Encoders MUST NOT add keys not defined in the schema.
+5. **Unknown fields:** Decoders MUST ignore unknown map keys (forward compatibility). Encoders MUST NOT add keys not defined in the schema. [REQ-APP-010]
 
 #### Integer Encoding
 
-1. **Smallest encoding:** Integers MUST use the smallest CBOR encoding that fits the value:
+1. **Smallest encoding:** Integers MUST use the smallest CBOR encoding that fits the value: [REQ-APP-011]
    - 0-23: Single byte (major type 0 + value)
    - 24-255: Two bytes (0x18 + uint8)
    - 256-65535: Three bytes (0x19 + uint16)
@@ -320,25 +320,25 @@ The TypeScript interfaces in this document and `api-surface.md` define the **log
 
 2. **Signed integers:** Negative integers use major type 1 with the same size rules.
 
-3. **64-bit range:** Implementations MUST handle unsigned integers up to 2^64-1 and signed integers in the range -(2^63) to 2^63-1.
+3. **64-bit range:** Implementations MUST handle unsigned integers up to 2^64-1 and signed integers in the range -(2^63) to 2^63-1. [REQ-APP-012]
 
-4. **JavaScript interop:** Values in the range 0 to 2^53-1 are safe for JavaScript `number`. Larger values MUST be handled as BigInt or similar in JavaScript environments. The `api-surface.md` schemas indicate which fields may exceed this range.
+4. **JavaScript interop:** Values in the range 0 to 2^53-1 are safe for JavaScript `number`. Larger values MUST be handled as BigInt or similar in JavaScript environments. The `api-surface.md` schemas indicate which fields may exceed this range. [REQ-APP-013]
 
 #### Binary Data Encoding
 
-1. **Byte strings:** All binary data (`Uint8Array` in TypeScript) MUST be encoded as CBOR byte strings (major type 2), NOT as arrays of integers.
+1. **Byte strings:** All binary data (`Uint8Array` in TypeScript) MUST be encoded as CBOR byte strings (major type 2), NOT as arrays of integers. [REQ-APP-014]
 
-2. **Definite length:** Byte strings MUST use definite-length encoding (length prefix), NOT indefinite-length streaming.
+2. **Definite length:** Byte strings MUST use definite-length encoding (length prefix), NOT indefinite-length streaming. [REQ-APP-015]
 
 3. **Example:** `Uint8Array([0xDE, 0xAD, 0xBE, 0xEF])` encodes as `44 DE AD BE EF` (byte string, length 4).
 
 #### String Encoding
 
-1. **UTF-8:** All text strings MUST be valid UTF-8. Invalid UTF-8 sequences MUST cause decoding to fail.
+1. **UTF-8:** All text strings MUST be valid UTF-8. Invalid UTF-8 sequences MUST cause decoding to fail. [REQ-APP-016]
 
-2. **Definite length:** Text strings MUST use definite-length encoding.
+2. **Definite length:** Text strings MUST use definite-length encoding. [REQ-APP-017]
 
-3. **No BOM:** Text strings MUST NOT include a UTF-8 BOM (0xEF 0xBB 0xBF).
+3. **No BOM:** Text strings MUST NOT include a UTF-8 BOM (0xEF 0xBB 0xBF). [REQ-APP-018]
 
 #### Structural Constraints
 
@@ -348,28 +348,28 @@ The TypeScript interfaces in this document and `api-surface.md` define the **log
 | Arrays | Definite-length only (no 0x9F) |
 | Strings | UTF-8 only, definite-length |
 | Integers | Up to 64-bit |
-| Tags | MUST be ignored by decoders; encoders SHOULD NOT emit tags |
-| Floating-point | Float64 (0xFB) only; Float16/Float32 MUST NOT be used |
-| Special values | `undefined` (0xF7), `break` (0xFF) MUST NOT be used |
+| Tags | MUST be ignored by decoders; encoders SHOULD NOT emit tags  [REQ-APP-019]|
+| Floating-point | Float64 (0xFB) only; Float16/Float32 MUST NOT be used  [REQ-APP-020]|
+| Special values | `undefined` (0xF7), `break` (0xFF) MUST NOT be used  [REQ-APP-021]|
 
 ### Deterministic CBOR (Normative)
 
-All CBOR encoding in the ABI MUST follow **deterministic encoding rules** per RFC 8949 Section 4.2. This ensures that:
+All CBOR encoding in the ABI MUST follow **deterministic encoding rules** per RFC 8949 Section 4.2. This ensures that: [REQ-APP-022]
 - Identical logical values produce identical byte sequences
 - Hashing and signing operations are reproducible
 - Test vectors can be precisely verified
 
 **Deterministic encoding requirements:**
 
-1. **Map key ordering:** Map keys MUST be sorted in bytewise lexicographic order of their encoded CBOR representation. For text string keys (as required by this spec), this means:
+1. **Map key ordering:** Map keys MUST be sorted in bytewise lexicographic order of their encoded CBOR representation. For text string keys (as required by this spec), this means: [REQ-APP-023]
    - Shorter keys sort before longer keys
    - Keys of equal length sort by byte comparison
 
 2. **Preferred integer encoding:** Use the smallest integer encoding (as specified above).
 
-3. **No duplicate keys:** Maps MUST NOT contain duplicate keys.
+3. **No duplicate keys:** Maps MUST NOT contain duplicate keys. [REQ-APP-024]
 
-4. **Preferred float encoding:** Floating-point values that can be represented exactly as integers MUST be encoded as integers instead.
+4. **Preferred float encoding:** Floating-point values that can be represented exactly as integers MUST be encoded as integers instead. [REQ-APP-025]
 
 5. **Preferred length encoding:** Use the smallest length prefix for strings, arrays, and maps.
 
@@ -451,14 +451,14 @@ A2                                      // map(2)
 
 ### CBOR Libraries and Implementation Notes
 
-Implementations SHOULD use well-tested CBOR libraries that support deterministic encoding:
+Implementations SHOULD use well-tested CBOR libraries that support deterministic encoding: [REQ-APP-026]
 
 - **Rust:** `ciborium` with deterministic mode, or `minicbor`
 - **JavaScript/TypeScript:** `cbor-x` with `canonical: true`, or `cborg`
 - **Go:** `fxamacker/cbor/v2` with `CanonicalEncMode`
 - **C/C++:** `libcbor` or `tinycbor`
 
-**Validation:** Implementations SHOULD validate that decoded CBOR matches expected types. Type mismatches (e.g., integer where string expected) MUST cause decoding to fail with `INVALID_ARGUMENT`.
+**Validation:** Implementations SHOULD validate that decoded CBOR matches expected types. Type mismatches (e.g., integer where string expected) MUST cause decoding to fail with `INVALID_ARGUMENT`. [REQ-APP-027]
 
 ### Reference
 
@@ -540,7 +540,7 @@ Apps that need multi-step transactions should use optimistic concurrency (storag
 
 ## Method String Format
 
-Host API method names use `snake_case`. Methods are categorized as **v1** (fully specified in api-surface.md) or **reserved** (registered but schema TBD):
+Host API method names use `snake_case`. Methods are categorized as **v1** (fully specified in api-surface.md) or **reserved** (registered for future use; schema intentionally unspecified in v1):
 
 | Method | Status | Schema Location |
 |--------|--------|-----------------|
@@ -575,6 +575,6 @@ Host API method names use `snake_case`. Methods are categorized as **v1** (fully
 | `app.invoke` | v1 | api-surface.md |
 | `app.share` | reserved | — |
 
-**Reserved methods:** Calling a reserved method returns `{ ok: false, error: { code: "NOT_IMPLEMENTED", message: "Method reserved for future use" }}`.
+**Reserved methods:** Calling a reserved method returns `{ ok: false, error: { code: "NOT_IMPLEMENTED", message: "Method reserved for future use" }}`. Reserved methods are out-of-scope for v1 and MUST NOT be used on the wire.
 
 Unknown methods return error envelope with code `METHOD_NOT_FOUND`.

@@ -314,7 +314,7 @@ The transition from initial (0x00) to ratchet (0x01) message types is NOT a DH r
 
 The DH ratchet only occurs when the sender receives a response containing a new DH public key from the recipient. Until then, all messages continue on the initial chain with incrementing N.
 
-**Summary:** The initial (0x00) message consumes N=0; the first ratchet (0x01) message MUST use N=1 (continuing the same chain). Subsequent DH ratchets reset N to 0 for the NEW chain.
+**Summary:** The initial (0x00) message consumes N=0; the first ratchet (0x01) message MUST use N=1 (continuing the same chain). Subsequent DH ratchets reset N to 0 for the NEW chain. [REQ-MSG-001]
 
 ```
 Ratchet Header (PUSE Header Extension Type 0x01):
@@ -355,7 +355,7 @@ The plaintext contains only the message content (no ratchet params):
 }
 ```
 
-**NOTE:** Previous versions of this spec showed ratchet params in plaintext JSON. This was incorrect. The ratchet header MUST be in the PUSE header extension for the receiver to derive decryption keys.
+**NOTE:** Previous versions of this spec showed ratchet params in plaintext JSON. This was incorrect. The ratchet header MUST be in the PUSE header extension for the receiver to derive decryption keys. [REQ-MSG-002]
 
 ## State Persistence
 

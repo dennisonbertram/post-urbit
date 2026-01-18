@@ -63,16 +63,16 @@ Maximum size: 1 MB (1048576 bytes)
 
 ### Header Extension Validation (Normative)
 
-Per RFC-0003 §3.2 and §3.4, receivers MUST validate header extensions:
+Per RFC-0003 §3.2 and §3.4, receivers MUST validate header extensions: [REQ-MSG-019]
 
-1. **Maximum length:** ext_len MUST NOT exceed 1024 bytes
+1. **Maximum length:** ext_len MUST NOT exceed 1024 bytes [REQ-MSG-020]
 2. **Non-zero:** ext_len == 0 is invalid (reject envelope)
-3. **Fixed size by type:** The ext_len field MUST equal the expected size for the extension type:
+3. **Fixed size by type:** The ext_len field MUST equal the expected size for the extension type: [REQ-MSG-021]
    - Type 0x00 (Initial): 33 bytes exactly
    - Type 0x01 (Ratchet): 41 bytes exactly
    - Type 0x02 (Group): 21 bytes exactly
-4. **Unknown types:** ext_len MUST NOT exceed 1024 even for future extension types
-5. **Reject mismatches:** Envelopes where ext_len does not match the expected size for a known extension type MUST be rejected
+4. **Unknown types:** ext_len MUST NOT exceed 1024 even for future extension types [REQ-MSG-022]
+5. **Reject mismatches:** Envelopes where ext_len does not match the expected size for a known extension type MUST be rejected [REQ-MSG-023]
 
 ### Header Extension (AAD)
 
@@ -106,7 +106,7 @@ Group Header Extension:
 Total: 21 bytes
 ```
 
-**Sender Key Iteration is 1-indexed:** First encrypted group message uses iteration=1. Value 0 is invalid and MUST be rejected. See RFC-0003 §3.4.4 and group-messaging.md for full specification.
+**Sender Key Iteration is 1-indexed:** First encrypted group message uses iteration=1. Value 0 is invalid and MUST be rejected. See RFC-0003 §3.4.4 and group-messaging.md for full specification. [REQ-MSG-024]
 
 For initial key exchange (no ratchet yet):
 ```
@@ -173,7 +173,7 @@ For subsequent messages in an established session:
 2. Message key derived from sending chain via `kdf_chain_step()`
 3. Include ratchet parameters in Ratchet Header Extension (type 0x01)
 
-**Initial→Ratchet Transition (Normative):** The transition from initial (0x00) to ratchet (0x01) messages MUST follow RFC-0003 §3.4.2. The initial message consumes chain step N=0; the first ratchet message MUST use N=1.
+**Initial→Ratchet Transition (Normative):** The transition from initial (0x00) to ratchet (0x01) messages MUST follow RFC-0003 §3.4.2. The initial message consumes chain step N=0; the first ratchet message MUST use N=1. [REQ-MSG-025]
 
 ### Group Messages (Type 0x02)
 
@@ -213,7 +213,7 @@ Nonce:
 
 ### Nonce Uniqueness
 
-- MUST never reuse (key, nonce) pair
+- MUST never reuse (key, nonce) pair [REQ-MSG-026]
 - Timestamp prevents accidental reuse across restarts
 - Random component prevents reuse within same second
 - Probability of collision: 1/(2^64) per second ≈ negligible
@@ -319,7 +319,7 @@ Specifically:
 
 ### Parse Order for Streaming
 
-Receivers MUST parse in this order:
+Receivers MUST parse in this order: [REQ-MSG-027]
 1. Read fixed prefix: magic (4) + version (1) + flags (1) + sender_iid (20) + recipient_iid (20) + message_id (16) + header_extension_length (2) = 64 bytes
 2. Read `header_extension` (length from step 1)
 3. Read `nonce` (12 bytes)
@@ -376,7 +376,7 @@ def verify_envelope(envelope: bytes, sender_doc: dict,
 
 **Note on history entry fields:**
 - `valid_from` / `valid_until`: Sequence numbers (not timestamps) - useful for auditing which IDOC version used this key
-- `expires_at`: Metadata for UI warnings only (e.g., "this message was signed with an old key"); it MUST NOT cause signature rejection
+- `expires_at`: Metadata for UI warnings only (e.g., "this message was signed with an old key"); it MUST NOT cause signature rejection [REQ-MSG-028]
 
 See `02-identity-trust/identity-document-schema.md` § Signing Key History Entry for the history entry format and retention policy (10 keys or 2 years).
 

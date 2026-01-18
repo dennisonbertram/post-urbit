@@ -369,7 +369,7 @@ For file upload endpoints (`/apps/install/upload` and `/backups/upload`), the fo
 
 | Field | Requirement | Description |
 |-------|-------------|-------------|
-| Part name | **REQUIRED**: `file` | The form field name MUST be `file` |
+| Part name | **REQUIRED**: `file` | The form field name MUST be `file`  [REQ-OPS-016]|
 | Content-Type | `application/octet-stream` or `application/zip` | MIME type of the uploaded file |
 | Filename | Recommended | Original filename for logging/display |
 
@@ -620,7 +620,7 @@ For browser sessions using HttpOnly cookies, CSRF protection is required on all 
 
 **Mechanism: Double-Submit Cookie Pattern with Body Token**
 
-On successful login, the server MUST:
+On successful login, the server MUST: [REQ-OPS-017]
 1. Return `csrfToken` in the `LoginResponse` body (see `interfaces.md`)
 2. Set `postnode_csrf` cookie (NOT HttpOnly, readable by JS) to the SAME value
 3. Use `SameSite=Strict` for both session and CSRF cookies
@@ -721,7 +721,7 @@ type ApiErrorCode =
   | 'TIMEOUT';              // 504: Operation timed out
 ```
 
-**Forward Compatibility:** Clients MUST accept unknown error codes gracefully. New error codes may be added in future versions without a major version bump. Unknown codes SHOULD be treated as `INTERNAL_ERROR` for error handling purposes.
+**Forward Compatibility:** Clients MUST accept unknown error codes gracefully. New error codes may be added in future versions without a major version bump. Unknown codes SHOULD be treated as `INTERNAL_ERROR` for error handling purposes. [REQ-OPS-018]
 
 **Canonical Error Registry:** The authoritative `ApiErrorCode` definition and HTTP status code mappings are specified in `interfaces.md`. This file mirrors that definition for reference.
 
