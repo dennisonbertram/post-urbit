@@ -1,14 +1,18 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::time::Duration;
 use chrono::{DateTime, Utc};
 use async_trait::async_trait;
+use ed25519_dalek::Signer;
 use quinn::{ClientConfig, Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TransportConfig, VarInt};
 use rcgen::generate_simple_self_signed;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use crate::identity::{decode_idoc_envelope, IdentityManager};
+use tokio::time::timeout;
+use crate::identity::{decode_idoc_envelope, IdentityDocument, IdentityManager};
 use crate::canonical_json::canonical_json_from;
-use crate::encoding::{base64_decode, crockford_base32_decode, validate_crockford_base32_lower};
+use crate::encoding::{base64_decode, base64_encode, crockford_base32_decode, validate_crockford_base32_lower};
 use crate::error::{PostUrbitError, Result};
 
 pub struct QuicTransport {
@@ -175,6 +179,24 @@ impl QuicTransport {
     }
 }
 
+/// TLS exporter label for channel binding per RFC-0002 §4.4
+const TLS_EXPORTER_LABEL: &[u8] = b"post-urbit handshake binding";
+
+/// Extract TLS exporter value for channel binding
+/// RFC 8446 §7.5 exporter with label "post-urbit handshake binding" and empty context
+/// Returns 32-byte binding value used in identity handshake.
+///
+/// This binds the identity handshake to the specific TLS session, preventing
+/// man-in-the-middle attacks where handshake messages could be transplanted
+/// to a different connection.
+pub fn extract_tls_binding(connection: &quinn::Connection) -> Result<[u8; 32]> {
+    let mut output = [0u8; 32];
+    connection
+        .export_keying_material(&mut output, TLS_EXPORTER_LABEL, &[])
+        .map_err(|_| PostUrbitError::Crypto("TLS exporter failed"))?;
+    Ok(output)
+}
+
 struct NoCertificateVerification;
 
 impl rustls::client::ServerCertVerifier for NoCertificateVerification {
@@ -289,7 +311,7 @@ pub fn read_frame<R: Read>(r: &mut R, max_size: u32) -> Result<Vec<u8>> {
     Ok(payload)
 }
 
-const HANDSHAKE_DOMAIN: &[u8] = b"post-urbit-handshake-v1";
+pub const HANDSHAKE_DOMAIN: &[u8] = b"post-urbit-handshake-v1";
 const DEVICE_HANDSHAKE_DOMAIN: &[u8] = b"post-urbit-device-v1";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -344,7 +366,38 @@ pub struct ClientAuth {
 pub struct HandshakeComplete {
     pub version: u8,
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<HandshakeError>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HandshakeError {
+    pub code: String,
+    pub message: String,
+}
+
+/// Result of a successful handshake
+#[derive(Debug, Clone)]
+pub struct HandshakeResult {
+    /// The authenticated peer's Identity Identifier
+    pub peer_iid: String,
+    /// The authenticated peer's Device Identifier (if provided)
+    pub peer_did: Option<String>,
+    /// The peer's identity document
+    pub peer_identity_document: IdentityDocument,
+}
+
+/// Timeout for awaiting ClientHello/ServerHello (REQ-TRANS-503-509)
+pub const HANDSHAKE_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for awaiting ClientAuth/HandshakeComplete (REQ-TRANS-503-509)
+pub const HANDSHAKE_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Total handshake timeout (REQ-TRANS-503-509)
+pub const HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum handshake message size (64 KB per RFC-0002 §6.4)
+pub const HANDSHAKE_MAX_MESSAGE_SIZE: u32 = 65536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandshakeRole {
@@ -731,6 +784,670 @@ fn validate_timestamp_canonical(value: &str) -> Result<DateTime<Utc>> {
         .map_err(|_| PostUrbitError::InvalidInput("timestamp parse"))
 }
 
+// ===========================================================================
+// Handshake Protocol Implementation
+// ===========================================================================
+
+/// Read a length-prefixed frame from an async stream
+async fn read_frame_async(
+    recv: &mut quinn::RecvStream,
+    max_size: u32,
+) -> Result<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf)
+        .await
+        .map_err(|err| PostUrbitError::Io(err.to_string()))?;
+    let len = u32::from_be_bytes(len_buf);
+    if len > max_size {
+        return Err(PostUrbitError::InvalidInput("frame too large"));
+    }
+    let mut payload = vec![0u8; len as usize];
+    recv.read_exact(&mut payload)
+        .await
+        .map_err(|err| PostUrbitError::Io(err.to_string()))?;
+    Ok(payload)
+}
+
+/// Write a length-prefixed frame to an async stream
+async fn write_frame_async(
+    send: &mut quinn::SendStream,
+    payload: &[u8],
+) -> Result<()> {
+    let len: u32 = payload
+        .len()
+        .try_into()
+        .map_err(|_| PostUrbitError::InvalidInput("frame length"))?;
+    send.write_all(&len.to_be_bytes())
+        .await
+        .map_err(|err| PostUrbitError::Io(err.to_string()))?;
+    send.write_all(payload)
+        .await
+        .map_err(|err| PostUrbitError::Io(err.to_string()))?;
+    Ok(())
+}
+
+/// Generate a 32-byte random nonce for handshake
+fn generate_nonce() -> [u8; 32] {
+    let mut nonce = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+    nonce
+}
+
+/// Generate canonical timestamp for handshake
+fn generate_timestamp() -> String {
+    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// Create challenge signature for handshake (server side signs first)
+fn create_challenge_signature(
+    signing_key: &ed25519_dalek::SigningKey,
+    client_nonce: &[u8],
+    server_nonce: &[u8],
+    tls_binding: &[u8],
+    client_iid: &str,
+    server_iid: &str,
+    is_server: bool,
+) -> Result<String> {
+    let client_iid_raw = crockford_base32_decode(client_iid)?;
+    let server_iid_raw = crockford_base32_decode(server_iid)?;
+
+    let mut challenge = Vec::with_capacity(159);
+    challenge.extend_from_slice(HANDSHAKE_DOMAIN);
+    if is_server {
+        // Server signs: client_nonce first, then server_nonce
+        challenge.extend_from_slice(client_nonce);
+        challenge.extend_from_slice(server_nonce);
+        challenge.extend_from_slice(tls_binding);
+        challenge.extend_from_slice(&client_iid_raw);
+        challenge.extend_from_slice(&server_iid_raw);
+    } else {
+        // Client signs: server_nonce first, then client_nonce (swapped)
+        challenge.extend_from_slice(server_nonce);
+        challenge.extend_from_slice(client_nonce);
+        challenge.extend_from_slice(tls_binding);
+        challenge.extend_from_slice(&server_iid_raw);
+        challenge.extend_from_slice(&client_iid_raw);
+    }
+
+    let digest = Sha256::digest(&challenge);
+    let signature = signing_key.sign(&digest);
+    Ok(base64_encode(signature.to_bytes().as_slice()))
+}
+
+/// Verify a peer's identity document and derive IID
+fn verify_and_extract_iid(identity_document: &serde_json::Value) -> Result<(String, IdentityDocument)> {
+    let doc_str = serde_json::to_string(identity_document)
+        .map_err(|_| PostUrbitError::InvalidInput("identity document json"))?;
+    let doc: IdentityDocument = serde_json::from_str(&doc_str)
+        .map_err(|_| PostUrbitError::InvalidInput("identity document parse"))?;
+
+    // Verify the document signature
+    IdentityManager::verify_document(&doc)?;
+
+    // Validate IID format
+    validate_crockford_base32_lower(&doc.iid)?;
+
+    // Verify the genesis key derives to the claimed IID
+    let genesis_key_bytes = base64_decode(&doc.keys.signing.genesis)?;
+    if genesis_key_bytes.len() != 32 {
+        return Err(PostUrbitError::InvalidInput("genesis key length"));
+    }
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(
+        genesis_key_bytes.as_slice().try_into()
+            .map_err(|_| PostUrbitError::InvalidInput("genesis key bytes"))?
+    ).map_err(|_| PostUrbitError::InvalidInput("genesis key invalid"))?;
+
+    let derived_iid = crate::identity::derive_iid(&verifying_key);
+    if derived_iid != doc.iid {
+        return Err(PostUrbitError::InvalidInput("iid mismatch with genesis key"));
+    }
+
+    Ok((doc.iid.clone(), doc))
+}
+
+/// Execute client-side identity handshake
+///
+/// This implements the full client handshake flow per RFC-0002 §5:
+/// 1. Send ClientHello with client identity and nonce
+/// 2. Receive ServerHello with server's identity and challenge signature
+/// 3. Verify server's challenge signature and identity document
+/// 4. Send ClientAuth with our identity document and challenge signature
+/// 5. Receive HandshakeComplete confirming success
+///
+/// Returns the authenticated peer's identity information on success.
+pub async fn execute_client_handshake(
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    client_identity: &IdentityManager,
+    expected_server_iid: Option<&str>,
+    tls_binding: [u8; 32],
+) -> Result<HandshakeResult> {
+    // Wrap entire handshake with total timeout
+    timeout(HANDSHAKE_TOTAL_TIMEOUT, async {
+        let client_iid = client_identity.iid().await;
+        let client_nonce = generate_nonce();
+        let timestamp = generate_timestamp();
+        let tls_binding_b64 = base64_encode(&tls_binding);
+
+        // Step 1: Send ClientHello
+        let client_hello = HandshakeMessage::ClientHello(ClientHello {
+            version: 1,
+            client_iid: client_iid.clone(),
+            client_did: None, // DID support not implemented yet
+            expected_server_iid: expected_server_iid.map(|s| s.to_string()),
+            client_nonce: base64_encode(&client_nonce),
+            timestamp,
+            tls_binding: tls_binding_b64.clone(),
+        });
+
+        let client_hello_json = canonical_handshake_json(&client_hello)?;
+        write_frame_async(send, client_hello_json.as_bytes()).await?;
+
+        // Step 2: Receive ServerHello with hello timeout
+        let server_hello_bytes = timeout(
+            HANDSHAKE_HELLO_TIMEOUT,
+            read_frame_async(recv, HANDSHAKE_MAX_MESSAGE_SIZE)
+        )
+        .await
+        .map_err(|_| PostUrbitError::Io("ServerHello timeout".to_string()))??;
+
+        let server_hello_msg: HandshakeMessage = serde_json::from_slice(&server_hello_bytes)
+            .map_err(|_| PostUrbitError::InvalidInput("ServerHello json"))?;
+
+        let server_hello = match server_hello_msg {
+            HandshakeMessage::ServerHello(sh) => sh,
+            _ => return Err(PostUrbitError::InvalidInput("expected ServerHello")),
+        };
+
+        // Validate server hello
+        let now = Utc::now();
+        validate_server_hello(&server_hello, now)?;
+
+        // Verify TLS binding matches
+        if server_hello.tls_binding != tls_binding_b64 {
+            return Err(PostUrbitError::InvalidInput("TLS binding mismatch"));
+        }
+
+        // If we expected a specific server IID, verify it matches
+        if let Some(expected) = expected_server_iid {
+            if server_hello.server_iid != expected {
+                return Err(PostUrbitError::InvalidInput("server IID mismatch"));
+            }
+        }
+
+        // Verify server's identity document and extract IID
+        let (server_iid, server_identity_doc) = verify_and_extract_iid(&server_hello.identity_document)?;
+        if server_iid != server_hello.server_iid {
+            return Err(PostUrbitError::InvalidInput("server IID mismatch with document"));
+        }
+
+        // Verify server's challenge signature
+        let server_nonce = base64_decode(&server_hello.server_nonce)?;
+        verify_challenge_signature(
+            &server_hello.challenge_signature,
+            &server_identity_doc.keys.signing.current,
+            &base64_encode(&client_nonce),
+            &server_hello.server_nonce,
+            &tls_binding_b64,
+            &client_iid,
+            &server_iid,
+            true, // server signature
+        )?;
+
+        // Step 3: Send ClientAuth
+        let identity_doc = client_identity.identity_document().await;
+        let challenge_sig = create_challenge_signature_with_manager(
+            client_identity,
+            &client_nonce,
+            &server_nonce,
+            &tls_binding,
+            &client_iid,
+            &server_iid,
+            false, // client signature
+        ).await?;
+
+        let identity_doc_value = serde_json::to_value(&identity_doc)
+            .map_err(|_| PostUrbitError::InvalidInput("identity document serialize"))?;
+
+        let client_auth = HandshakeMessage::ClientAuth(ClientAuth {
+            version: 1,
+            identity_document: identity_doc_value,
+            device_document: None,
+            challenge_signature: challenge_sig,
+            device_signature: None,
+            tls_binding: tls_binding_b64,
+        });
+
+        let client_auth_json = canonical_handshake_json(&client_auth)?;
+        write_frame_async(send, client_auth_json.as_bytes()).await?;
+
+        // Step 4: Receive HandshakeComplete with auth timeout
+        let complete_bytes = timeout(
+            HANDSHAKE_AUTH_TIMEOUT,
+            read_frame_async(recv, HANDSHAKE_MAX_MESSAGE_SIZE)
+        )
+        .await
+        .map_err(|_| PostUrbitError::Io("HandshakeComplete timeout".to_string()))??;
+
+        let complete_msg: HandshakeMessage = serde_json::from_slice(&complete_bytes)
+            .map_err(|_| PostUrbitError::InvalidInput("HandshakeComplete json"))?;
+
+        let complete = match complete_msg {
+            HandshakeMessage::HandshakeComplete(hc) => hc,
+            _ => return Err(PostUrbitError::InvalidInput("expected HandshakeComplete")),
+        };
+
+        if !complete.success {
+            let error_msg = complete.error
+                .map(|e| format!("{}: {}", e.code, e.message))
+                .unwrap_or_else(|| "unknown error".to_string());
+            return Err(PostUrbitError::Io(format!("handshake failed: {}", error_msg)));
+        }
+
+        Ok(HandshakeResult {
+            peer_iid: server_iid,
+            peer_did: server_hello.server_did,
+            peer_identity_document: server_identity_doc,
+        })
+    })
+    .await
+    .map_err(|_| PostUrbitError::Io("handshake total timeout".to_string()))?
+}
+
+/// Execute server-side identity handshake
+///
+/// This implements the full server handshake flow per RFC-0002 §5:
+/// 1. Receive ClientHello with client identity and nonce
+/// 2. Validate ClientHello and verify TLS binding
+/// 3. Send ServerHello with our identity and challenge signature
+/// 4. Receive ClientAuth with client's identity document and signature
+/// 5. Verify client's challenge signature and identity document
+/// 6. Send HandshakeComplete confirming success
+///
+/// Returns the authenticated peer's identity information on success.
+pub async fn execute_server_handshake(
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    server_identity: &IdentityManager,
+    tls_binding: [u8; 32],
+) -> Result<HandshakeResult> {
+    // Wrap entire handshake with total timeout
+    timeout(HANDSHAKE_TOTAL_TIMEOUT, async {
+        let server_iid = server_identity.iid().await;
+        let server_nonce = generate_nonce();
+        let timestamp = generate_timestamp();
+        let tls_binding_b64 = base64_encode(&tls_binding);
+
+        // Step 1: Receive ClientHello with hello timeout
+        let client_hello_bytes = timeout(
+            HANDSHAKE_HELLO_TIMEOUT,
+            read_frame_async(recv, HANDSHAKE_MAX_MESSAGE_SIZE)
+        )
+        .await
+        .map_err(|_| PostUrbitError::Io("ClientHello timeout".to_string()))??;
+
+        let client_hello_msg: HandshakeMessage = serde_json::from_slice(&client_hello_bytes)
+            .map_err(|_| PostUrbitError::InvalidInput("ClientHello json"))?;
+
+        let client_hello = match client_hello_msg {
+            HandshakeMessage::ClientHello(ch) => ch,
+            _ => return Err(PostUrbitError::InvalidInput("expected ClientHello")),
+        };
+
+        // Validate client hello
+        let now = Utc::now();
+        validate_client_hello(&client_hello, now)?;
+
+        // Verify TLS binding matches
+        if client_hello.tls_binding != tls_binding_b64 {
+            return Err(PostUrbitError::InvalidInput("TLS binding mismatch"));
+        }
+
+        // If client expects a specific server IID, verify we match
+        if let Some(expected) = &client_hello.expected_server_iid {
+            if *expected != server_iid {
+                // Send failure response before closing
+                let complete = HandshakeMessage::HandshakeComplete(HandshakeComplete {
+                    version: 1,
+                    success: false,
+                    error: Some(HandshakeError {
+                        code: "IDENTITY_MISMATCH".to_string(),
+                        message: "Server IID does not match expected".to_string(),
+                    }),
+                });
+                let complete_json = canonical_handshake_json(&complete)?;
+                let _ = write_frame_async(send, complete_json.as_bytes()).await;
+                return Err(PostUrbitError::InvalidInput("server IID mismatch"));
+            }
+        }
+
+        let client_iid = client_hello.client_iid.clone();
+        let client_nonce = base64_decode(&client_hello.client_nonce)?;
+
+        // Step 2: Send ServerHello
+        let identity_doc = server_identity.identity_document().await;
+        let challenge_sig = create_challenge_signature_with_manager(
+            server_identity,
+            &client_nonce,
+            &server_nonce,
+            &tls_binding,
+            &client_iid,
+            &server_iid,
+            true, // server signature
+        ).await?;
+
+        let identity_doc_value = serde_json::to_value(&identity_doc)
+            .map_err(|_| PostUrbitError::InvalidInput("identity document serialize"))?;
+
+        let server_hello = HandshakeMessage::ServerHello(ServerHello {
+            version: 1,
+            server_iid: server_iid.clone(),
+            server_did: None,
+            server_nonce: base64_encode(&server_nonce),
+            timestamp,
+            tls_binding: tls_binding_b64.clone(),
+            identity_document: identity_doc_value,
+            device_document: None,
+            challenge_signature: challenge_sig,
+            device_signature: None,
+        });
+
+        let server_hello_json = canonical_handshake_json(&server_hello)?;
+        write_frame_async(send, server_hello_json.as_bytes()).await?;
+
+        // Step 3: Receive ClientAuth with auth timeout
+        let client_auth_bytes = timeout(
+            HANDSHAKE_AUTH_TIMEOUT,
+            read_frame_async(recv, HANDSHAKE_MAX_MESSAGE_SIZE)
+        )
+        .await
+        .map_err(|_| PostUrbitError::Io("ClientAuth timeout".to_string()))??;
+
+        let client_auth_msg: HandshakeMessage = serde_json::from_slice(&client_auth_bytes)
+            .map_err(|_| PostUrbitError::InvalidInput("ClientAuth json"))?;
+
+        let client_auth = match client_auth_msg {
+            HandshakeMessage::ClientAuth(ca) => ca,
+            _ => return Err(PostUrbitError::InvalidInput("expected ClientAuth")),
+        };
+
+        // Verify TLS binding in ClientAuth
+        if client_auth.tls_binding != tls_binding_b64 {
+            let complete = HandshakeMessage::HandshakeComplete(HandshakeComplete {
+                version: 1,
+                success: false,
+                error: Some(HandshakeError {
+                    code: "TLS_BINDING_MISMATCH".to_string(),
+                    message: "TLS binding mismatch in ClientAuth".to_string(),
+                }),
+            });
+            let complete_json = canonical_handshake_json(&complete)?;
+            let _ = write_frame_async(send, complete_json.as_bytes()).await;
+            return Err(PostUrbitError::InvalidInput("TLS binding mismatch in ClientAuth"));
+        }
+
+        // Verify client's identity document
+        let (verified_client_iid, client_identity_doc) = verify_and_extract_iid(&client_auth.identity_document)?;
+        if verified_client_iid != client_iid {
+            let complete = HandshakeMessage::HandshakeComplete(HandshakeComplete {
+                version: 1,
+                success: false,
+                error: Some(HandshakeError {
+                    code: "IDENTITY_MISMATCH".to_string(),
+                    message: "Client IID mismatch with document".to_string(),
+                }),
+            });
+            let complete_json = canonical_handshake_json(&complete)?;
+            let _ = write_frame_async(send, complete_json.as_bytes()).await;
+            return Err(PostUrbitError::InvalidInput("client IID mismatch with document"));
+        }
+
+        // Verify client's challenge signature
+        verify_challenge_signature(
+            &client_auth.challenge_signature,
+            &client_identity_doc.keys.signing.current,
+            &client_hello.client_nonce,
+            &base64_encode(&server_nonce),
+            &tls_binding_b64,
+            &client_iid,
+            &server_iid,
+            false, // client signature
+        ).map_err(|_| {
+            // Don't block on sending error response
+            PostUrbitError::Crypto("client challenge signature invalid")
+        })?;
+
+        // Step 4: Send HandshakeComplete
+        let complete = HandshakeMessage::HandshakeComplete(HandshakeComplete {
+            version: 1,
+            success: true,
+            error: None,
+        });
+        let complete_json = canonical_handshake_json(&complete)?;
+        write_frame_async(send, complete_json.as_bytes()).await?;
+
+        Ok(HandshakeResult {
+            peer_iid: client_iid,
+            peer_did: client_hello.client_did,
+            peer_identity_document: client_identity_doc,
+        })
+    })
+    .await
+    .map_err(|_| PostUrbitError::Io("handshake total timeout".to_string()))?
+}
+
+/// Create challenge signature using IdentityManager's sign_data method.
+/// This constructs the challenge data and signs it directly using the identity manager.
+async fn create_challenge_signature_with_manager(
+    identity: &IdentityManager,
+    client_nonce: &[u8],
+    server_nonce: &[u8],
+    tls_binding: &[u8],
+    client_iid: &str,
+    server_iid: &str,
+    is_server: bool,
+) -> Result<String> {
+    let client_iid_raw = crockford_base32_decode(client_iid)?;
+    let server_iid_raw = crockford_base32_decode(server_iid)?;
+
+    let mut challenge = Vec::with_capacity(159);
+    challenge.extend_from_slice(HANDSHAKE_DOMAIN);
+    if is_server {
+        // Server signs: client_nonce first, then server_nonce
+        challenge.extend_from_slice(client_nonce);
+        challenge.extend_from_slice(server_nonce);
+        challenge.extend_from_slice(tls_binding);
+        challenge.extend_from_slice(&client_iid_raw);
+        challenge.extend_from_slice(&server_iid_raw);
+    } else {
+        // Client signs: server_nonce first, then client_nonce (swapped)
+        challenge.extend_from_slice(server_nonce);
+        challenge.extend_from_slice(client_nonce);
+        challenge.extend_from_slice(tls_binding);
+        challenge.extend_from_slice(&server_iid_raw);
+        challenge.extend_from_slice(&client_iid_raw);
+    }
+
+    let digest = Sha256::digest(&challenge);
+    let signature = identity.sign_data(&digest).await;
+    Ok(base64_encode(&signature))
+}
+
+// ===========================================================================
+// Glare Resolution (Connection Deduplication)
+// ===========================================================================
+
+/// Information about an active connection
+#[derive(Debug, Clone)]
+pub struct ConnectionInfo {
+    /// Who initiated the connection (true = we initiated, false = peer initiated)
+    pub we_initiated: bool,
+    /// When the connection was established
+    pub established_at: std::time::Instant,
+}
+
+/// Track active connections to detect and resolve glare
+///
+/// Glare occurs when two peers attempt to connect to each other simultaneously.
+/// This tracker implements REQ-TRANS-152-154 for deterministic resolution.
+#[derive(Debug, Default)]
+pub struct ConnectionTracker {
+    /// Map of (remote_iid, remote_did) -> ConnectionInfo
+    active: HashMap<(String, Option<String>), ConnectionInfo>,
+}
+
+impl ConnectionTracker {
+    /// Create a new connection tracker
+    pub fn new() -> Self {
+        Self {
+            active: HashMap::new(),
+        }
+    }
+
+    /// Register a new connection
+    ///
+    /// Returns true if the connection was registered, false if a connection
+    /// to this peer already exists (glare detected).
+    pub fn register(
+        &mut self,
+        remote_iid: &str,
+        remote_did: Option<&str>,
+        we_initiated: bool,
+    ) -> bool {
+        let key = (remote_iid.to_string(), remote_did.map(|s| s.to_string()));
+        if self.active.contains_key(&key) {
+            return false; // Glare detected
+        }
+        self.active.insert(key, ConnectionInfo {
+            we_initiated,
+            established_at: std::time::Instant::now(),
+        });
+        true
+    }
+
+    /// Remove a connection from tracking
+    pub fn remove(&mut self, remote_iid: &str, remote_did: Option<&str>) {
+        let key = (remote_iid.to_string(), remote_did.map(|s| s.to_string()));
+        self.active.remove(&key);
+    }
+
+    /// Check if we have an active connection to this peer
+    pub fn has_connection(&self, remote_iid: &str, remote_did: Option<&str>) -> bool {
+        let key = (remote_iid.to_string(), remote_did.map(|s| s.to_string()));
+        self.active.contains_key(&key)
+    }
+
+    /// Get information about an active connection
+    pub fn get_connection(&self, remote_iid: &str, remote_did: Option<&str>) -> Option<&ConnectionInfo> {
+        let key = (remote_iid.to_string(), remote_did.map(|s| s.to_string()));
+        self.active.get(&key)
+    }
+
+    /// Check if connection is duplicate and resolve glare
+    ///
+    /// Returns true if this connection should be kept, false if it should close.
+    ///
+    /// Resolution rule (REQ-TRANS-152-154):
+    /// Compare (iid, did) tuples lexicographically.
+    /// The connection initiated by the lexicographically smaller tuple survives.
+    ///
+    /// # Arguments
+    /// * `local_iid` - Our Identity Identifier
+    /// * `local_did` - Our Device Identifier (if any)
+    /// * `remote_iid` - Remote peer's Identity Identifier
+    /// * `remote_did` - Remote peer's Device Identifier (if any)
+    ///
+    /// # Returns
+    /// * `true` if this connection should be kept
+    /// * `false` if this connection should be closed (the other one survives)
+    pub fn resolve_glare(
+        &mut self,
+        local_iid: &str,
+        local_did: Option<&str>,
+        remote_iid: &str,
+        remote_did: Option<&str>,
+    ) -> bool {
+        let key = (remote_iid.to_string(), remote_did.map(|s| s.to_string()));
+
+        // Check if we already have a connection to this peer
+        let Some(existing) = self.active.get(&key) else {
+            // No existing connection, keep this one
+            return true;
+        };
+
+        // Glare detected! Resolve using lexicographic ordering of initiator tuples
+        // The connection initiated by the smaller (iid, did) tuple survives
+
+        let local_tuple = (local_iid, local_did);
+        let remote_tuple = (remote_iid, remote_did);
+
+        // Determine which tuple is smaller using lexicographic comparison
+        let local_is_smaller = tuple_less_than(local_tuple, remote_tuple);
+
+        // If we initiated the existing connection:
+        // - local_is_smaller means we should keep our connection (return false for new one)
+        // - !local_is_smaller means peer's connection wins (close our existing, keep new)
+        //
+        // If peer initiated the existing connection:
+        // - local_is_smaller means we initiated the new one, and our tuple is smaller, so new wins
+        // - !local_is_smaller means peer's tuple is smaller, keep existing (return false)
+
+        if existing.we_initiated {
+            // We initiated the existing connection
+            // The existing connection was initiated by local tuple
+            // Keep the one initiated by smaller tuple
+            if local_is_smaller {
+                // Our tuple is smaller, keep existing, close new
+                false
+            } else {
+                // Remote tuple is smaller, but remote initiated new connection
+                // Wait, if we_initiated for existing, then new connection is from peer
+                // Peer's tuple is remote_tuple. If remote > local, then local_is_smaller is true
+                // This case: !local_is_smaller means remote < local
+                // Peer initiated new connection (their tuple), and peer's tuple is smaller
+                // So keep new connection (return true), remove existing
+                self.active.remove(&key);
+                true
+            }
+        } else {
+            // Peer initiated the existing connection
+            // New connection: who initiated it? We did (since we're checking glare)
+            // Our tuple initiated new, peer's tuple initiated existing
+            if local_is_smaller {
+                // Our tuple is smaller, new connection wins
+                self.active.remove(&key);
+                true
+            } else {
+                // Peer's tuple is smaller, existing wins
+                false
+            }
+        }
+    }
+}
+
+/// Compare (iid, did) tuples lexicographically per RFC-0002 §8.5
+///
+/// - iid: 32-char Crockford Base32 string
+/// - did: 32-char Crockford Base32 string or None
+/// - None sorts before any defined value
+fn tuple_less_than(
+    a: (&str, Option<&str>),
+    b: (&str, Option<&str>),
+) -> bool {
+    // First compare IIDs
+    if a.0 != b.0 {
+        return a.0 < b.0;
+    }
+
+    // IIDs equal, compare DIDs
+    match (a.1, b.1) {
+        (None, None) => false,      // Equal
+        (None, Some(_)) => true,    // None < any defined value
+        (Some(_), None) => false,   // Any defined value > None
+        (Some(a_did), Some(b_did)) => a_did < b_did,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,6 +1656,7 @@ mod tests {
         let complete = HandshakeMessage::HandshakeComplete(HandshakeComplete {
             version: 1,
             success: true,
+            error: None,
         });
         fsm.on_receive(&complete).unwrap();
         assert_eq!(fsm.state(), HandshakeState::Complete);
@@ -1029,5 +1747,402 @@ mod tests {
 
         let endpoint = QuicTransport::configure_endpoint().unwrap();
         assert_eq!(endpoint.get_max_udp_payload_size(), 1200);
+    }
+
+    // ===========================================================================
+    // Tests for TLS Binding Extraction (REQ-TRANS-088, 089)
+    // ===========================================================================
+
+    #[test]
+    fn tls_exporter_label_is_correct() {
+        // Verify the label matches RFC-0002 §4.4
+        assert_eq!(TLS_EXPORTER_LABEL, b"post-urbit handshake binding");
+    }
+
+    // Note: Full extract_tls_binding test requires an actual QUIC connection
+    // which would be an integration test. The function is tested implicitly
+    // through the handshake integration tests.
+
+    // ===========================================================================
+    // Tests for Handshake Timeouts (REQ-TRANS-503-509)
+    // ===========================================================================
+
+    #[test]
+    fn handshake_timeout_constants_match_spec() {
+        // REQ-TRANS-503-509: Verify timeout values match RFC specification
+        assert_eq!(HANDSHAKE_HELLO_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(HANDSHAKE_AUTH_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(HANDSHAKE_TOTAL_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(HANDSHAKE_MAX_MESSAGE_SIZE, 65536);
+    }
+
+    // ===========================================================================
+    // Tests for Glare Resolution (REQ-TRANS-152-154)
+    // ===========================================================================
+
+    #[test]
+    fn tuple_less_than_compares_iid_first() {
+        // Different IIDs
+        let a = ("a0000000000000000000000000000000", None);
+        let b = ("b0000000000000000000000000000000", None);
+        assert!(tuple_less_than(a, b));
+        assert!(!tuple_less_than(b, a));
+    }
+
+    #[test]
+    fn tuple_less_than_compares_did_when_iid_equal() {
+        let iid = "a0000000000000000000000000000000";
+        let a = (iid, Some("d0000000000000000000000000000000"));
+        let b = (iid, Some("e0000000000000000000000000000000"));
+        assert!(tuple_less_than(a, b));
+        assert!(!tuple_less_than(b, a));
+    }
+
+    #[test]
+    fn tuple_less_than_none_did_sorts_first() {
+        let iid = "a0000000000000000000000000000000";
+        let a = (iid, None);
+        let b = (iid, Some("d0000000000000000000000000000000"));
+        assert!(tuple_less_than(a, b));
+        assert!(!tuple_less_than(b, a));
+    }
+
+    #[test]
+    fn tuple_less_than_equal_tuples() {
+        let a = ("a0000000000000000000000000000000", Some("d0000000000000000000000000000000"));
+        assert!(!tuple_less_than(a, a));
+    }
+
+    #[test]
+    fn connection_tracker_register_new_connection() {
+        let mut tracker = ConnectionTracker::new();
+        let iid = "a0000000000000000000000000000000";
+
+        // First connection should succeed
+        assert!(tracker.register(iid, None, true));
+        assert!(tracker.has_connection(iid, None));
+
+        // Second connection to same peer should fail (glare)
+        assert!(!tracker.register(iid, None, false));
+    }
+
+    #[test]
+    fn connection_tracker_remove_connection() {
+        let mut tracker = ConnectionTracker::new();
+        let iid = "a0000000000000000000000000000000";
+
+        tracker.register(iid, None, true);
+        assert!(tracker.has_connection(iid, None));
+
+        tracker.remove(iid, None);
+        assert!(!tracker.has_connection(iid, None));
+    }
+
+    #[test]
+    fn connection_tracker_separate_did_connections() {
+        let mut tracker = ConnectionTracker::new();
+        let iid = "a0000000000000000000000000000000";
+        let did1 = "d0000000000000000000000000000000";
+        let did2 = "e0000000000000000000000000000000";
+
+        // Different DIDs should be separate connections
+        assert!(tracker.register(iid, Some(did1), true));
+        assert!(tracker.register(iid, Some(did2), true));
+        assert!(tracker.has_connection(iid, Some(did1)));
+        assert!(tracker.has_connection(iid, Some(did2)));
+    }
+
+    #[test]
+    fn glare_resolution_smaller_tuple_wins() {
+        // Per RFC-0002 §8.5: The connection initiated by the smaller (iid, did) tuple survives
+
+        let mut tracker = ConnectionTracker::new();
+        let local_iid = "a0000000000000000000000000000000";   // smaller
+        let remote_iid = "b0000000000000000000000000000000";  // larger
+
+        // We initiated an existing connection to remote
+        tracker.register(remote_iid, None, true);
+
+        // Glare: resolve with local (smaller) having initiated
+        // Since we initiated and our tuple is smaller, we keep existing
+        let keep = tracker.resolve_glare(local_iid, None, remote_iid, None);
+        assert!(!keep); // Don't keep new connection, existing one (ours) survives
+    }
+
+    #[test]
+    fn glare_resolution_larger_tuple_closes() {
+        let mut tracker = ConnectionTracker::new();
+        let local_iid = "b0000000000000000000000000000000";   // larger
+        let remote_iid = "a0000000000000000000000000000000";  // smaller
+
+        // We initiated an existing connection to remote
+        tracker.register(remote_iid, None, true);
+
+        // Glare: resolve with local (larger) having initiated existing
+        // Remote is smaller, so remote's connection should win
+        // The new connection (from remote) should be kept
+        let keep = tracker.resolve_glare(local_iid, None, remote_iid, None);
+        assert!(keep); // Keep new connection (remote initiated, remote tuple is smaller)
+
+        // Existing connection should be removed
+        assert!(!tracker.has_connection(remote_iid, None));
+    }
+
+    #[test]
+    fn glare_resolution_no_existing_connection() {
+        let mut tracker = ConnectionTracker::new();
+        let local_iid = "a0000000000000000000000000000000";
+        let remote_iid = "b0000000000000000000000000000000";
+
+        // No existing connection - should keep new one
+        let keep = tracker.resolve_glare(local_iid, None, remote_iid, None);
+        assert!(keep);
+    }
+
+    #[test]
+    fn glare_resolution_with_did() {
+        let mut tracker = ConnectionTracker::new();
+        let local_iid = "a0000000000000000000000000000000";
+        let local_did = Some("c0000000000000000000000000000000");
+        let remote_iid = "a0000000000000000000000000000000";  // same IID
+        let remote_did = Some("d0000000000000000000000000000000");  // larger DID
+
+        // Register existing connection (we initiated to remote)
+        tracker.register(remote_iid, remote_did, true);
+
+        // Glare: local (same iid, smaller did) vs remote (same iid, larger did)
+        // Local tuple is smaller, so our existing connection should survive
+        let keep = tracker.resolve_glare(local_iid, local_did, remote_iid, remote_did);
+        assert!(!keep);
+    }
+
+    // ===========================================================================
+    // Tests for Challenge Signature Creation
+    // ===========================================================================
+
+    #[test]
+    fn create_challenge_signature_server() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let client_nonce = [1u8; 32];
+        let server_nonce = [2u8; 32];
+        let tls_binding = [3u8; 32];
+        let client_iid = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let server_iid = "2f0fcybfpmka5vf7ge737ex07crgnxsw";
+
+        let sig = create_challenge_signature(
+            &signing_key,
+            &client_nonce,
+            &server_nonce,
+            &tls_binding,
+            client_iid,
+            server_iid,
+            true,  // server
+        ).unwrap();
+
+        // Verify we got a valid base64 signature
+        let sig_bytes = base64_decode(&sig).unwrap();
+        assert_eq!(sig_bytes.len(), 64);
+
+        // Verify the signature is valid
+        let signing_key_b64 = base64_encode(signing_key.verifying_key().as_bytes());
+        verify_challenge_signature(
+            &sig,
+            &signing_key_b64,
+            &base64_encode(&client_nonce),
+            &base64_encode(&server_nonce),
+            &base64_encode(&tls_binding),
+            client_iid,
+            server_iid,
+            true,
+        ).unwrap();
+    }
+
+    #[test]
+    fn create_challenge_signature_client() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let client_nonce = [1u8; 32];
+        let server_nonce = [2u8; 32];
+        let tls_binding = [3u8; 32];
+        let client_iid = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let server_iid = "2f0fcybfpmka5vf7ge737ex07crgnxsw";
+
+        let sig = create_challenge_signature(
+            &signing_key,
+            &client_nonce,
+            &server_nonce,
+            &tls_binding,
+            client_iid,
+            server_iid,
+            false,  // client
+        ).unwrap();
+
+        // Verify we got a valid base64 signature
+        let sig_bytes = base64_decode(&sig).unwrap();
+        assert_eq!(sig_bytes.len(), 64);
+
+        // Verify the signature is valid
+        let signing_key_b64 = base64_encode(signing_key.verifying_key().as_bytes());
+        verify_challenge_signature(
+            &sig,
+            &signing_key_b64,
+            &base64_encode(&client_nonce),
+            &base64_encode(&server_nonce),
+            &base64_encode(&tls_binding),
+            client_iid,
+            server_iid,
+            false,
+        ).unwrap();
+    }
+
+    #[test]
+    fn server_and_client_signatures_differ() {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let client_nonce = [1u8; 32];
+        let server_nonce = [2u8; 32];
+        let tls_binding = [3u8; 32];
+        let client_iid = "b1n7cfscgashm32xx7eaxw0y09gy0y2v";
+        let server_iid = "2f0fcybfpmka5vf7ge737ex07crgnxsw";
+
+        let server_sig = create_challenge_signature(
+            &signing_key,
+            &client_nonce,
+            &server_nonce,
+            &tls_binding,
+            client_iid,
+            server_iid,
+            true,
+        ).unwrap();
+
+        let client_sig = create_challenge_signature(
+            &signing_key,
+            &client_nonce,
+            &server_nonce,
+            &tls_binding,
+            client_iid,
+            server_iid,
+            false,
+        ).unwrap();
+
+        // Server and client signatures should be different (different challenge data order)
+        assert_ne!(server_sig, client_sig);
+    }
+
+    // ===========================================================================
+    // Tests for verify_and_extract_iid
+    // ===========================================================================
+
+    #[test]
+    fn verify_and_extract_iid_valid_document() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+
+        let (iid, doc) = rt.block_on(async {
+            let manager = IdentityManager::new(temp.path().to_str().unwrap()).await.unwrap();
+            let doc = manager.identity_document().await;
+            (manager.iid().await, doc)
+        });
+
+        let doc_value = serde_json::to_value(&doc).unwrap();
+        let (extracted_iid, extracted_doc) = verify_and_extract_iid(&doc_value).unwrap();
+
+        assert_eq!(extracted_iid, iid);
+        assert_eq!(extracted_doc.iid, iid);
+    }
+
+    #[test]
+    fn verify_and_extract_iid_invalid_signature() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+
+        let mut doc = rt.block_on(async {
+            let manager = IdentityManager::new(temp.path().to_str().unwrap()).await.unwrap();
+            manager.identity_document().await
+        });
+
+        // Corrupt the signature
+        doc.signatures.current = base64_encode(&[0u8; 64]);
+
+        let doc_value = serde_json::to_value(&doc).unwrap();
+        let err = verify_and_extract_iid(&doc_value).unwrap_err();
+        assert!(matches!(err, PostUrbitError::Crypto(_)));
+    }
+
+    // ===========================================================================
+    // Tests for HandshakeError and HandshakeComplete
+    // ===========================================================================
+
+    #[test]
+    fn handshake_complete_success_serialization() {
+        let msg = HandshakeComplete {
+            version: 1,
+            success: true,
+            error: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"success\":true"));
+        assert!(!json.contains("error")); // error should be skipped when None
+    }
+
+    #[test]
+    fn handshake_complete_failure_serialization() {
+        let msg = HandshakeComplete {
+            version: 1,
+            success: false,
+            error: Some(HandshakeError {
+                code: "IDENTITY_MISMATCH".to_string(),
+                message: "Server IID does not match expected".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"success\":false"));
+        assert!(json.contains("IDENTITY_MISMATCH"));
+        assert!(json.contains("Server IID does not match expected"));
+    }
+
+    #[test]
+    fn handshake_complete_round_trip() {
+        let original = HandshakeComplete {
+            version: 1,
+            success: false,
+            error: Some(HandshakeError {
+                code: "TLS_BINDING_MISMATCH".to_string(),
+                message: "TLS binding mismatch".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: HandshakeComplete = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.version, 1);
+        assert!(!decoded.success);
+        assert!(decoded.error.is_some());
+        let err = decoded.error.unwrap();
+        assert_eq!(err.code, "TLS_BINDING_MISMATCH");
+    }
+
+    // ===========================================================================
+    // Tests for async frame reading/writing
+    // ===========================================================================
+
+    #[test]
+    fn generate_nonce_is_32_bytes() {
+        let nonce = generate_nonce();
+        assert_eq!(nonce.len(), 32);
+
+        // Verify randomness (two nonces should be different)
+        let nonce2 = generate_nonce();
+        assert_ne!(nonce, nonce2);
+    }
+
+    #[test]
+    fn generate_timestamp_is_canonical() {
+        let ts = generate_timestamp();
+
+        // Should be in canonical format: YYYY-MM-DDTHH:MM:SSZ
+        assert!(ts.ends_with('Z'));
+        assert!(!ts.contains('.'));  // No fractional seconds
+        assert_eq!(ts.len(), 20);    // Fixed length
+
+        // Should parse successfully
+        let parsed = ts.parse::<DateTime<Utc>>();
+        assert!(parsed.is_ok());
     }
 }

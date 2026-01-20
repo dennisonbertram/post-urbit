@@ -126,7 +126,14 @@ pub fn encode_puse_header(header: &PUSEHeader) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Maximum PUSE envelope size (1 MB) per RFC-0003 §3.1
+const PUSE_MAX_ENVELOPE_SIZE: usize = 1_048_576;
+
 pub fn decode_puse_envelope(bytes: &[u8]) -> Result<PUSEEnvelope> {
+    // REQ-MSG-031: Maximum envelope size is 1 MB
+    if bytes.len() > PUSE_MAX_ENVELOPE_SIZE {
+        return Err(PostUrbitError::InvalidInput("puse envelope too large"));
+    }
     if bytes.len() < 4 + 1 + 1 + 20 + 20 + 16 + 2 + 1 + 12 + 4 + 64 {
         return Err(PostUrbitError::InvalidInput("puse envelope too short"));
     }
@@ -139,6 +146,11 @@ pub fn decode_puse_envelope(bytes: &[u8]) -> Result<PUSEEnvelope> {
 
     let mut idx = 5;
     let flags = bytes[idx];
+
+    // REQ-MSG-033/034: Validate flags byte - reserved bits (5-7) MUST be zero
+    if (flags & 0xE0) != 0 {
+        return Err(PostUrbitError::InvalidInput("puse reserved flags not zero"));
+    }
     idx += 1;
 
     let mut sender_iid = [0u8; 20];
@@ -166,6 +178,34 @@ pub fn decode_puse_envelope(bytes: &[u8]) -> Result<PUSEEnvelope> {
     let header_extension = bytes[idx..idx + ext_len].to_vec();
     idx += ext_len;
     validate_header_extension(&header_extension)?;
+
+    // REQ-MSG-033/034: Validate recipient type matches extension type
+    let recipient_type = flags & 0x03;
+    let ext_type = if header_extension.is_empty() {
+        return Err(PostUrbitError::InvalidInput("puse header extension required"));
+    } else {
+        header_extension[0]
+    };
+
+    match recipient_type {
+        0x00 => {
+            // 1:1 messaging: must use Initial (0x00) or Ratchet (0x01) extension
+            if ext_type != 0x00 && ext_type != 0x01 {
+                return Err(PostUrbitError::InvalidInput("puse invalid extension for 1:1"));
+            }
+        }
+        0x01 => {
+            // Group messaging: must use Group (0x02) extension
+            if ext_type != 0x02 {
+                return Err(PostUrbitError::InvalidInput("puse invalid extension for group"));
+            }
+        }
+        0x02 | 0x03 => {
+            // Reserved recipient types
+            return Err(PostUrbitError::InvalidInput("puse reserved recipient type"));
+        }
+        _ => unreachable!(),
+    }
 
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&bytes[idx..idx + 12]);

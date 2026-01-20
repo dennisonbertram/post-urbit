@@ -13,7 +13,10 @@ use crate::dht::Dht;
 use crate::encoding::base64_encode;
 use crate::error::{PostUrbitError, Result};
 use crate::identity::{fetch_identity, IdentityDocument};
-use crate::mailbox::{canonicalize_mailbox_url, verify_mailbox_token_with_identity, MailboxToken};
+use crate::mailbox::{
+    canonicalize_mailbox_url, verify_mailbox_token_with_identity, MailboxToken,
+    MailboxBearerTokenGenerator, TokenRequest, TokenResponse,
+};
 use crate::mailbox_store::{MailboxStore, StoredMessage};
 use crate::messaging::decode_puse_envelope;
 
@@ -21,6 +24,9 @@ use crate::messaging::decode_puse_envelope;
 pub struct MailboxHttpConfig {
     pub public_url: String,
     pub retention_days: i64,
+    /// Secret key for bearer token generation (32 bytes)
+    /// If None, bearer token endpoint is disabled
+    pub bearer_token_secret: Option<[u8; 32]>,
 }
 
 impl MailboxHttpConfig {
@@ -29,10 +35,19 @@ impl MailboxHttpConfig {
     }
 }
 
+/// Authenticated bearer token context
+#[derive(Debug, Clone)]
+pub struct BearerTokenContext {
+    pub sender_iid: String,
+    pub recipient_iid: String,
+    pub expires_at: String,
+}
+
 pub struct MailboxHttpServer {
     cfg: MailboxHttpConfig,
     dht: Arc<dyn Dht + Send + Sync>,
     store: Arc<Mutex<MailboxStore>>,
+    bearer_token_generator: Option<MailboxBearerTokenGenerator>,
 }
 
 impl MailboxHttpServer {
@@ -41,7 +56,8 @@ impl MailboxHttpServer {
         dht: Arc<dyn Dht + Send + Sync>,
         store: Arc<Mutex<MailboxStore>>,
     ) -> Self {
-        Self { cfg, dht, store }
+        let bearer_token_generator = cfg.bearer_token_secret.map(MailboxBearerTokenGenerator::new);
+        Self { cfg, dht, store, bearer_token_generator }
     }
 
     pub async fn run(self: Arc<Self>, addr: std::net::SocketAddr) -> Result<()> {
@@ -64,6 +80,10 @@ impl MailboxHttpServer {
 
     async fn handle_request(self: Arc<Self>, req: Request<Body>) -> Response<Body> {
         match (req.method(), req.uri().path()) {
+            // Bearer token request endpoint (REQ-MSG-086-089)
+            (&Method::POST, path) if path.starts_with("/mailbox/token/") => {
+                self.handle_token_request(req).await
+            }
             (&Method::POST, path) if path.starts_with("/messages/") => {
                 self.handle_store(req).await
             }
@@ -74,6 +94,90 @@ impl MailboxHttpServer {
                 .body(Body::empty())
                 .unwrap(),
         }
+    }
+
+    /// Handle POST /mailbox/token/{recipient_iid} - Request a bearer token
+    ///
+    /// Request body: { "sender_iid": "...", "validity_hours": 24 }
+    /// Response: { "token": "...", "expires_at": "...", "recipient_iid": "...", "sender_iid": "..." }
+    ///
+    /// This endpoint allows a sender to request a bearer token that allows them
+    /// to store messages in a recipient's mailbox. The sender must first authenticate
+    /// using their identity document token.
+    async fn handle_token_request(self: Arc<Self>, req: Request<Body>) -> Response<Body> {
+        // Check if bearer token generation is enabled
+        let Some(ref generator) = self.bearer_token_generator else {
+            return error_response(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
+                "bearer token endpoint disabled",
+            );
+        };
+
+        // Extract recipient IID from path
+        let Some(recipient_iid) = req.uri().path().strip_prefix("/mailbox/token/") else {
+            return error_response(StatusCode::BAD_REQUEST, "bad_path", "missing recipient iid");
+        };
+        if recipient_iid.is_empty() {
+            return error_response(StatusCode::BAD_REQUEST, "bad_path", "missing recipient iid");
+        }
+        let recipient_iid = recipient_iid.to_string();
+
+        // Authenticate the requester using their identity document token
+        let token = match self.authenticate(&req).await {
+            Ok(token) => token,
+            Err(resp) => return resp,
+        };
+
+        // Parse request body
+        let body = match hyper::body::to_bytes(req.into_body()).await {
+            Ok(bytes) => bytes,
+            Err(_) => return error_response(StatusCode::BAD_REQUEST, "bad_body", "invalid body"),
+        };
+
+        let request: TokenRequest = match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(_) => return error_response(StatusCode::BAD_REQUEST, "bad_body", "invalid json"),
+        };
+
+        // Validate sender_iid in request matches the authenticated token's iid
+        if request.sender_iid != token.iid {
+            return error_response(
+                StatusCode::FORBIDDEN,
+                "sender_mismatch",
+                "sender_iid must match authenticated identity",
+            );
+        }
+
+        // Generate bearer token
+        let (bearer_token, expires_at) = match generator.generate_token(
+            &recipient_iid,
+            &request.sender_iid,
+            request.validity_hours,
+        ) {
+            Ok(result) => result,
+            Err(PostUrbitError::InvalidInput(msg)) => {
+                return error_response(StatusCode::BAD_REQUEST, "invalid_request", msg);
+            }
+            Err(PostUrbitError::InvalidEncoding(msg)) => {
+                return error_response(StatusCode::BAD_REQUEST, "invalid_encoding", msg);
+            }
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "token_generation_failed",
+                    "failed to generate token",
+                );
+            }
+        };
+
+        let response = TokenResponse {
+            token: bearer_token,
+            expires_at,
+            recipient_iid,
+            sender_iid: request.sender_iid,
+        };
+        json_response(StatusCode::OK, &response)
     }
 
     async fn handle_store(self: Arc<Self>, req: Request<Body>) -> Response<Body> {
@@ -401,6 +505,7 @@ mod tests {
         let cfg = MailboxHttpConfig {
             public_url: "https://mailbox.example.com/".to_string(),
             retention_days: 30,
+            bearer_token_secret: Some([42u8; 32]),
         };
 
         let sender_signing = SigningKey::generate(&mut rand::rngs::OsRng);
