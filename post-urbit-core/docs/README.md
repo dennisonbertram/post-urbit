@@ -4,21 +4,27 @@ Post-Urbit is a decentralized personal node infrastructure. You run a node, you 
 
 ## Documentation
 
-### Getting Started
-- [Running a Node](./running-a-node.md) *(coming soon)*
-- [Configuration](./configuration.md) *(coming soon)*
-
 ### Core Concepts
-- [Identity & IIDs](./identity.md) *(coming soon)*
-- [Transport & Connections](./transport.md) *(coming soon)*
-- [Messaging Protocol](./messaging.md) *(coming soon)*
+
+| Document | Description |
+|----------|-------------|
+| [Identity & IIDs](./identity.md) | IID derivation, identity documents, key management, rotation, social recovery |
+| [Transport Layer](./transport.md) | QUIC transport, TLS 1.3, identity handshake, glare resolution, NAT traversal |
+| [Messaging Protocol](./messaging.md) | PUSE envelope format, double ratchet encryption, 1:1 and group messages |
+| [Mailbox & DHT](./mailbox-and-dht.md) | Async message delivery, bearer tokens, distributed hash table |
+| [Sync & Runtime](./sync-and-runtime.md) | CRDT sync protocol, WASM sandbox, app lifecycle, capabilities |
 
 ### Building Apps
-- [**Building Apps Guide**](./apps/building-apps.md) - Complete guide to building WASM apps
+
+| Document | Description |
+|----------|-------------|
+| [Building Apps Guide](./apps/building-apps.md) | Complete guide to building WASM apps with examples |
 
 ### API Reference
-- [HTTP API](./api/http.md) *(coming soon)*
-- [Host API for Apps](./api/host.md) *(coming soon)*
+
+| Document | Description |
+|----------|-------------|
+| [HTTP API Reference](./api/http-api.md) | Complete REST API documentation with examples |
 
 ## Architecture
 
@@ -30,29 +36,33 @@ Post-Urbit is a decentralized personal node infrastructure. You run a node, you 
 │   └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘            │
 │        └───────────┴──────────┴───────────┘                  │
 │                         │                                     │
-│  ┌──────────────────────▼───────────────────────────────┐    │
-│  │                 WASM Runtime                          │    │
-│  │   storage | messaging | contacts | sync | notify     │    │
-│  └──────────────────────┬───────────────────────────────┘    │
+│  ┌──────────────────────▼───────────────────────────────────┐│
+│  │                 WASM Runtime (Sandbox)                    ││
+│  │   storage | messaging | contacts | sync | notify          ││
+│  └──────────────────────┬───────────────────────────────────┘│
 │                         │                                     │
 ├─────────────────────────┼────────────────────────────────────┤
 │                         │           Node Core                 │
-│  ┌──────────────────────▼───────────────────────────────┐    │
-│  │                  HTTP API                             │    │
-│  └──────────────────────┬───────────────────────────────┘    │
+│  ┌──────────────────────▼───────────────────────────────────┐│
+│  │                   HTTP API                                ││
+│  │    /admin/v1/*  (management)   /messages/*  (mailbox)     ││
+│  └──────────────────────┬───────────────────────────────────┘│
 │                         │                                     │
 │  ┌──────────┐ ┌─────────▼──┐ ┌──────────┐ ┌──────────┐       │
 │  │ Identity │ │  Messaging │ │  Mailbox │ │   Sync   │       │
+│  │          │ │  (PUSE)    │ │          │ │  (CRDT)  │       │
 │  └────┬─────┘ └─────┬──────┘ └────┬─────┘ └────┬─────┘       │
 │       └─────────────┼─────────────┴────────────┘             │
 │                     │                                         │
-│  ┌──────────────────▼───────────────────────────────────┐    │
-│  │              QUIC Transport (TLS 1.3)                 │    │
-│  └──────────────────────────────────────────────────────┘    │
+│  ┌──────────────────▼───────────────────────────────────────┐│
+│  │              QUIC Transport (TLS 1.3)                     ││
+│  │   Identity Handshake | Glare Resolution | NAT Traversal   ││
+│  └──────────────────────────────────────────────────────────┘│
 │                         │                                     │
-│  ┌──────────────────────▼───────────────────────────────┐    │
-│  │                    DHT                                │    │
-│  └──────────────────────────────────────────────────────┘    │
+│  ┌──────────────────────▼───────────────────────────────────┐│
+│  │                    DHT                                    ││
+│  │   Identity Lookup | Peer Discovery | Endpoint Resolution  ││
+│  └──────────────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -67,6 +77,34 @@ Post-Urbit is a decentralized personal node infrastructure. You run a node, you 
 4. **Capability-Based Security** - Apps request permissions. You grant only what's needed.
 
 5. **Peer-to-Peer** - Nodes connect directly. No central servers routing your traffic.
+
+## Quick Start
+
+```bash
+# Build the node
+cargo build --release
+
+# Run with a data directory
+./target/release/post-urbit-core --data-dir ./my-node
+
+# Or with Docker
+docker run -v ./data:/data postmesh/post-urbit-core
+```
+
+See the [HTTP API Reference](./api/http-api.md) for endpoint documentation.
+
+## Source Files
+
+| Component | Source | Lines |
+|-----------|--------|-------|
+| Identity | `src/identity.rs` | ~1,700 |
+| Transport | `src/transport.rs` | ~1,600 |
+| Messaging | `src/messaging.rs` | ~500 |
+| Mailbox | `src/mailbox*.rs` | ~900 |
+| DHT | `src/dht.rs` | ~700 |
+| Sync | `src/sync.rs` | ~700 |
+| WASM Runtime | `src/runtime*.rs` | ~1,500 |
+| HTTP API | `src/node_http.rs` | ~2,000 |
 
 ## Quick Links
 
