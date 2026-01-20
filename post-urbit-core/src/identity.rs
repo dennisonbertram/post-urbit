@@ -440,6 +440,26 @@ impl IdentityManager {
     pub fn verify_document(document: &IdentityDocument) -> Result<()> {
         validate_crockford_base32_lower(&document.iid)?;
 
+        // SECURITY: Verify IID is derived from the genesis signing key
+        // This prevents IID hijacking attacks where an attacker publishes
+        // a document with a higher sequence signed by their own key.
+        let genesis_key_bytes = base64_decode(&document.keys.signing.genesis)?;
+        if genesis_key_bytes.len() != 32 {
+            return Err(PostUrbitError::InvalidInput("genesis signing key length"));
+        }
+        let genesis_verifying_key = VerifyingKey::from_bytes(
+            genesis_key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| PostUrbitError::InvalidInput("genesis signing key length"))?,
+        )
+        .map_err(|_| PostUrbitError::InvalidInput("invalid genesis signing key"))?;
+
+        let expected_iid = derive_iid(&genesis_verifying_key);
+        if expected_iid != document.iid {
+            return Err(PostUrbitError::InvalidInput("iid not derived from genesis key"));
+        }
+
         let current_key = base64_decode(&document.keys.signing.current)?;
         if current_key.len() != 32 {
             return Err(PostUrbitError::InvalidInput("signing key length"));
@@ -465,7 +485,32 @@ impl IdentityManager {
         );
         verifying_key
             .verify_strict(&signed_payload, &signature)
-            .map_err(|_| PostUrbitError::Crypto("signature verification failed"))
+            .map_err(|_| PostUrbitError::Crypto("signature verification failed"))?;
+
+        // SECURITY: For documents with sequence > 0, verify key rotation continuity
+        // If the current key differs from genesis, there must be valid key rotation history
+        let sequence = parse_sequence(&document.sequence)?;
+        if sequence > 0 && document.keys.signing.current != document.keys.signing.genesis {
+            // If keys differ from genesis, we need to verify the previous signature
+            // to ensure the key rotation was authorized by the outgoing key
+            if let Some(ref prev_sig) = document.signatures.previous {
+                // Get the previous key - either from keys.signing.previous or the last in history
+                let previous_key = if let Some(ref prev_key) = document.keys.signing.previous {
+                    prev_key.clone()
+                } else {
+                    // No explicit previous key, this is invalid for a rotated document
+                    return Err(PostUrbitError::InvalidInput("key rotation requires previous key"));
+                };
+
+                // Verify the previous signature is valid with the previous key
+                verify_signature_with_key(&signed_payload, prev_sig, &previous_key)?;
+            } else {
+                // No previous signature but keys differ from genesis - invalid
+                return Err(PostUrbitError::InvalidInput("key rotation requires previous signature"));
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn persist(&self) -> Result<()> {
@@ -576,22 +621,54 @@ pub async fn publish_genesis(dht: &dyn Dht, document: &IdentityDocument) -> Resu
 }
 
 pub async fn fetch_identity(dht: &dyn Dht, iid: &str) -> Result<Option<IdentityDocument>> {
+    validate_crockford_base32_lower(iid)?;
+
     let key = dht_key_identity(iid);
     let values = dht.get_all(&key).await?;
     if values.is_empty() {
         return Ok(None);
     }
 
+    // SECURITY: First, try to fetch and validate the genesis document
+    // This establishes the authoritative genesis key for this IID
+    let genesis_key = dht_key_genesis(iid);
+    let genesis_values = dht.get_all(&genesis_key).await?;
+    let verified_genesis: Option<IdentityDocument> = genesis_values.iter().find_map(|value| {
+        let doc = decode_idoc_envelope(value).ok()?;
+        verify_genesis_document(&doc, iid).ok()?;
+        Some(doc)
+    });
+
     let mut best: Option<IdentityDocument> = None;
     let mut best_seq: u64 = 0;
     let mut best_raw: Vec<u8> = Vec::new();
 
     for value in values {
-        let doc = decode_idoc_envelope(&value)?;
+        let doc = match decode_idoc_envelope(&value) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        // SECURITY: Verify the document passes all verification checks
+        // This includes IID-genesis binding and key rotation continuity
         if IdentityManager::verify_document(&doc).is_err() {
             continue;
         }
-        let seq = parse_sequence(&doc.sequence)?;
+
+        // SECURITY: If we have a verified genesis, ensure this document's
+        // genesis key matches the verified genesis document's key
+        if let Some(ref genesis) = verified_genesis {
+            if doc.keys.signing.genesis != genesis.keys.signing.current {
+                // This document claims a different genesis key than the verified genesis
+                // This is an attempted hijack - skip this document
+                continue;
+            }
+        }
+
+        let seq = match parse_sequence(&doc.sequence) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
         if best.is_none() || seq > best_seq {
             best_seq = seq;
             best_raw = value;
@@ -1736,6 +1813,8 @@ mod tests {
                 base64_encode(new_signing_key.verifying_key().as_bytes());
             replacement.keys.encryption.current = base64_encode(new_enc_pub.as_bytes());
             replacement.signatures.current = sign_idoc(&replacement, &new_signing_key).unwrap();
+            // Key rotation requires previous signature for chain verification
+            replacement.signatures.previous = Some(sign_idoc(&replacement, &signing_key).unwrap());
 
             let mut revocation = KeyRevocation {
                 iid: doc.iid.clone(),
@@ -2673,6 +2752,236 @@ mod tests {
             let verifying_key = VerifyingKey::from_bytes(&pubkey_after).unwrap();
             let signature = Signature::from_bytes(&sig_after);
             verifying_key.verify_strict(data, &signature).unwrap();
+        });
+    }
+
+    // ========================================================================
+    // SECURITY TESTS: IID-Genesis Binding and Key Rotation Continuity
+    // ========================================================================
+
+    #[test]
+    fn verify_document_rejects_fake_genesis_key() {
+        // SECURITY TEST: Verify that an attacker cannot hijack an IID by
+        // publishing a document with a fake genesis key that doesn't derive to the IID
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let attacker_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+
+        let legitimate_doc = rt.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            IdentityManager::create_genesis_document(
+                &SigningKey::generate(&mut rand::rngs::OsRng),
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+        })
+        .unwrap();
+
+        // Attacker creates a document claiming to be the legitimate IID
+        // but using their own genesis key
+        let mut fake_doc = legitimate_doc.clone();
+        fake_doc.keys.signing.genesis = base64_encode(attacker_key.verifying_key().as_bytes());
+        fake_doc.keys.signing.current = base64_encode(attacker_key.verifying_key().as_bytes());
+        fake_doc.sequence = "1".to_string(); // Higher sequence to try to override
+        fake_doc.signatures.current = sign_idoc(&fake_doc, &attacker_key).unwrap();
+
+        // This should fail because the IID doesn't match the attacker's genesis key
+        let err = IdentityManager::verify_document(&fake_doc).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn verify_document_rejects_key_rotation_without_previous_signature() {
+        // SECURITY TEST: Key rotation must be authorized by the previous key
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let genesis_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let attacker_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+
+        let genesis_doc = rt.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            IdentityManager::create_genesis_document(
+                &genesis_key,
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+        })
+        .unwrap();
+
+        // Attacker tries to rotate to their key without authorization from genesis key
+        let mut fake_rotation = genesis_doc.clone();
+        fake_rotation.sequence = "1".to_string();
+        fake_rotation.keys.signing.previous = Some(genesis_doc.keys.signing.current.clone());
+        fake_rotation.keys.signing.current = base64_encode(attacker_key.verifying_key().as_bytes());
+        // Attacker only signs with their own key, not with the previous key
+        fake_rotation.signatures.current = sign_idoc(&fake_rotation, &attacker_key).unwrap();
+        fake_rotation.signatures.previous = None; // Missing previous signature!
+
+        // This should fail because key rotation requires previous signature
+        let err = IdentityManager::verify_document(&fake_rotation).unwrap_err();
+        assert!(matches!(err, PostUrbitError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn verify_document_rejects_key_rotation_with_wrong_previous_signature() {
+        // SECURITY TEST: Previous signature must be valid with the claimed previous key
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let genesis_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let attacker_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let random_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+
+        let genesis_doc = rt.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            IdentityManager::create_genesis_document(
+                &genesis_key,
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+        })
+        .unwrap();
+
+        // Attacker tries to rotate to their key with a fake previous signature
+        let mut fake_rotation = genesis_doc.clone();
+        fake_rotation.sequence = "1".to_string();
+        fake_rotation.keys.signing.previous = Some(genesis_doc.keys.signing.current.clone());
+        fake_rotation.keys.signing.current = base64_encode(attacker_key.verifying_key().as_bytes());
+        fake_rotation.signatures.current = sign_idoc(&fake_rotation, &attacker_key).unwrap();
+        // Sign with a random key instead of the actual genesis key
+        fake_rotation.signatures.previous = Some(sign_idoc(&fake_rotation, &random_key).unwrap());
+
+        // This should fail because the previous signature doesn't match the previous key
+        let err = IdentityManager::verify_document(&fake_rotation).unwrap_err();
+        assert!(matches!(err, PostUrbitError::Crypto(_)));
+    }
+
+    #[test]
+    fn verify_document_accepts_valid_key_rotation() {
+        // Positive test: Valid key rotation should be accepted
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let genesis_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let new_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+
+        let genesis_doc = rt.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            IdentityManager::create_genesis_document(
+                &genesis_key,
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+        })
+        .unwrap();
+
+        // Legitimate key rotation
+        let mut rotated = genesis_doc.clone();
+        rotated.sequence = "1".to_string();
+        rotated.keys.signing.previous = Some(genesis_doc.keys.signing.current.clone());
+        rotated.keys.signing.current = base64_encode(new_key.verifying_key().as_bytes());
+        rotated.signatures.current = sign_idoc(&rotated, &new_key).unwrap();
+        rotated.signatures.previous = Some(sign_idoc(&rotated, &genesis_key).unwrap());
+
+        // This should succeed
+        IdentityManager::verify_document(&rotated).unwrap();
+    }
+
+    #[test]
+    fn fetch_identity_rejects_hijack_attempt_with_fake_genesis() {
+        // SECURITY TEST: An attacker publishing a higher-sequence document
+        // with a fake genesis key should be rejected
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dht = MemoryDht::new();
+
+        rt.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let legitimate_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+
+            // Create and publish legitimate genesis document
+            let legitimate_doc = IdentityManager::create_genesis_document(
+                &legitimate_key,
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+            .unwrap();
+
+            publish_genesis(&dht, &legitimate_doc).await.unwrap();
+
+            // Attacker creates a fake document with higher sequence
+            let attacker_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let mut fake_doc = legitimate_doc.clone();
+            fake_doc.keys.signing.genesis = base64_encode(attacker_key.verifying_key().as_bytes());
+            fake_doc.keys.signing.current = base64_encode(attacker_key.verifying_key().as_bytes());
+            fake_doc.sequence = "999".to_string();
+            fake_doc.signatures.current = sign_idoc(&fake_doc, &attacker_key).unwrap();
+
+            // The IID doesn't match attacker's genesis key, so verify_document fails
+            // and the fake document won't be accepted
+            assert!(IdentityManager::verify_document(&fake_doc).is_err());
+
+            // Publish the fake document directly (bypassing verification)
+            let key = dht_key_identity(&legitimate_doc.iid);
+            let envelope = encode_idoc_envelope(&fake_doc).unwrap();
+            dht.put(&key, envelope, Duration::from_secs(3600)).await.unwrap();
+
+            // Fetch should return the legitimate document, not the fake one
+            let fetched = fetch_identity(&dht, &legitimate_doc.iid)
+                .await
+                .unwrap()
+                .unwrap();
+
+            // Should get the legitimate genesis document (sequence 0), not the fake one
+            assert_eq!(fetched.sequence, "0");
+            assert_eq!(fetched.keys.signing.genesis, legitimate_doc.keys.signing.genesis);
+        });
+    }
+
+    #[test]
+    fn fetch_identity_with_genesis_cross_verification() {
+        // Test that fetch_identity correctly cross-verifies with genesis document
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dht = MemoryDht::new();
+
+        rt.block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let genesis_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let new_key = SigningKey::generate(&mut rand::rngs::OsRng);
+            let enc_key = StaticSecret::random_from_rng(rand::rngs::OsRng);
+
+            // Create and publish genesis
+            let genesis_doc = IdentityManager::create_genesis_document(
+                &genesis_key,
+                &enc_key,
+                &tmp.path().join("idoc.json"),
+            )
+            .await
+            .unwrap();
+            publish_genesis(&dht, &genesis_doc).await.unwrap();
+
+            // Create valid rotation and publish
+            let mut rotated = genesis_doc.clone();
+            rotated.sequence = "1".to_string();
+            rotated.keys.signing.previous = Some(genesis_doc.keys.signing.current.clone());
+            rotated.keys.signing.current = base64_encode(new_key.verifying_key().as_bytes());
+            rotated.signatures.current = sign_idoc(&rotated, &new_key).unwrap();
+            rotated.signatures.previous = Some(sign_idoc(&rotated, &genesis_key).unwrap());
+            publish_identity(&dht, &rotated).await.unwrap();
+
+            // Fetch should return the rotated document
+            let fetched = fetch_identity(&dht, &genesis_doc.iid)
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(fetched.sequence, "1");
+            assert_eq!(fetched.keys.signing.current, rotated.keys.signing.current);
+            // Genesis key should be preserved
+            assert_eq!(fetched.keys.signing.genesis, genesis_doc.keys.signing.genesis);
         });
     }
 }

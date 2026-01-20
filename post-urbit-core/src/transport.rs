@@ -115,9 +115,26 @@ impl QuicTransport {
                 if let Ok(connection) = conn.await {
                     println!("New connection from {:?}", connection.remote_address());
 
-                    // Handle the connection with identity handshake
-                    if let Err(e) = Self::handle_connection(connection, identity).await {
-                        eprintln!("Connection error: {}", e);
+                    // Handle the connection with secure identity handshake
+                    match Self::handle_connection(connection.clone(), identity).await {
+                        Ok(handshake_result) => {
+                            println!(
+                                "Authenticated peer {} from {:?}",
+                                handshake_result.peer_iid,
+                                connection.remote_address()
+                            );
+                            // Connection is now authenticated - keep alive for future streams
+                            tokio::spawn(async move {
+                                while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                                    // Process additional streams (identity updates, messaging, etc.)
+                                    let _ = tokio::io::copy(&mut recv, &mut send).await;
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("Connection handshake error: {}", e);
+                            // Connection is not authenticated - it will be dropped
+                        }
                     }
                 }
             });
@@ -129,53 +146,112 @@ impl QuicTransport {
     async fn handle_connection(
         connection: quinn::Connection,
         identity: Arc<IdentityManager>,
-    ) -> Result<()> {
+    ) -> Result<HandshakeResult> {
+        // Extract TLS binding BEFORE accepting streams - this binds identity to this TLS session
+        // and prevents MITM attacks where handshake messages could be transplanted
+        let tls_binding = extract_tls_binding(&connection)?;
+
         // Accept the control stream (first bidirectional stream)
-        let (mut send, _recv) = connection
+        let (mut send, mut recv) = connection
             .accept_bi()
             .await
             .map_err(|err| PostUrbitError::Io(err.to_string()))?;
 
-        // Perform identity handshake (RFC-0002 §5.2)
-        // 1. Receive peer's identity challenge
-        // 2. Sign challenge with our identity key
-        // 3. Send signed response
-        // 4. Verify peer's response
+        // Perform secure identity handshake (RFC-0002 §5.2)
+        // This exchanges identity documents, verifies signatures, and binds to TLS session
+        let handshake_result = execute_server_handshake(
+            &mut send,
+            &mut recv,
+            &identity,
+            tls_binding,
+        ).await?;
 
-        // For now, just echo identity info
-        let identity_info = format!("IID: {}", identity.iid().await);
-        send.write_all(identity_info.as_bytes())
-            .await
-            .map_err(|err| PostUrbitError::Io(err.to_string()))?;
-        send.finish()
-            .await
-            .map_err(|err| PostUrbitError::Io(err.to_string()))?;
+        println!(
+            "Identity handshake completed with peer: {}",
+            handshake_result.peer_iid
+        );
 
-        println!("Identity handshake completed with peer");
-
-        // Keep connection alive for future streams
-        tokio::spawn(async move {
-            // Handle additional streams (identity updates, messaging, etc.)
-            while let Ok((mut send, mut recv)) = connection.accept_bi().await {
-                // Process streams based on type...
-                let _ = tokio::io::copy(&mut recv, &mut send).await;
-            }
-        });
-
-        Ok(())
+        // Return the handshake result - caller can use peer_iid for authorization
+        // and spawn connection handler if needed
+        Ok(handshake_result)
     }
 
+    /// Connect to a peer and perform the identity handshake.
+    ///
+    /// This establishes a QUIC connection, extracts the TLS binding, and performs
+    /// the full identity handshake protocol per RFC-0002 §5.
+    ///
+    /// # Arguments
+    /// * `address` - The socket address of the peer
+    /// * `expected_server_iid` - Optional expected server IID for verification
+    ///
+    /// # Returns
+    /// A tuple of (connection, handshake_result) on success
     pub async fn connect_to_peer(
         &self,
         address: std::net::SocketAddr,
     ) -> Result<quinn::Connection> {
+        // For backward compatibility, call the new secure method without expected IID
+        let (connection, _result) = self.connect_to_peer_secure(address, None).await?;
+        Ok(connection)
+    }
+
+    /// Connect to a peer with full identity verification.
+    ///
+    /// This is the secure connection method that performs the complete identity
+    /// handshake with TLS binding verification.
+    ///
+    /// # Arguments
+    /// * `address` - The socket address of the peer
+    /// * `expected_server_iid` - Optional expected server IID for verification.
+    ///   If provided, the connection will fail if the server's IID doesn't match.
+    ///
+    /// # Returns
+    /// A tuple of (connection, handshake_result) containing the authenticated
+    /// connection and the verified peer identity information.
+    pub async fn connect_to_peer_secure(
+        &self,
+        address: std::net::SocketAddr,
+        expected_server_iid: Option<&str>,
+    ) -> Result<(quinn::Connection, HandshakeResult)> {
+        // Establish QUIC connection
         let connection = self
             .endpoint
             .connect(address, "localhost")
             .map_err(|err| PostUrbitError::Io(err.to_string()))?
             .await
             .map_err(|err| PostUrbitError::Io(err.to_string()))?;
-        Ok(connection)
+
+        // Extract TLS binding - this cryptographically binds our identity handshake
+        // to this specific TLS session, preventing MITM attacks
+        let tls_binding = extract_tls_binding(&connection)?;
+
+        // Open the control stream for handshake
+        let (mut send, mut recv) = connection
+            .open_bi()
+            .await
+            .map_err(|err| PostUrbitError::Io(err.to_string()))?;
+
+        // Perform the identity handshake as client
+        let handshake_result = execute_client_handshake(
+            &mut send,
+            &mut recv,
+            &self.identity,
+            expected_server_iid,
+            tls_binding,
+        ).await?;
+
+        println!(
+            "Connected and authenticated with peer: {}",
+            handshake_result.peer_iid
+        );
+
+        Ok((connection, handshake_result))
+    }
+
+    /// Get the local identity manager
+    pub fn identity(&self) -> &Arc<IdentityManager> {
+        &self.identity
     }
 }
 
@@ -2144,5 +2220,352 @@ mod tests {
         // Should parse successfully
         let parsed = ts.parse::<DateTime<Utc>>();
         assert!(parsed.is_ok());
+    }
+
+    // ===========================================================================
+    // Integration Tests for Secure Handshake (QUIC Transport)
+    // ===========================================================================
+
+    /// Test that QuicTransport can be created successfully
+    #[tokio::test]
+    async fn quic_transport_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let identity = IdentityManager::new(temp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let transport = QuicTransport::new(0, Arc::new(identity)).await;
+        assert!(transport.is_ok());
+    }
+
+    /// Test full client-server handshake over QUIC
+    /// This is the main integration test that verifies the security fix works
+    #[tokio::test]
+    async fn secure_handshake_client_server_integration() {
+        // Create two separate identities (server and client)
+        let server_temp = tempfile::tempdir().unwrap();
+        let client_temp = tempfile::tempdir().unwrap();
+
+        let server_identity = Arc::new(
+            IdentityManager::new(server_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+        let client_identity = Arc::new(
+            IdentityManager::new(client_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+
+        let server_iid = server_identity.iid().await;
+        let client_iid = client_identity.iid().await;
+
+        // They should have different IIDs
+        assert_ne!(server_iid, client_iid);
+
+        // Create server transport on random port
+        let server_transport = Arc::new(
+            QuicTransport::new(0, server_identity.clone())
+                .await
+                .unwrap()
+        );
+
+        // Get the actual bound port and use localhost (127.0.0.1) for connection
+        let local_addr = server_transport.endpoint.local_addr().unwrap();
+        let server_addr = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            local_addr.port()
+        );
+
+        // Create client transport
+        let client_transport = QuicTransport::new(0, client_identity.clone())
+            .await
+            .unwrap();
+
+        // Channel to get server result back
+        let (server_tx, mut server_rx) = tokio::sync::mpsc::channel::<Result<HandshakeResult>>(1);
+
+        // Spawn server acceptor - keeps connection alive via holding the connection object
+        let server_identity_clone = server_identity.clone();
+        tokio::spawn(async move {
+            let conn = server_transport.endpoint.accept().await.unwrap();
+            let connection = conn.await.unwrap();
+
+            // Perform server-side handshake
+            let result = QuicTransport::handle_connection(connection.clone(), server_identity_clone).await;
+            let _ = server_tx.send(result).await;
+
+            // Keep connection alive for a bit to let client finish
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            drop(connection);
+        });
+
+        // Give server a moment to be ready
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Client connects and performs handshake
+        let (_connection, client_result) = client_transport
+            .connect_to_peer_secure(server_addr, None)
+            .await
+            .unwrap();
+
+        // Verify client got server's identity
+        assert_eq!(client_result.peer_iid, server_iid);
+
+        // Wait for server to complete
+        let server_result = server_rx.recv().await.unwrap().unwrap();
+
+        // Verify server got client's identity
+        assert_eq!(server_result.peer_iid, client_iid);
+    }
+
+    /// Test that handshake fails when expected server IID doesn't match
+    #[tokio::test]
+    async fn secure_handshake_rejects_unexpected_server_iid() {
+        let server_temp = tempfile::tempdir().unwrap();
+        let client_temp = tempfile::tempdir().unwrap();
+
+        let server_identity = Arc::new(
+            IdentityManager::new(server_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+        let client_identity = Arc::new(
+            IdentityManager::new(client_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+
+        let server_transport = Arc::new(
+            QuicTransport::new(0, server_identity.clone())
+                .await
+                .unwrap()
+        );
+        let local_addr = server_transport.endpoint.local_addr().unwrap();
+        let server_addr = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            local_addr.port()
+        );
+
+        let client_transport = QuicTransport::new(0, client_identity)
+            .await
+            .unwrap();
+
+        // Spawn server
+        let server_identity_clone = server_identity.clone();
+        tokio::spawn(async move {
+            if let Some(conn) = server_transport.endpoint.accept().await {
+                if let Ok(connection) = conn.await {
+                    let _ = QuicTransport::handle_connection(connection, server_identity_clone).await;
+                }
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Client expects a different server IID - should fail
+        let wrong_iid = "b1n7cfscgashm32xx7eaxw0y09gy0y2v"; // Some random valid IID
+        let result = client_transport
+            .connect_to_peer_secure(server_addr, Some(wrong_iid))
+            .await;
+
+        // Should fail due to IID mismatch
+        assert!(result.is_err());
+    }
+
+    /// Test that TLS binding is properly extracted and used
+    #[tokio::test]
+    async fn tls_binding_extraction_works() {
+        let server_temp = tempfile::tempdir().unwrap();
+        let client_temp = tempfile::tempdir().unwrap();
+
+        let server_identity = Arc::new(
+            IdentityManager::new(server_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+        let client_identity = Arc::new(
+            IdentityManager::new(client_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+
+        let server_transport = Arc::new(
+            QuicTransport::new(0, server_identity.clone())
+                .await
+                .unwrap()
+        );
+        let local_addr = server_transport.endpoint.local_addr().unwrap();
+        let server_addr = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            local_addr.port()
+        );
+
+        let client_transport = QuicTransport::new(0, client_identity)
+            .await
+            .unwrap();
+
+        // Channel to send TLS binding from server
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<[u8; 32]>(1);
+
+        let server_identity_clone = server_identity.clone();
+        tokio::spawn(async move {
+            let conn = server_transport.endpoint.accept().await.unwrap();
+            let connection = conn.await.unwrap();
+
+            // Extract TLS binding on server side
+            let server_binding = extract_tls_binding(&connection).unwrap();
+            tx.send(server_binding).await.unwrap();
+
+            let _ = QuicTransport::handle_connection(connection, server_identity_clone).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Client connects
+        let client_connection = client_transport
+            .endpoint
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+
+        // Extract TLS binding on client side
+        let client_binding = extract_tls_binding(&client_connection).unwrap();
+
+        // Get server's binding
+        let server_binding = rx.recv().await.unwrap();
+
+        // Both sides should have the same TLS binding for the same session
+        assert_eq!(client_binding, server_binding);
+
+        // Binding should not be all zeros
+        assert_ne!(client_binding, [0u8; 32]);
+    }
+
+    /// Test that different connections have different TLS bindings
+    #[tokio::test]
+    async fn different_connections_have_different_tls_bindings() {
+        let server_temp = tempfile::tempdir().unwrap();
+        let client_temp = tempfile::tempdir().unwrap();
+
+        let server_identity = Arc::new(
+            IdentityManager::new(server_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+        let client_identity = Arc::new(
+            IdentityManager::new(client_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+
+        let server_transport = Arc::new(
+            QuicTransport::new(0, server_identity.clone())
+                .await
+                .unwrap()
+        );
+        let local_addr = server_transport.endpoint.local_addr().unwrap();
+        let server_addr = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            local_addr.port()
+        );
+
+        let client_transport = QuicTransport::new(0, client_identity)
+            .await
+            .unwrap();
+
+        // Make first connection
+        let server_transport_clone = server_transport.clone();
+        let server_identity_clone = server_identity.clone();
+        tokio::spawn(async move {
+            let conn = server_transport_clone.endpoint.accept().await.unwrap();
+            let connection = conn.await.unwrap();
+            let _ = QuicTransport::handle_connection(connection.clone(), server_identity_clone).await;
+            // Keep connection alive
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let (connection1, _) = client_transport
+            .connect_to_peer_secure(server_addr, None)
+            .await
+            .unwrap();
+        let binding1 = extract_tls_binding(&connection1).unwrap();
+
+        // Make second connection
+        let server_identity_clone2 = server_identity.clone();
+        tokio::spawn(async move {
+            let conn = server_transport.endpoint.accept().await.unwrap();
+            let connection = conn.await.unwrap();
+            let _ = QuicTransport::handle_connection(connection.clone(), server_identity_clone2).await;
+            // Keep connection alive
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let (connection2, _) = client_transport
+            .connect_to_peer_secure(server_addr, None)
+            .await
+            .unwrap();
+        let binding2 = extract_tls_binding(&connection2).unwrap();
+
+        // Different connections should have different TLS bindings
+        // This proves that replay/transplant attacks would fail
+        assert_ne!(binding1, binding2);
+    }
+
+    /// Test backward compatibility - connect_to_peer still works
+    #[tokio::test]
+    async fn connect_to_peer_backward_compatible() {
+        let server_temp = tempfile::tempdir().unwrap();
+        let client_temp = tempfile::tempdir().unwrap();
+
+        let server_identity = Arc::new(
+            IdentityManager::new(server_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+        let client_identity = Arc::new(
+            IdentityManager::new(client_temp.path().to_str().unwrap())
+                .await
+                .unwrap()
+        );
+
+        let server_transport = Arc::new(
+            QuicTransport::new(0, server_identity.clone())
+                .await
+                .unwrap()
+        );
+        let local_addr = server_transport.endpoint.local_addr().unwrap();
+        let server_addr = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            local_addr.port()
+        );
+
+        let client_transport = QuicTransport::new(0, client_identity)
+            .await
+            .unwrap();
+
+        let server_identity_clone = server_identity.clone();
+        tokio::spawn(async move {
+            let conn = server_transport.endpoint.accept().await.unwrap();
+            let connection = conn.await.unwrap();
+            let _ = QuicTransport::handle_connection(connection.clone(), server_identity_clone).await;
+            // Keep connection alive
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Old API should still work (but now performs handshake internally)
+        let connection = client_transport
+            .connect_to_peer(server_addr)
+            .await
+            .unwrap();
+
+        // Connection should be established and authenticated
+        assert!(!connection.close_reason().is_some());
     }
 }

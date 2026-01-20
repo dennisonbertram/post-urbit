@@ -189,10 +189,73 @@ impl MailboxHttpServer {
         }
         let inbox_owner_iid = inbox_owner_iid.to_string();
 
+        // Authenticate the sender using their identity document token
         let token = match self.authenticate(&req).await {
             Ok(token) => token,
             Err(resp) => return resp,
         };
+
+        // REQ-MSG-086-089: Enforce per-recipient bearer token authorization
+        // The sender must have a valid bearer token for this specific recipient's mailbox
+        let Some(ref generator) = self.bearer_token_generator else {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "bearer_tokens_disabled",
+                "bearer token validation is required but not configured",
+            );
+        };
+
+        // Extract bearer token from X-Mailbox-Bearer-Token header
+        // Format: <token>:<expires_at> (both base64url encoded token and ISO8601 timestamp)
+        let bearer_header = match req.headers().get("X-Mailbox-Bearer-Token") {
+            Some(h) => h,
+            None => {
+                return error_response(
+                    StatusCode::FORBIDDEN,
+                    "missing_bearer_token",
+                    "X-Mailbox-Bearer-Token header required for message storage",
+                );
+            }
+        };
+
+        let bearer_str = match bearer_header.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_bearer_token",
+                    "invalid bearer token header encoding",
+                );
+            }
+        };
+
+        // Parse bearer token header: "token:expires_at"
+        let parts: Vec<&str> = bearer_str.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_bearer_token",
+                "bearer token must be in format 'token:expires_at'",
+            );
+        }
+        let (bearer_token, bearer_expires_at) = (parts[0], parts[1]);
+
+        // Verify the bearer token is valid for this sender and recipient
+        if let Err(e) = generator.verify_token(
+            bearer_token,
+            &inbox_owner_iid,
+            &token.iid,
+            bearer_expires_at,
+        ) {
+            let message = match e {
+                PostUrbitError::InvalidInput(msg) if msg.contains("expired") => {
+                    "bearer token expired"
+                }
+                PostUrbitError::Crypto(_) => "bearer token invalid",
+                _ => "bearer token verification failed",
+            };
+            return error_response(StatusCode::FORBIDDEN, "invalid_bearer_token", message);
+        }
 
         let body = match hyper::body::to_bytes(req.into_body()).await {
             Ok(bytes) => bytes,
@@ -563,10 +626,18 @@ mod tests {
         )
         .unwrap();
 
+        // Generate bearer token for the sender to store messages in recipient's mailbox
+        let generator = MailboxBearerTokenGenerator::new([42u8; 32]);
+        let (bearer_token, bearer_expires) = generator
+            .generate_token(&recipient_doc.iid, &sender_doc.iid, 24)
+            .unwrap();
+        let bearer_header = format!("{}:{}", bearer_token, bearer_expires);
+
         let req = Request::builder()
             .method(Method::POST)
             .uri(format!("/messages/{}", recipient_doc.iid))
             .header(hyper::header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("X-Mailbox-Bearer-Token", &bearer_header)
             .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
             .body(Body::from(envelope))
             .unwrap();
@@ -604,5 +675,218 @@ mod tests {
             .unwrap();
         let resp = server.clone().handle_request(req).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mailbox_http_store_rejects_missing_bearer_token() {
+        let (server, mailbox_url, sender_doc, sender_signing, recipient_doc, _recipient_signing) =
+            setup_server().await;
+
+        let sender_iid_raw = crockford_base32_decode(&sender_doc.iid).unwrap();
+        let sender_iid_raw: [u8; 20] = sender_iid_raw.as_slice().try_into().unwrap();
+        let recipient_iid_raw = crockford_base32_decode(&recipient_doc.iid).unwrap();
+        let recipient_iid_raw: [u8; 20] = recipient_iid_raw.as_slice().try_into().unwrap();
+
+        let header = PUSEHeader {
+            flags: 0,
+            sender_iid: sender_iid_raw,
+            recipient_iid: recipient_iid_raw,
+            message_id: [9u8; 16],
+            header_extension: vec![0x00; 33],
+            nonce: [1u8; 12],
+            ciphertext_length: 0,
+        };
+        let message_key = [7u8; 32];
+        let envelope = build_puse_envelope(&sender_signing, header, &message_key, b"hi")
+            .unwrap();
+
+        let expires_at = Utc::now() + Duration::hours(2);
+        let token = create_mailbox_token(
+            &sender_doc.iid,
+            &mailbox_url,
+            expires_at,
+            [3u8; 16],
+            &sender_signing,
+        )
+        .unwrap();
+
+        // Try to store without bearer token - should be rejected
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/messages/{}", recipient_doc.iid))
+            .header(hyper::header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(envelope))
+            .unwrap();
+        let resp = server.clone().handle_request(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"], "missing_bearer_token");
+    }
+
+    #[tokio::test]
+    async fn mailbox_http_store_rejects_invalid_bearer_token() {
+        let (server, mailbox_url, sender_doc, sender_signing, recipient_doc, _recipient_signing) =
+            setup_server().await;
+
+        let sender_iid_raw = crockford_base32_decode(&sender_doc.iid).unwrap();
+        let sender_iid_raw: [u8; 20] = sender_iid_raw.as_slice().try_into().unwrap();
+        let recipient_iid_raw = crockford_base32_decode(&recipient_doc.iid).unwrap();
+        let recipient_iid_raw: [u8; 20] = recipient_iid_raw.as_slice().try_into().unwrap();
+
+        let header = PUSEHeader {
+            flags: 0,
+            sender_iid: sender_iid_raw,
+            recipient_iid: recipient_iid_raw,
+            message_id: [9u8; 16],
+            header_extension: vec![0x00; 33],
+            nonce: [1u8; 12],
+            ciphertext_length: 0,
+        };
+        let message_key = [7u8; 32];
+        let envelope = build_puse_envelope(&sender_signing, header, &message_key, b"hi")
+            .unwrap();
+
+        let expires_at = Utc::now() + Duration::hours(2);
+        let token = create_mailbox_token(
+            &sender_doc.iid,
+            &mailbox_url,
+            expires_at,
+            [3u8; 16],
+            &sender_signing,
+        )
+        .unwrap();
+
+        // Try with an invalid (forged) bearer token
+        let fake_bearer = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:2025-01-15T12:00:00Z";
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/messages/{}", recipient_doc.iid))
+            .header(hyper::header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("X-Mailbox-Bearer-Token", fake_bearer)
+            .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(envelope))
+            .unwrap();
+        let resp = server.clone().handle_request(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"], "invalid_bearer_token");
+    }
+
+    #[tokio::test]
+    async fn mailbox_http_store_rejects_wrong_recipient_bearer_token() {
+        let (server, mailbox_url, sender_doc, sender_signing, recipient_doc, _recipient_signing) =
+            setup_server().await;
+
+        // Create a third identity to be the "wrong" recipient
+        let wrong_signing = SigningKey::generate(&mut rand::rngs::OsRng);
+        let wrong_enc = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let wrong_doc = identity_doc(&wrong_signing, &wrong_enc);
+
+        let sender_iid_raw = crockford_base32_decode(&sender_doc.iid).unwrap();
+        let sender_iid_raw: [u8; 20] = sender_iid_raw.as_slice().try_into().unwrap();
+        let recipient_iid_raw = crockford_base32_decode(&recipient_doc.iid).unwrap();
+        let recipient_iid_raw: [u8; 20] = recipient_iid_raw.as_slice().try_into().unwrap();
+
+        let header = PUSEHeader {
+            flags: 0,
+            sender_iid: sender_iid_raw,
+            recipient_iid: recipient_iid_raw,
+            message_id: [9u8; 16],
+            header_extension: vec![0x00; 33],
+            nonce: [1u8; 12],
+            ciphertext_length: 0,
+        };
+        let message_key = [7u8; 32];
+        let envelope = build_puse_envelope(&sender_signing, header, &message_key, b"hi")
+            .unwrap();
+
+        let expires_at = Utc::now() + Duration::hours(2);
+        let token = create_mailbox_token(
+            &sender_doc.iid,
+            &mailbox_url,
+            expires_at,
+            [3u8; 16],
+            &sender_signing,
+        )
+        .unwrap();
+
+        // Generate bearer token for a DIFFERENT recipient (wrong_doc) - should be rejected
+        // when trying to store to recipient_doc's mailbox
+        let generator = MailboxBearerTokenGenerator::new([42u8; 32]);
+        let (bearer_token, bearer_expires) = generator
+            .generate_token(&wrong_doc.iid, &sender_doc.iid, 24)
+            .unwrap();
+        let bearer_header = format!("{}:{}", bearer_token, bearer_expires);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/messages/{}", recipient_doc.iid))
+            .header(hyper::header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("X-Mailbox-Bearer-Token", &bearer_header)
+            .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(envelope))
+            .unwrap();
+        let resp = server.clone().handle_request(req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"], "invalid_bearer_token");
+    }
+
+    #[tokio::test]
+    async fn mailbox_http_store_rejects_malformed_bearer_token_header() {
+        let (server, mailbox_url, sender_doc, sender_signing, recipient_doc, _recipient_signing) =
+            setup_server().await;
+
+        let sender_iid_raw = crockford_base32_decode(&sender_doc.iid).unwrap();
+        let sender_iid_raw: [u8; 20] = sender_iid_raw.as_slice().try_into().unwrap();
+        let recipient_iid_raw = crockford_base32_decode(&recipient_doc.iid).unwrap();
+        let recipient_iid_raw: [u8; 20] = recipient_iid_raw.as_slice().try_into().unwrap();
+
+        let header = PUSEHeader {
+            flags: 0,
+            sender_iid: sender_iid_raw,
+            recipient_iid: recipient_iid_raw,
+            message_id: [9u8; 16],
+            header_extension: vec![0x00; 33],
+            nonce: [1u8; 12],
+            ciphertext_length: 0,
+        };
+        let message_key = [7u8; 32];
+        let envelope = build_puse_envelope(&sender_signing, header, &message_key, b"hi")
+            .unwrap();
+
+        let expires_at = Utc::now() + Duration::hours(2);
+        let token = create_mailbox_token(
+            &sender_doc.iid,
+            &mailbox_url,
+            expires_at,
+            [3u8; 16],
+            &sender_signing,
+        )
+        .unwrap();
+
+        // Try with malformed bearer token header (missing colon separator)
+        let malformed_bearer = "just_a_token_without_expiry";
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/messages/{}", recipient_doc.iid))
+            .header(hyper::header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("X-Mailbox-Bearer-Token", malformed_bearer)
+            .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(envelope))
+            .unwrap();
+        let resp = server.clone().handle_request(req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"], "invalid_bearer_token");
     }
 }
