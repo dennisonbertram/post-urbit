@@ -1,6 +1,10 @@
 # Post-Urbit Documentation
 
-Post-Urbit is a decentralized personal node infrastructure. You run a node, you own your data, you control your compute.
+Post-Urbit is your personal server for the decentralized internet. You run a node, you own your data, you control your compute.
+
+## Start Here
+
+**[Introduction: What is Post-Urbit?](./introduction.md)** - The vision, the problem we're solving, and what this enables.
 
 ## Documentation
 
