@@ -142,6 +142,27 @@ input {
   padding: 8px;
   text-align: center;
   font-family: var(--font-geneva);
+  cursor: pointer;
+  user-select: none;
+  border-radius: 2px;
+  transition: background-color 0.1s ease;
+}
+
+.s7-app-tile:hover {
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+.s7-app-tile-selected {
+  background-color: var(--color-highlight) !important;
+  color: var(--color-white);
+}
+
+.s7-app-tile-selected .s7-app-label {
+  color: var(--color-white);
+}
+
+.s7-app-tile-selected .s7-app-status {
+  color: var(--color-white) !important;
 }
 
 .s7-app-icon {
@@ -155,20 +176,40 @@ input {
 
 .s7-app-label {
   font-size: 9px;
+  word-wrap: break-word;
 }
 
 .s7-app-status {
   font-size: 9px;
   margin-top: 4px;
+  color: var(--color-dark-gray);
+}
+
+.s7-app-status-running {
   color: var(--color-success-green);
+  font-weight: bold;
+}
+
+.s7-app-status-error {
+  color: var(--color-error-red);
+  font-weight: bold;
+}
+
+.s7-app-status-disabled {
+  color: var(--color-dark-gray);
 }
 
 .s7-window {
+  position: absolute;
   border: 1px solid var(--color-black);
   background: var(--color-light-gray);
   box-shadow: inset 1px 1px 0 var(--color-white),
     inset -1px -1px 0 var(--color-dark-gray),
     var(--shadow-window);
+  min-width: 300px;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
 }
 
 .s7-titlebar {
@@ -199,6 +240,12 @@ input {
   box-shadow: inset 1px 1px 0 var(--color-white),
     inset -1px -1px 0 var(--color-dark-gray);
   position: relative;
+  cursor: pointer;
+}
+
+.s7-window-control:active {
+  box-shadow: inset -1px -1px 0 var(--color-white),
+    inset 1px 1px 0 var(--color-dark-gray);
 }
 
 .s7-window-zoom::after {
@@ -223,8 +270,10 @@ input {
 }
 
 .s7-window-content {
-  padding: 12px;
+  padding: 0;
   background: var(--color-light-gray);
+  flex: 1;
+  overflow: auto;
 }
 
 .s7-window-footer {
@@ -650,6 +699,38 @@ input {
 
   .s7-desktop-right {
     width: 100%;
+  }
+}
+
+/* Modal overlay for alerts and dialogs */
+.s7-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 20px;
+}
+
+.s7-modal-content {
+  max-width: 500px;
+  width: 100%;
+  animation: s7-modal-fadein 0.15s ease-out;
+}
+
+@keyframes s7-modal-fadein {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

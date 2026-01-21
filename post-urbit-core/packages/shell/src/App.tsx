@@ -1,80 +1,79 @@
-import React from "react";
+import React, { useEffect } from "react";
 import MenuBar from "./components/system7/MenuBar";
-import Window from "./components/system7/Window";
-import Button from "./components/system7/Button";
-import Checkbox from "./components/system7/Checkbox";
-import Radio from "./components/system7/Radio";
-import TextInput from "./components/system7/TextInput";
-import Dropdown from "./components/system7/Dropdown";
-import Slider from "./components/system7/Slider";
-import ProgressBar from "./components/system7/ProgressBar";
-import Alert from "./components/system7/Alert";
 import AppGrid from "./components/shell/AppGrid";
 import StatusBar from "./components/shell/StatusBar";
-import PermissionPrompt from "./components/shell/PermissionPrompt";
+import LoginPrompt from "./components/shell/LoginPrompt";
+import AlertManager from "./components/shell/AlertManager";
+import WindowManager from "./components/shell/WindowManager";
+import { useAuth, useBackendStatus } from "./api/hooks";
+import { WindowProvider } from "./context/WindowContext";
+import { AlertProvider, useAlert } from "./context/AlertContext";
+
+const AppContent = () => {
+  const { isAuthenticated, login, logout } = useAuth();
+  const { isReachable, checking } = useBackendStatus();
+  const { showAlert } = useAlert();
+
+  // Show backend unreachable error
+  useEffect(() => {
+    if (!checking && !isReachable) {
+      showAlert(
+        "stop",
+        "Backend Unreachable",
+        "Unable to connect to the Post-Urbit backend at http://localhost:4433. Please make sure the node is running."
+      );
+    }
+  }, [checking, isReachable, showAlert]);
+
+  // Show loading state while checking backend
+  if (checking) {
+    return (
+      <div className="s7-shell">
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          height: '100vh',
+          padding: '20px',
+        }}>
+          <p>Connecting to backend...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show login prompt if not authenticated
+  if (!isAuthenticated) {
+    return (
+      <div className="s7-shell">
+        <LoginPrompt onLogin={login} />
+      </div>
+    );
+  }
+
+  // Main shell UI
+  return (
+    <WindowProvider>
+      <div className="s7-shell">
+        <MenuBar onLogout={logout} />
+        <div className="s7-desktop">
+          <div className="s7-desktop-grid">
+            <AppGrid />
+          </div>
+          <WindowManager />
+        </div>
+        <StatusBar />
+      </div>
+    </WindowProvider>
+  );
+};
 
 const App = () => {
   return (
-    <div className="s7-shell">
-      <MenuBar />
-      <div className="s7-desktop">
-        <div className="s7-desktop-grid">
-          <AppGrid />
-        </div>
-        <div className="s7-desktop-right">
-          <Window title="System 7 Controls">
-            <div className="s7-form-grid">
-              <div className="s7-form-row">
-                <Button label="Standard" />
-                <Button label="Default" variant="default" />
-                <Button label="Pressed" pressed />
-              </div>
-              <div className="s7-form-row">
-                <Checkbox label="Enable sound" checked />
-                <Checkbox label="Mixed state" mixed />
-                <Checkbox label="Disabled" />
-              </div>
-              <div className="s7-form-row">
-                <Radio label="Option A" selected />
-                <Radio label="Option B" />
-              </div>
-              <div className="s7-form-row">
-                <TextInput placeholder="Type here" value="System 7 input" />
-              </div>
-              <div className="s7-form-row">
-                <Dropdown label="Preferred Network" options={["LocalTalk", "Ethernet", "Offline"]} />
-              </div>
-              <div className="s7-form-row">
-                <Slider label="Volume" />
-              </div>
-              <div className="s7-form-row">
-                <ProgressBar value={65} />
-                <ProgressBar indeterminate />
-              </div>
-            </div>
-          </Window>
-          <div className="s7-dialogs">
-            <Alert
-              type="stop"
-              title="System error"
-              message="This action could not be completed."
-            />
-            <Alert
-              type="caution"
-              title="Low disk space"
-              message="Archive files or empty the Trash to free memory."
-            />
-            <Alert
-              type="note"
-              title="Update complete"
-              message="The system has finished installing updates."
-            />
-            <PermissionPrompt />
-          </div>
-        </div>
-      </div>
-      <StatusBar />
-    </div>
+    <AlertProvider>
+      <AppContent />
+      <AlertManager />
+    </AlertProvider>
   );
 };
 

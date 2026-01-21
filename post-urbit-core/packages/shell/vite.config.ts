@@ -5,6 +5,25 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    strictPort: true
+    strictPort: true,
+    proxy: {
+      // Proxy API requests to the backend
+      '/health': {
+        target: 'http://localhost:4433',
+        changeOrigin: true,
+      },
+      '/metrics': {
+        target: 'http://localhost:4433',
+        changeOrigin: true,
+      },
+      '/admin': {
+        target: 'http://localhost:4433',
+        changeOrigin: true,
+      },
+      '/api': {
+        target: 'http://localhost:4433',
+        changeOrigin: true,
+      },
+    }
   }
 });
