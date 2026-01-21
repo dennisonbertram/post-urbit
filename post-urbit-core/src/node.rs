@@ -13,6 +13,7 @@ use crate::identity::{publish_genesis, publish_identity, IdentityManager};
 use crate::node_config::default_node_settings;
 use crate::health::{HealthState, ReadinessDetails};
 use crate::node_http::{run_http_server, HttpServerConfig, HttpServerState};
+use crate::runtime_wasm::RuntimeManager;
 use crate::scheduler::Scheduler;
 use crate::transport::QuicTransport;
 use crate::error::{PostUrbitError, Result};
@@ -147,6 +148,7 @@ impl PostUrbitNode {
             .await;
         let health = HealthState::new();
         let started_at = std::time::Instant::now();
+        let runtime = Arc::new(tokio::sync::Mutex::new(RuntimeManager::new()));
         let http_state = HttpServerState {
             admin: self.admin.clone(),
             auth,
@@ -161,6 +163,7 @@ impl PostUrbitNode {
             },
             health: health.clone(),
             apps_dir: self.apps_dir.clone(),
+            runtime,
         };
         let http_addr = self.config.http_addr;
         let http_handle = tokio::spawn(async move { run_http_server(http_addr, http_state).await });

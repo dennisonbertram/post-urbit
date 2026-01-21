@@ -16,6 +16,10 @@ pub struct Manifest {
     pub app: AppMetadata,
     pub runtime: RuntimeConfig,
     pub capabilities: CapabilitiesConfig,
+    #[serde(default)]
+    pub secrets: Option<HashMap<String, SecretDeclaration>>,
+    #[serde(default)]
+    pub network: Option<NetworkConfig>,
     pub dependencies: DependenciesConfig,
     pub files: FilesConfig,
 }
@@ -64,6 +68,33 @@ pub struct CapabilitiesConfig {
     pub required: Vec<String>,
     pub optional: Option<Vec<String>>,
     pub reasons: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretDeclaration {
+    pub description: String,
+    pub required: bool,
+    pub inject: SecretInjection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretInjection {
+    pub domains: Vec<String>,
+    pub header: Option<String>,
+    pub header_prefix: Option<String>,
+    pub query_param: Option<String>,
+    pub basic_auth: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    pub rate_limits: Option<HashMap<String, NetworkRateLimit>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkRateLimit {
+    pub requests_per_minute: Option<u32>,
+    pub requests_per_day: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +150,21 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
         if cap.trim().is_empty() {
             return Err(PostUrbitError::InvalidInput("capability format"));
         }
+        validate_network_capability(cap)?;
+    }
+    if let Some(optional) = manifest.capabilities.optional.as_ref() {
+        for cap in optional {
+            if cap.trim().is_empty() {
+                return Err(PostUrbitError::InvalidInput("capability format"));
+            }
+            validate_network_capability(cap)?;
+        }
+    }
+    if let Some(secrets) = manifest.secrets.as_ref() {
+        validate_secret_declarations(secrets, &manifest.capabilities)?;
+    }
+    if let Some(network) = manifest.network.as_ref() {
+        validate_network_config(network)?;
     }
     if !manifest.files.hashes.contains_key(&manifest.runtime.entry) {
         return Err(PostUrbitError::InvalidInput("entry hash missing"));
@@ -130,6 +176,147 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
         validate_sha256_hash(hash)?;
     }
     Ok(())
+}
+
+fn validate_network_capability(cap: &str) -> Result<()> {
+    if !cap.starts_with("network:") {
+        return Ok(());
+    }
+    let mut parts = cap.splitn(3, ':');
+    let _ = parts.next();
+    let protocol = parts.next().unwrap_or_default();
+    let domain = parts.next().unwrap_or_default();
+    if protocol != "https" && protocol != "http" && protocol != "http+https" {
+        return Err(PostUrbitError::InvalidInput("capability format"));
+    }
+    validate_domain_pattern(domain)?;
+    Ok(())
+}
+
+fn validate_secret_declarations(
+    secrets: &HashMap<String, SecretDeclaration>,
+    caps: &CapabilitiesConfig,
+) -> Result<()> {
+    for (name, secret) in secrets {
+        if name.trim().is_empty() {
+            return Err(PostUrbitError::InvalidInput("secret name"));
+        }
+        if secret.description.trim().is_empty() {
+            return Err(PostUrbitError::InvalidInput("secret description"));
+        }
+        validate_secret_injection(&secret.inject, caps)?;
+    }
+    Ok(())
+}
+
+fn validate_secret_injection(inject: &SecretInjection, caps: &CapabilitiesConfig) -> Result<()> {
+    if inject.domains.is_empty() {
+        return Err(PostUrbitError::InvalidInput("secret domains"));
+    }
+    for domain in &inject.domains {
+        validate_domain_pattern(domain)?;
+        if !caps_include_domain(caps, domain) {
+            return Err(PostUrbitError::InvalidInput("secret domain not allowed"));
+        }
+    }
+    let mut methods = 0;
+    if inject.header.is_some() {
+        methods += 1;
+    }
+    if inject.query_param.is_some() {
+        methods += 1;
+    }
+    if inject.basic_auth.unwrap_or(false) {
+        methods += 1;
+    }
+    if methods != 1 {
+        return Err(PostUrbitError::InvalidInput("secret injection method"));
+    }
+    if inject.header_prefix.is_some() && inject.header.is_none() {
+        return Err(PostUrbitError::InvalidInput("secret header prefix"));
+    }
+    Ok(())
+}
+
+fn validate_network_config(network: &NetworkConfig) -> Result<()> {
+    if let Some(rate_limits) = network.rate_limits.as_ref() {
+        for (domain, limits) in rate_limits {
+            validate_domain_pattern(domain)?;
+            if limits.requests_per_minute.is_none() && limits.requests_per_day.is_none() {
+                return Err(PostUrbitError::InvalidInput("rate limit empty"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_domain_pattern(pattern: &str) -> Result<()> {
+    if pattern.is_empty() {
+        return Err(PostUrbitError::InvalidInput("domain pattern"));
+    }
+    if pattern.contains('/') || pattern.contains(':') {
+        return Err(PostUrbitError::InvalidInput("domain pattern"));
+    }
+    let (wildcard, domain) = if let Some(rest) = pattern.strip_prefix("*.") {
+        (true, rest)
+    } else {
+        (false, pattern)
+    };
+    if wildcard && !domain.contains('.') {
+        return Err(PostUrbitError::InvalidInput("domain pattern"));
+    }
+    if domain.parse::<std::net::IpAddr>().is_ok() {
+        return Err(PostUrbitError::InvalidInput("domain pattern"));
+    }
+    for label in domain.split('.') {
+        if label.is_empty() {
+            return Err(PostUrbitError::InvalidInput("domain pattern"));
+        }
+        let mut chars = label.chars();
+        let first = chars.next().unwrap();
+        if first == '-' || !first.is_ascii_alphanumeric() {
+            return Err(PostUrbitError::InvalidInput("domain pattern"));
+        }
+        let mut last = first;
+        for ch in chars {
+            if !(ch.is_ascii_alphanumeric() || ch == '-') {
+                return Err(PostUrbitError::InvalidInput("domain pattern"));
+            }
+            last = ch;
+        }
+        if last == '-' {
+            return Err(PostUrbitError::InvalidInput("domain pattern"));
+        }
+    }
+    Ok(())
+}
+
+fn caps_include_domain(caps: &CapabilitiesConfig, domain: &str) -> bool {
+    let mut all = caps.required.clone();
+    if let Some(optional) = caps.optional.as_ref() {
+        all.extend(optional.iter().cloned());
+    }
+    all.iter().any(|cap| {
+        if !cap.starts_with("network:") {
+            return false;
+        }
+        cap.splitn(3, ':')
+            .nth(2)
+            .map(|pattern| domain_pattern_matches(pattern, domain))
+            .unwrap_or(false)
+    })
+}
+
+fn domain_pattern_matches(pattern: &str, host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let pattern = pattern.to_ascii_lowercase();
+    if let Some(rest) = pattern.strip_prefix("*.") {
+        if host == rest {
+            return false;
+        }
+        return host.ends_with(&format!(".{rest}"));
+    }
+    host == pattern
 }
 
 pub fn verify_package(manifest: &Manifest, files: &HashMap<String, Vec<u8>>) -> Result<()> {
@@ -471,6 +658,8 @@ mod tests {
                 )]),
                 total_size: 0,
             },
+            secrets: None,
+            network: None,
         }
     }
 

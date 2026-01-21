@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ use crate::admin_auth::{
     verify_session_cookie,
 };
 use crate::admin_state::{AdminState, ApiKeyRecord, CachedRepository, SessionRecord};
+use crate::app_secrets::{delete_app_secrets, load_app_secrets, save_app_secrets};
 use crate::admin_types::{
     api_error, AddContactRequest, ApiErrorCode, ApiKey, BackupListEntry, BackupResult, Contact,
     ContactUpdate, CreateApiKeyRequest, CreateApiKeyResponse, Device, DeviceAddResult, IdentityInfo,
@@ -35,6 +37,10 @@ use crate::identity::{IdentityManager, Recovery};
 use crate::metrics;
 use crate::node_backup::{create_backup, restore_backup};
 use crate::node_config::default_node_settings;
+use crate::runtime::{Manifest, SecretDeclaration, parse_manifest};
+use crate::encoding::{base64_decode, base64_encode};
+use crate::network::NetworkLimitsOverride;
+use serde_cbor::Value as CborValue;
 use sha2::Digest;
 
 #[derive(Debug, Clone)]
@@ -55,6 +61,7 @@ pub struct HttpServerState {
     pub config: HttpServerConfig,
     pub health: HealthState,
     pub apps_dir: PathBuf,
+    pub runtime: Arc<tokio::sync::Mutex<crate::runtime_wasm::RuntimeManager>>,
 }
 
 pub async fn run_http_server(addr: SocketAddr, state: HttpServerState) -> Result<()> {
@@ -286,6 +293,35 @@ async fn handle_admin_authed(req: Request<Body>, path: &str, state: Arc<HttpServ
         (&Method::PATCH, path) if path.ends_with("/permissions") && path.starts_with("/admin/v1/apps/") => {
             if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
             handle_patch_app_permissions(req, path, state).await
+        }
+        (&Method::POST, path) if path.ends_with("/start") && path.starts_with("/admin/v1/apps/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
+            handle_start_app(path, state).await
+        }
+        (&Method::POST, path) if path.ends_with("/invoke") && path.starts_with("/admin/v1/apps/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
+            handle_invoke_app(req, path, state).await
+        }
+        (&Method::POST, path) if path.ends_with("/stop") && path.starts_with("/admin/v1/apps/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
+            handle_stop_app(path, state).await
+        }
+        (&Method::GET, path) if path.ends_with("/runtime") && path.starts_with("/admin/v1/apps/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ReadApps) { return resp; }
+            handle_get_app_runtime(path, state).await
+        }
+        (&Method::POST, path) if path.ends_with("/restart") && path.starts_with("/admin/v1/apps/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
+            handle_restart_app(path, state).await
+        }
+        (&Method::GET, path) if path.ends_with("/secrets") && path.starts_with("/admin/v1/apps/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ReadApps) { return resp; }
+            handle_get_app_secrets(path, state).await
+        }
+        (&Method::PUT, path) if path.ends_with("/secrets") && path.starts_with("/admin/v1/apps/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ManageApps) { return resp; }
+            if let Err(resp) = require_fresh_auth(&auth) { return resp; }
+            handle_put_app_secrets(req, path, state).await
         }
         (&Method::GET, path) if path.ends_with("/settings") && path.starts_with("/admin/v1/apps/") => {
             if let Err(resp) = require_permission(&auth, Permission::ReadApps) { return resp; }
@@ -1194,6 +1230,7 @@ async fn handle_install_app(req: Request<Body>, state: Arc<HttpServerState>) -> 
         let mut data = state.admin.data.lock().await;
         data.apps.push(app.clone());
         data.app_sources.insert(app.id.clone(), request.source.clone());
+        upsert_manifest_settings(&mut data, &app.id, &package.manifest);
     }
     let _ = state.admin.persist().await;
     state
@@ -1390,7 +1427,9 @@ async fn handle_update_app(path: &str, state: Arc<HttpServerState>) -> Response<
         app.permissions.granted = required.clone();
         app.permissions.pending = optional.clone();
         app.storage_used = package.manifest.files.total_size;
+        let app_id_for_settings = app.id.clone();
         let updated = app.clone();
+        upsert_manifest_settings(&mut data, &app_id_for_settings, &package.manifest);
         drop(data);
         let _ = state.admin.persist().await;
         let result = UpdateResult {
@@ -1414,6 +1453,20 @@ async fn handle_update_app(path: &str, state: Arc<HttpServerState>) -> Response<
             Some(json!({"app_id": result.app.id, "version": result.app.version})),
         )
         .await;
+        if let Ok(mut runtime) = state.runtime.try_lock() {
+            if runtime.has_app(app_id) {
+                let was_running = runtime.is_running(app_id).unwrap_or(false);
+                let _ = runtime.stop(app_id);
+                let _ = runtime.uninstall(app_id);
+                drop(runtime);
+                if was_running {
+                    let _ = ensure_runtime_app_loaded(app_id, &state).await;
+                    if let Ok(mut runtime) = state.runtime.try_lock() {
+                        let _ = runtime.start(app_id);
+                    }
+                }
+            }
+        }
         return json_response(result);
     }
 
@@ -1435,6 +1488,13 @@ async fn handle_delete_app(req: Request<Body>, path: &str, state: Arc<HttpServer
         data.app_settings.remove(app_id);
         data.app_sources.remove(app_id);
         drop(data);
+        let _ = delete_app_secrets(&state.admin.data_dir, app_id);
+        if let Ok(mut runtime) = state.runtime.try_lock() {
+            if runtime.has_app(app_id) {
+                let _ = runtime.stop(app_id);
+                let _ = runtime.uninstall(app_id);
+            }
+        }
         let app_dir = state.apps_dir.join(app_id);
         let _ = std::fs::remove_dir_all(app_dir);
         if !keep_data {
@@ -1539,6 +1599,132 @@ async fn handle_patch_app_permissions(req: Request<Body>, path: &str, state: Arc
     api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND)
 }
 
+async fn handle_start_app(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/start");
+    let manifest = match ensure_runtime_app_loaded(app_id, &state).await {
+        Ok(manifest) => manifest,
+        Err(resp) => return resp,
+    };
+    let mut runtime = state.runtime.lock().await;
+    if !runtime.is_running(app_id).unwrap_or(false) {
+        if runtime.start(app_id).is_err() {
+            return api_error_response(ApiErrorCode::InternalError, "app start failed", StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+    json_response(json!({
+        "app_id": app_id,
+        "version": manifest.app.version,
+        "running": true
+    }))
+}
+
+async fn handle_invoke_app(req: Request<Body>, path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/invoke");
+    let manifest = match ensure_runtime_app_loaded(app_id, &state).await {
+        Ok(manifest) => manifest,
+        Err(resp) => return resp,
+    };
+    let body = match read_json::<Value>(req, state.config.max_request_body_bytes).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+    let input_bytes = match build_handle_input(body) {
+        Ok(bytes) => bytes,
+        Err(resp) => return resp,
+    };
+    let mut runtime = state.runtime.lock().await;
+    if !runtime.is_running(app_id).unwrap_or(false) {
+        if runtime.start(app_id).is_err() {
+            return api_error_response(ApiErrorCode::InternalError, "app start failed", StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+    let result = runtime.invoke(app_id, input_bytes);
+    let result = match result {
+        Ok(bytes) => bytes,
+        Err(_) => return api_error_response(ApiErrorCode::InternalError, "app invocation failed", StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let payload = if result.is_empty() {
+        json!({"ok": true, "value": null})
+    } else {
+        match serde_cbor::from_slice::<CborValue>(&result) {
+            Ok(cbor_value) => match serde_cbor::value::from_value::<serde_json::Value>(cbor_value) {
+                Ok(json_value) => json!({"ok": true, "value": json_value}),
+                Err(_) => json!({"ok": true, "cbor_base64": base64_encode(&result)}),
+            },
+            Err(_) => json!({"ok": true, "cbor_base64": base64_encode(&result)}),
+        }
+    };
+    json_response(json!({
+        "app_id": app_id,
+        "version": manifest.app.version,
+        "result": payload
+    }))
+}
+
+async fn handle_stop_app(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/stop");
+    let data = state.admin.data.lock().await;
+    if !data.apps.iter().any(|app| app.id == app_id) {
+        return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND);
+    }
+    drop(data);
+    let mut runtime = state.runtime.lock().await;
+    if runtime.is_running(app_id).unwrap_or(false) {
+        let _ = runtime.stop(app_id);
+    }
+    json_response(json!({
+        "app_id": app_id,
+        "running": false
+    }))
+}
+
+async fn handle_get_app_runtime(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/runtime");
+    let data = state.admin.data.lock().await;
+    if !data.apps.iter().any(|app| app.id == app_id) {
+        return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND);
+    }
+    drop(data);
+    let runtime = state.runtime.lock().await;
+    let installed = runtime.has_app(app_id);
+    let running = runtime.is_running(app_id).unwrap_or(false);
+    json_response(json!({
+        "app_id": app_id,
+        "installed": installed,
+        "running": running
+    }))
+}
+
+async fn handle_restart_app(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/restart");
+
+    // Load all data from disk first (no runtime lock held)
+    let data = match load_app_data_from_disk(app_id, &state).await {
+        Ok(data) => data,
+        Err(resp) => return resp,
+    };
+    let manifest = data.manifest.clone();
+
+    // Single runtime lock for stop, uninstall, reinstall, and start
+    let mut runtime = state.runtime.lock().await;
+    if runtime.has_app(app_id) {
+        let _ = runtime.stop(app_id);
+        let _ = runtime.uninstall(app_id);
+    }
+    if let Err(resp) = configure_app_in_runtime(&mut runtime, app_id, &data) {
+        return resp;
+    }
+    if runtime.start(app_id).is_err() {
+        return api_error_response(ApiErrorCode::InternalError, "app restart failed", StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    json_response(json!({
+        "app_id": app_id,
+        "version": manifest.app.version,
+        "running": true
+    }))
+}
+
 async fn handle_clear_app_data(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
     let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/clear-data");
     let storage_dir = state.admin.data_dir.join("apps").join("storage").join(app_id);
@@ -1587,6 +1773,320 @@ async fn handle_put_app_settings(req: Request<Body>, path: &str, state: Arc<Http
     drop(data);
     let _ = state.admin.persist().await;
     json_response(value)
+}
+
+async fn handle_get_app_secrets(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/secrets");
+    let settings = {
+        let data = state.admin.data.lock().await;
+        if !data.apps.iter().any(|app| app.id == app_id) {
+            return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND);
+        }
+        data.app_settings.get(app_id).cloned()
+    };
+    let declarations = match load_secret_declarations(app_id, settings, state.apps_dir.clone()).await {
+        Ok(decls) => decls,
+        Err(resp) => return resp,
+    };
+    let stored = load_app_secrets(&state.admin.data_dir, app_id, &state.auth.session_secret)
+        .unwrap_or_default();
+    let mut response = serde_json::Map::new();
+    for (name, decl) in declarations {
+        let configured = stored.contains_key(&name);
+        response.insert(
+            name,
+            json!({
+                "description": decl.description,
+                "required": decl.required,
+                "configured": configured,
+                "inject": decl.inject
+            }),
+        );
+    }
+    json_response(json!({ "secrets": response }))
+}
+
+async fn handle_put_app_secrets(req: Request<Body>, path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let app_id = path.trim_start_matches("/admin/v1/apps/").trim_end_matches("/secrets");
+    let body = match read_json::<Value>(req, state.config.max_request_body_bytes).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+    {
+        let data = state.admin.data.lock().await;
+        if !data.apps.iter().any(|app| app.id == app_id) {
+            return api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND);
+        }
+    }
+    let settings = {
+        let data = state.admin.data.lock().await;
+        data.app_settings.get(app_id).cloned()
+    };
+    let declarations = match load_secret_declarations(app_id, settings, state.apps_dir.clone()).await {
+        Ok(decls) => decls,
+        Err(resp) => return resp,
+    };
+    if declarations.is_empty() {
+        return api_error_response(ApiErrorCode::ValidationError, "no secrets declared", StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let updates = match parse_secret_updates(body) {
+        Ok(updates) => updates,
+        Err(resp) => return resp,
+    };
+    let updates_for_runtime = updates.clone();
+    for name in updates.keys() {
+        if !declarations.contains_key(name) {
+            return api_error_response(ApiErrorCode::ValidationError, "unknown secret", StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+    let mut stored = load_app_secrets(&state.admin.data_dir, app_id, &state.auth.session_secret)
+        .unwrap_or_default();
+    for (name, value) in updates {
+        match value {
+            Some(value) => {
+                stored.insert(name, value);
+            }
+            None => {
+                stored.remove(&name);
+            }
+        }
+    }
+    if let Err(_) = save_app_secrets(&state.admin.data_dir, app_id, &state.auth.session_secret, &stored) {
+        return api_error_response(ApiErrorCode::InternalError, "secrets save failed", StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    // Sync secrets to runtime - await lock to guarantee sync
+    let mut runtime = state.runtime.lock().await;
+    runtime.set_secret_declarations(app_id, declarations);
+    for (name, value) in updates_for_runtime {
+        match value {
+            Some(value) => runtime.set_secret_value(app_id, &name, value),
+            None => runtime.clear_secret_value(app_id, &name),
+        }
+    }
+    json_response(json!({"updated": true}))
+}
+
+fn upsert_manifest_settings(data: &mut crate::admin_state::AdminData, app_id: &str, manifest: &Manifest) {
+    let entry = data
+        .app_settings
+        .entry(app_id.to_string())
+        .or_insert_with(|| Value::Object(Default::default()));
+    let obj = match entry {
+        Value::Object(map) => map,
+        _ => {
+            *entry = Value::Object(Default::default());
+            match entry {
+                Value::Object(map) => map,
+                _ => return,
+            }
+        }
+    };
+    obj.insert(
+        "manifest".to_string(),
+        json!({
+            "secrets": manifest.secrets,
+            "network": manifest.network,
+        }),
+    );
+}
+
+async fn load_secret_declarations(
+    app_id: &str,
+    settings: Option<Value>,
+    apps_dir: PathBuf,
+) -> std::result::Result<HashMap<String, SecretDeclaration>, Response<Body>> {
+    if let Some(settings) = settings {
+        if let Some(decls) = extract_secret_declarations(&settings) {
+            return Ok(decls);
+        }
+    }
+    let path = apps_dir.join(app_id).join("manifest.json");
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(HashMap::new()),
+    };
+    let manifest = parse_manifest(&bytes).map_err(|_| {
+        api_error_response(ApiErrorCode::InternalError, "manifest read failed", StatusCode::INTERNAL_SERVER_ERROR)
+    })?;
+    Ok(manifest.secrets.unwrap_or_default())
+}
+
+fn extract_secret_declarations(settings: &Value) -> Option<HashMap<String, SecretDeclaration>> {
+    let manifest = settings.get("manifest")?;
+    let secrets = manifest.get("secrets")?.clone();
+    serde_json::from_value(secrets).ok()
+}
+
+fn parse_secret_updates(body: Value) -> std::result::Result<HashMap<String, Option<String>>, Response<Body>> {
+    let secrets = body
+        .get("secrets")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| api_error_response(ApiErrorCode::ValidationError, "invalid secrets payload", StatusCode::UNPROCESSABLE_ENTITY))?;
+    let mut updates = HashMap::new();
+    for (name, value) in secrets {
+        if let Some(text) = value.as_str() {
+            updates.insert(name.to_string(), Some(text.to_string()));
+        } else if value.is_null() {
+            updates.insert(name.to_string(), None);
+        } else {
+            return Err(api_error_response(ApiErrorCode::ValidationError, "invalid secret value", StatusCode::UNPROCESSABLE_ENTITY));
+        }
+    }
+    Ok(updates)
+}
+
+async fn ensure_runtime_app_loaded(
+    app_id: &str,
+    state: &Arc<HttpServerState>,
+) -> std::result::Result<Manifest, Response<Body>> {
+    // Load all data from disk first (no runtime lock held)
+    let data = load_app_data_from_disk(app_id, state).await?;
+    let manifest = data.manifest.clone();
+
+    // Now acquire runtime lock and configure
+    let mut runtime = state.runtime.lock().await;
+    configure_app_in_runtime(&mut runtime, app_id, &data)?;
+
+    Ok(manifest)
+}
+
+async fn load_app_manifest_from_disk(app_id: &str, apps_dir: PathBuf) -> std::result::Result<Manifest, Response<Body>> {
+    let path = apps_dir.join(app_id).join("manifest.json");
+    let bytes = tokio::fs::read(&path).await.map_err(|_| {
+        api_error_response(ApiErrorCode::InternalError, "manifest read failed", StatusCode::INTERNAL_SERVER_ERROR)
+    })?;
+    parse_manifest(&bytes).map_err(|_| {
+        api_error_response(ApiErrorCode::InternalError, "manifest parse failed", StatusCode::INTERNAL_SERVER_ERROR)
+    })
+}
+
+async fn load_app_wasm(
+    app_id: &str,
+    manifest: &Manifest,
+    apps_dir: &Path,
+) -> std::result::Result<Vec<u8>, Response<Body>> {
+    let path = apps_dir.join(app_id).join(&manifest.runtime.entry);
+    tokio::fs::read(&path)
+        .await
+        .map_err(|_| api_error_response(ApiErrorCode::InternalError, "wasm read failed", StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+/// Data needed to load an app into the runtime, collected from disk without holding runtime lock
+struct AppLoadData {
+    manifest: Manifest,
+    wasm_bytes: Vec<u8>,
+    permissions: Vec<String>,
+    secret_values: HashMap<String, String>,
+}
+
+/// Load all app data from disk without acquiring runtime lock
+async fn load_app_data_from_disk(
+    app_id: &str,
+    state: &Arc<HttpServerState>,
+) -> std::result::Result<AppLoadData, Response<Body>> {
+    let permissions = {
+        let data = state.admin.data.lock().await;
+        let app = data
+            .apps
+            .iter()
+            .find(|app| app.id == app_id)
+            .cloned()
+            .ok_or_else(|| api_error_response(ApiErrorCode::NotFound, "app not found", StatusCode::NOT_FOUND))?;
+        app.permissions.granted.clone()
+    };
+    let manifest = load_app_manifest_from_disk(app_id, state.apps_dir.clone()).await?;
+    let wasm_bytes = load_app_wasm(app_id, &manifest, &state.apps_dir).await?;
+    let secret_values = load_app_secrets(&state.admin.data_dir, app_id, &state.auth.session_secret)
+        .unwrap_or_default();
+    Ok(AppLoadData {
+        manifest,
+        wasm_bytes,
+        permissions,
+        secret_values,
+    })
+}
+
+/// Configure an app in the runtime using pre-loaded data. Caller must hold runtime lock.
+fn configure_app_in_runtime(
+    runtime: &mut crate::runtime_wasm::RuntimeManager,
+    app_id: &str,
+    data: &AppLoadData,
+) -> std::result::Result<(), Response<Body>> {
+    if !runtime.has_app(app_id) {
+        runtime
+            .install_with_metadata(
+                app_id,
+                data.wasm_bytes.clone(),
+                &data.manifest.app.version,
+                data.permissions.clone(),
+            )
+            .map_err(|_| api_error_response(ApiErrorCode::InternalError, "runtime install failed", StatusCode::INTERNAL_SERVER_ERROR))?;
+    }
+    if let Some(secrets) = data.manifest.secrets.clone() {
+        runtime.set_secret_declarations(app_id, secrets);
+    }
+    for (name, value) in &data.secret_values {
+        runtime.set_secret_value(app_id, name, value.clone());
+    }
+    if let Some(network) = data.manifest.network.as_ref() {
+        if let Some(limits) = network.rate_limits.as_ref() {
+            let overrides = limits
+                .iter()
+                .map(|(domain, limit)| {
+                    (
+                        domain.clone(),
+                        NetworkLimitsOverride {
+                            requests_per_minute: limit.requests_per_minute,
+                            requests_per_day: limit.requests_per_day,
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            runtime.set_network_limits(app_id, overrides);
+        }
+    }
+    Ok(())
+}
+
+fn build_handle_input(body: Value) -> std::result::Result<Vec<u8>, Response<Body>> {
+    let input_type = body
+        .get("type")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| api_error_response(ApiErrorCode::ValidationError, "missing type", StatusCode::UNPROCESSABLE_ENTITY))?;
+    let action = body.get("action").and_then(|value| value.as_str()).map(|v| v.to_string());
+    let trigger = body.get("trigger").and_then(|value| value.as_str()).map(|v| v.to_string());
+    let callback_id = body
+        .get("callback_id")
+        .and_then(|value| value.as_str())
+        .map(|v| v.to_string());
+    let data_bytes = if let Some(encoded) = body.get("data_base64").and_then(|value| value.as_str()) {
+        base64_decode(encoded)
+            .map_err(|_| api_error_response(ApiErrorCode::ValidationError, "invalid data_base64", StatusCode::UNPROCESSABLE_ENTITY))?
+    } else if let Some(value) = body.get("data") {
+        let cbor_value = serde_cbor::value::to_value(value.clone())
+            .map_err(|_| api_error_response(ApiErrorCode::ValidationError, "invalid data", StatusCode::UNPROCESSABLE_ENTITY))?;
+        serde_cbor::to_vec(&cbor_value)
+            .map_err(|_| api_error_response(ApiErrorCode::ValidationError, "invalid data", StatusCode::UNPROCESSABLE_ENTITY))?
+    } else {
+        Vec::new()
+    };
+    let mut map = BTreeMap::new();
+    map.insert(CborValue::Text("type".to_string()), CborValue::Text(input_type.to_string()));
+    if let Some(action) = action {
+        map.insert(CborValue::Text("action".to_string()), CborValue::Text(action));
+    }
+    if let Some(trigger) = trigger {
+        map.insert(CborValue::Text("trigger".to_string()), CborValue::Text(trigger));
+    }
+    if let Some(callback_id) = callback_id {
+        map.insert(
+            CborValue::Text("callback_id".to_string()),
+            CborValue::Text(callback_id),
+        );
+    }
+    map.insert(CborValue::Text("data".to_string()), CborValue::Bytes(data_bytes));
+    serde_cbor::to_vec(&CborValue::Map(map))
+        .map_err(|_| api_error_response(ApiErrorCode::InternalError, "handle input encode failed", StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 async fn handle_settings(state: Arc<HttpServerState>) -> Response<Body> {
@@ -2825,6 +3325,7 @@ mod tests {
             },
             health: HealthState::new(),
             apps_dir,
+            runtime: Arc::new(tokio::sync::Mutex::new(crate::runtime_wasm::RuntimeManager::new())),
         }
     }
 

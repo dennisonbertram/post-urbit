@@ -1414,7 +1414,7 @@ pub async fn bootstrap_verify(dht: &dyn Dht, iid: &str) -> Result<IdentityDocume
 }
 
 /// Verify a genesis document (sequence = 0) per RFC-0001 §7.1.
-fn verify_genesis_document(doc: &IdentityDocument, expected_iid: &str) -> Result<()> {
+pub(crate) fn verify_genesis_document(doc: &IdentityDocument, expected_iid: &str) -> Result<()> {
     // Verify IID matches
     if doc.iid != expected_iid {
         return Err(PostUrbitError::InvalidInput("genesis iid mismatch"));

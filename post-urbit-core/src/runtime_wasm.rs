@@ -1,16 +1,30 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use chrono::Utc;
 use rand::RngCore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use wasmtime::{Caller, Engine, ExternType, Linker, Module, Store};
+use wasmtime::{Caller, Config, Engine, ExternType, Linker, Module, Store};
+use url::Url;
 
 use crate::error::{PostUrbitError, Result};
-use crate::runtime::CapabilityRegistry;
+use crate::network::{
+    capability_allows, execute_request, normalize_max_response_bytes, normalize_method,
+    normalize_request_timeout, validate_host_not_blocked, validate_network_scheme, NetworkManager,
+    NetworkLimitsOverride, NetworkRequest, DEFAULT_REQUEST_BYTES, MAX_REDIRECTS,
+};
+use crate::network;
+use crate::network_audit::{NetworkAuditEntry, NetworkAuditLog, NetworkOutcome};
+use crate::runtime::{CapabilityRegistry, SecretDeclaration};
+use crate::secrets::SecretStore;
 use crate::sync::encode_cbor;
+
+// Fuel limits to prevent infinite loops and DoS attacks
+const WASM_START_FUEL: u64 = 10_000_000; // Fuel for _start initialization
+const WASM_HANDLE_FUEL: u64 = 100_000_000; // Fuel for handle calls
 
 #[derive(Debug, Clone)]
 struct StoredValue {
@@ -143,6 +157,9 @@ struct HostState {
     messaging: Option<Arc<Mutex<MessagingState>>>,
     installed_apps: Option<Arc<Mutex<HashSet<String>>>>,
     registry: Option<Arc<CapabilityRegistry>>,
+    network_manager: Option<Arc<NetworkManager>>,
+    secret_store: Option<Arc<Mutex<SecretStore>>>,
+    audit_log: Option<Arc<NetworkAuditLog>>,
     identity_iid: Option<String>,
     boot_time: Option<std::time::Instant>,
     call_depth: u8,
@@ -161,6 +178,9 @@ impl HostState {
         messaging: Arc<Mutex<MessagingState>>,
         installed_apps: Arc<Mutex<HashSet<String>>>,
         registry: Arc<CapabilityRegistry>,
+        network_manager: Arc<NetworkManager>,
+        secret_store: Arc<Mutex<SecretStore>>,
+        audit_log: Arc<NetworkAuditLog>,
         identity_iid: Option<String>,
     ) -> Self {
         Self {
@@ -177,6 +197,9 @@ impl HostState {
             messaging: Some(messaging),
             installed_apps: Some(installed_apps),
             registry: Some(registry),
+            network_manager: Some(network_manager),
+            secret_store: Some(secret_store),
+            audit_log: Some(audit_log),
             identity_iid,
             boot_time: Some(std::time::Instant::now()),
             call_depth: 0,
@@ -194,13 +217,19 @@ pub struct RuntimeManager {
     messaging: Arc<Mutex<MessagingState>>,
     installed_apps: Arc<Mutex<HashSet<String>>>,
     registry: Arc<CapabilityRegistry>,
+    network_manager: Arc<NetworkManager>,
+    secret_store: Arc<Mutex<SecretStore>>,
+    audit_log: Arc<NetworkAuditLog>,
     identity_iid: Option<String>,
 }
 
 impl RuntimeManager {
     pub fn new() -> Self {
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        let engine = Engine::new(&config).expect("Failed to create Wasm engine");
         Self {
-            engine: Engine::default(),
+            engine,
             apps: HashMap::new(),
             storage: Arc::new(Mutex::new(HashMap::new())),
             contacts: Arc::new(Mutex::new(ContactsState::default())),
@@ -209,6 +238,9 @@ impl RuntimeManager {
             messaging: Arc::new(Mutex::new(MessagingState::default())),
             installed_apps: Arc::new(Mutex::new(HashSet::new())),
             registry: Arc::new(default_registry()),
+            network_manager: Arc::new(NetworkManager::new()),
+            secret_store: Arc::new(Mutex::new(SecretStore::new())),
+            audit_log: Arc::new(NetworkAuditLog::new()),
             identity_iid: None,
         }
     }
@@ -259,6 +291,74 @@ impl RuntimeManager {
         }
     }
 
+    pub fn set_secret_declarations(
+        &mut self,
+        app_id: &str,
+        secrets: HashMap<String, SecretDeclaration>,
+    ) {
+        if let Ok(mut store) = self.secret_store.lock() {
+            store.set_declarations(app_id, secrets);
+        }
+    }
+
+    pub fn set_secret_value(&mut self, app_id: &str, name: &str, value: String) {
+        if let Ok(mut store) = self.secret_store.lock() {
+            store.set_secret(app_id, name, value);
+        }
+    }
+
+    pub fn set_network_limits(
+        &mut self,
+        app_id: &str,
+        limits: HashMap<String, NetworkLimitsOverride>,
+    ) {
+        self.network_manager.set_app_limits(app_id, limits);
+    }
+
+    pub fn clear_secret_value(&mut self, app_id: &str, name: &str) {
+        if let Ok(mut store) = self.secret_store.lock() {
+            store.remove_secret(app_id, name);
+        }
+    }
+
+    pub fn has_app(&self, app_id: &str) -> bool {
+        self.apps.contains_key(app_id)
+    }
+
+    pub fn invoke(&mut self, app_id: &str, input: Vec<u8>) -> Result<Vec<u8>> {
+        let app = self
+            .apps
+            .get_mut(app_id)
+            .ok_or(PostUrbitError::InvalidInput("app not installed"))?;
+        if !app.running {
+            return Err(PostUrbitError::InvalidInput("app not running"));
+        }
+        let instance = app
+            .instance
+            .as_mut()
+            .ok_or(PostUrbitError::InvalidInput("app not running"))?;
+        let store = &mut instance.store;
+        let handle = instance
+            .instance
+            .get_typed_func::<(i32, i32), i64>(&mut *store, "handle")
+            .map_err(|_| PostUrbitError::InvalidInput("handle export"))?;
+        let alloc = instance
+            .instance
+            .get_typed_func::<i32, i32>(&mut *store, "alloc")
+            .map_err(|_| PostUrbitError::InvalidInput("alloc export"))?;
+
+        let input_len = input.len().min(1_048_576) as i32;
+        let ptr = alloc
+            .call(&mut *store, input_len)
+            .map_err(|_| PostUrbitError::InvalidInput("alloc call"))?;
+        write_memory_store(&mut *store, &instance.instance, ptr, &input[..input_len as usize])?;
+
+        let result = handle
+            .call(&mut *store, (ptr, input_len))
+            .map_err(|_| PostUrbitError::InvalidInput("handle call"))?;
+        decode_handle_result(&mut *store, &instance.instance, result)
+    }
+
     pub fn start(&mut self, app_id: &str) -> Result<()> {
         let app = self
             .apps
@@ -280,6 +380,9 @@ impl RuntimeManager {
                 self.messaging.clone(),
                 self.installed_apps.clone(),
                 self.registry.clone(),
+                self.network_manager.clone(),
+                self.secret_store.clone(),
+                self.audit_log.clone(),
                 self.identity_iid.clone(),
             ),
         );
@@ -287,9 +390,34 @@ impl RuntimeManager {
             .instantiate(&mut store, &app.module)
             .map_err(|_| PostUrbitError::InvalidInput("wasm instantiate"))?;
         if let Some(func) = instance.get_func(&mut store, "_start") {
+            // Add fuel before executing _start to prevent infinite loops
+            store
+                .set_fuel(WASM_START_FUEL)
+                .map_err(|_| PostUrbitError::InvalidInput("wasm fuel"))?;
             func.call(&mut store, &[], &mut [])
-                .map_err(|_| PostUrbitError::InvalidInput("wasm start"))?;
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    let msg_lower = msg.to_lowercase();
+                    // Check for fuel exhaustion via trap or error message
+                    // Wasmtime may return either an explicit fuel message or a trap
+                    // when fuel runs out during execution
+                    let is_fuel_exhausted = msg_lower.contains("fuel")
+                        || msg_lower.contains("out of fuel")
+                        || msg_lower.contains("all fuel consumed")
+                        || e.downcast_ref::<wasmtime::Trap>()
+                            .map(|t| matches!(t, wasmtime::Trap::OutOfFuel))
+                            .unwrap_or(false);
+                    if is_fuel_exhausted {
+                        PostUrbitError::InvalidInput("wasm start: fuel exhausted (possible infinite loop)")
+                    } else {
+                        PostUrbitError::InvalidInput("wasm start")
+                    }
+                })?;
         }
+        // Refuel for subsequent handle calls
+        store
+            .set_fuel(WASM_HANDLE_FUEL)
+            .map_err(|_| PostUrbitError::InvalidInput("wasm fuel"))?;
         app.instance = Some(RuntimeInstance { store, instance });
         app.running = true;
         Ok(())
@@ -345,6 +473,8 @@ fn default_registry() -> CapabilityRegistry {
     registry.register("system.get_deterministic_random", "");
     registry.register("system.get_identity", "system:identity:read");
     registry.register("system.get_app_info", "");
+    registry.register("network.fetch", "network:http");
+    registry.register("network.fetch_json", "network:http");
     registry
 }
 
@@ -423,7 +553,11 @@ fn handle_host_call(
     }
 
     if let Some(capability) = registry.capability_for(method) {
-        if !capability.is_empty() && !state.capabilities.iter().any(|c| c == capability) {
+        if method == "network.fetch" || method == "network.fetch_json" {
+            if !state.capabilities.iter().any(|c| c.starts_with("network:")) {
+                return ResultEnvelope::error("PERMISSION_DENIED", "Capability denied");
+            }
+        } else if !capability.is_empty() && !state.capabilities.iter().any(|c| c == capability) {
             return ResultEnvelope::error("PERMISSION_DENIED", "Capability denied");
         }
     } else {
@@ -450,6 +584,8 @@ fn handle_host_call(
         "system.get_deterministic_random" => system_get_deterministic_random(args, state),
         "system.get_identity" => system_get_identity(state),
         "system.get_app_info" => system_get_app_info(state),
+        "network.fetch" => network_fetch(args, state, false),
+        "network.fetch_json" => network_fetch(args, state, true),
         _ => ResultEnvelope::not_implemented(),
     }
 }
@@ -1156,6 +1292,284 @@ fn notifications_set_badge(args: serde_cbor::Value, state: &mut HostState) -> Re
     ResultEnvelope::ok(cbor_map(Vec::new()))
 }
 
+fn network_fetch(args: serde_cbor::Value, state: &mut HostState, json_body: bool) -> ResultEnvelope {
+    let Some(url_raw) = map_string_field(&args, "url") else {
+        return ResultEnvelope::error("INVALID_REQUEST", "Missing url");
+    };
+    let url = match Url::parse(&url_raw) {
+        Ok(url) => url,
+        Err(_) => return ResultEnvelope::error("INVALID_URL", "Malformed url"),
+    };
+    if let Err(err) = validate_network_scheme(&url) {
+        return ResultEnvelope::error(err.code, &err.message);
+    }
+    let host = match url.host_str() {
+        Some(host) => host.to_string(),
+        None => return ResultEnvelope::error("INVALID_URL", "Missing host"),
+    };
+    if let Err(err) = validate_host_not_blocked(&host) {
+        return ResultEnvelope::error(err.code, &err.message);
+    }
+    let scheme = url.scheme().to_string();
+    if !capability_allows(&state.capabilities, &scheme, &host) {
+        return ResultEnvelope::error("PERMISSION_DENIED", "Capability denied");
+    }
+
+    let method = normalize_method(map_string_field(&args, "method"));
+    let mut headers = map_headers_field(&args, "headers").unwrap_or_default();
+    let timeout = normalize_request_timeout(map_u64_field(&args, "timeout_ms"));
+    let max_response_bytes = normalize_max_response_bytes(map_u64_field(&args, "max_response_bytes"));
+
+    let body = if json_body {
+        map_value_field(&args, "body")
+            .map(|value| network::cbor_json_body_to_bytes(value))
+            .transpose()
+    } else {
+        Ok(map_bytes_field(&args, "body"))
+    };
+    let body = match body {
+        Ok(value) => value,
+        Err(err) => return ResultEnvelope::error(err.code, &err.message),
+    };
+    let body = match network::normalize_request_body(body) {
+        Ok(value) => value,
+        Err(err) => return ResultEnvelope::error(err.code, &err.message),
+    };
+    if let Err(err) = network::validate_request_body_size(body.as_deref(), DEFAULT_REQUEST_BYTES) {
+        return ResultEnvelope::error(err.code, &err.message);
+    }
+
+    let Some(network_manager) = state.network_manager.as_ref() else {
+        return ResultEnvelope::error("NOT_AVAILABLE", "Network unavailable");
+    };
+    let Some(secret_store) = state.secret_store.as_ref() else {
+        return ResultEnvelope::error("NOT_AVAILABLE", "Secrets unavailable");
+    };
+    let Some(audit_log) = state.audit_log.as_ref() else {
+        return ResultEnvelope::error("NOT_AVAILABLE", "Audit log unavailable");
+    };
+
+    let mut current_url = url;
+    let mut current_method = method;
+    let mut current_body = body;
+    let mut current_headers = headers;
+    let mut redirects = 0usize;
+    let mut was_redirected = false;
+
+    loop {
+        let host = match current_url.host_str() {
+            Some(host) => host.to_string(),
+            None => return ResultEnvelope::error("INVALID_URL", "Missing host"),
+        };
+        if let Err(err) = validate_host_not_blocked(&host) {
+            return ResultEnvelope::error(err.code, &err.message);
+        }
+        let scheme = current_url.scheme().to_string();
+        if !capability_allows(&state.capabilities, &scheme, &host) {
+            return ResultEnvelope::error("PERMISSION_DENIED", "Capability denied");
+        }
+
+        let request_size = current_body.as_ref().map(|b| b.len() as u64).unwrap_or(0);
+        if let Err(err) = network_manager.check_request(&state.app_id, &host, request_size) {
+            audit_log.record(NetworkAuditEntry {
+                timestamp: Utc::now(),
+                app_id: state.app_id.clone(),
+                method: current_method.clone(),
+                url: redact_url(&current_url),
+                request_size,
+                status: None,
+                response_size: None,
+                duration_ms: 0,
+                outcome: NetworkOutcome::RateLimited,
+                error_code: Some(err.code.to_string()),
+            });
+            return ResultEnvelope::error(err.code, &err.message);
+        }
+
+        let store = match secret_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return ResultEnvelope::error("NOT_AVAILABLE", "Secrets unavailable");
+            }
+        };
+        let inject_result =
+            store.inject_for_domain(&state.app_id, &host, &mut current_url, &mut current_headers);
+        if let Err(err) = inject_result {
+            audit_log.record(NetworkAuditEntry {
+                timestamp: Utc::now(),
+                app_id: state.app_id.clone(),
+                method: current_method.clone(),
+                url: redact_url(&current_url),
+                request_size,
+                status: None,
+                response_size: None,
+                duration_ms: 0,
+                outcome: NetworkOutcome::Error,
+                error_code: Some(err.code.to_string()),
+            });
+            return ResultEnvelope::error(err.code, &err.message);
+        }
+
+        let request = NetworkRequest {
+            url: current_url.clone(),
+            method: current_method.clone(),
+            headers: current_headers.clone(),
+            body: current_body.clone(),
+            timeout,
+            max_response_bytes,
+        };
+        let started = Instant::now();
+        let response = execute_request(&request);
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let response = match response {
+            Ok(value) => value,
+            Err(err) => {
+                audit_log.record(NetworkAuditEntry {
+                    timestamp: Utc::now(),
+                    app_id: state.app_id.clone(),
+                    method: current_method.clone(),
+                    url: redact_url(&current_url),
+                    request_size,
+                    status: None,
+                    response_size: None,
+                    duration_ms,
+                    outcome: NetworkOutcome::Error,
+                    error_code: Some(err.code.to_string()),
+                });
+                return ResultEnvelope::error(err.code, &err.message);
+            }
+        };
+        let response_size = response.body.len() as u64;
+        if let Err(err) = network_manager.record_response(&state.app_id, &host, response_size) {
+            audit_log.record(NetworkAuditEntry {
+                timestamp: Utc::now(),
+                app_id: state.app_id.clone(),
+                method: current_method.clone(),
+                url: redact_url(&current_url),
+                request_size,
+                status: Some(response.status),
+                response_size: Some(response_size),
+                duration_ms,
+                outcome: NetworkOutcome::RateLimited,
+                error_code: Some(err.code.to_string()),
+            });
+            return ResultEnvelope::error(err.code, &err.message);
+        }
+
+        audit_log.record(NetworkAuditEntry {
+            timestamp: Utc::now(),
+            app_id: state.app_id.clone(),
+            method: current_method.clone(),
+            url: redact_url(&current_url),
+            request_size,
+            status: Some(response.status),
+            response_size: Some(response_size),
+            duration_ms,
+            outcome: NetworkOutcome::Success,
+            error_code: None,
+        });
+
+        if let Some(location) = response.headers.get("location").cloned() {
+            let redirect_status = response.status;
+            if matches!(redirect_status, 301 | 302 | 303 | 307 | 308) {
+                if redirects >= MAX_REDIRECTS {
+                    return ResultEnvelope::error("INVALID_URL", "Too many redirects");
+                }
+                let next_url = match current_url.join(&location) {
+                    Ok(url) => url,
+                    Err(_) => return ResultEnvelope::error("INVALID_URL", "Invalid redirect"),
+                };
+                redirects += 1;
+                was_redirected = true;
+                if redirect_status == 301 || redirect_status == 302 || redirect_status == 303 {
+                    current_method = "GET".to_string();
+                    current_body = None;
+                }
+                current_url = next_url;
+                continue;
+            }
+        }
+
+        if json_body {
+            let parsed = match serde_json::from_slice::<serde_json::Value>(&response.body) {
+                Ok(value) => value,
+                Err(_) => return ResultEnvelope::error("JSON_PARSE_ERROR", "Invalid JSON response"),
+            };
+            let body_value = match network::to_cbor_value(parsed) {
+                Ok(value) => value,
+                Err(err) => return ResultEnvelope::error(err.code, &err.message),
+            };
+            return ResultEnvelope::ok(cbor_map(vec![
+                (
+                    serde_cbor::Value::Text("status".to_string()),
+                    serde_cbor::Value::Integer(response.status as i128),
+                ),
+                (
+                    serde_cbor::Value::Text("headers".to_string()),
+                    cbor_string_map(response.headers),
+                ),
+                (
+                    serde_cbor::Value::Text("body".to_string()),
+                    body_value,
+                ),
+                (
+                    serde_cbor::Value::Text("url".to_string()),
+                    serde_cbor::Value::Text(response.url),
+                ),
+                (
+                    serde_cbor::Value::Text("redirected".to_string()),
+                    serde_cbor::Value::Bool(was_redirected),
+                ),
+            ]));
+        }
+
+        return ResultEnvelope::ok(cbor_map(vec![
+            (
+                serde_cbor::Value::Text("status".to_string()),
+                serde_cbor::Value::Integer(response.status as i128),
+            ),
+            (
+                serde_cbor::Value::Text("status_text".to_string()),
+                serde_cbor::Value::Text(response.status_text),
+            ),
+            (
+                serde_cbor::Value::Text("headers".to_string()),
+                cbor_string_map(response.headers),
+            ),
+            (
+                serde_cbor::Value::Text("body".to_string()),
+                serde_cbor::Value::Bytes(response.body),
+            ),
+            (
+                serde_cbor::Value::Text("url".to_string()),
+                serde_cbor::Value::Text(response.url),
+            ),
+            (
+                serde_cbor::Value::Text("redirected".to_string()),
+                serde_cbor::Value::Bool(was_redirected),
+            ),
+        ]));
+    }
+}
+
+fn redact_url(url: &Url) -> String {
+    let mut redacted = url.clone();
+    let _ = redacted.set_username("");
+    let _ = redacted.set_password(None);
+    redacted.set_path("");
+    redacted.set_query(None);
+    redacted.set_fragment(None);
+    redacted.to_string()
+}
+
+fn cbor_string_map(values: HashMap<String, String>) -> serde_cbor::Value {
+    let entries = values
+        .into_iter()
+        .map(|(key, value)| (serde_cbor::Value::Text(key), serde_cbor::Value::Text(value)))
+        .collect::<Vec<_>>();
+    cbor_map(entries)
+}
+
 fn map_bool_field(value: &serde_cbor::Value, key: &str) -> Option<bool> {
     let serde_cbor::Value::Map(entries) = value else {
         return None;
@@ -1211,6 +1625,16 @@ fn map_bytes_field(value: &serde_cbor::Value, key: &str) -> Option<Vec<u8>> {
     })
 }
 
+fn map_value_field(value: &serde_cbor::Value, key: &str) -> Option<serde_cbor::Value> {
+    let serde_cbor::Value::Map(entries) = value else {
+        return None;
+    };
+    entries.iter().find_map(|(k, v)| match (k, v) {
+        (serde_cbor::Value::Text(name), value) if name == key => Some(value.clone()),
+        _ => None,
+    })
+}
+
 fn map_u64_field(value: &serde_cbor::Value, key: &str) -> Option<u64> {
     let serde_cbor::Value::Map(entries) = value else {
         return None;
@@ -1225,6 +1649,26 @@ fn map_u64_field(value: &serde_cbor::Value, key: &str) -> Option<u64> {
         }
         _ => None,
     })
+}
+
+fn map_headers_field(value: &serde_cbor::Value, key: &str) -> Option<HashMap<String, String>> {
+    let serde_cbor::Value::Map(entries) = value else {
+        return None;
+    };
+    let headers_value = entries.iter().find_map(|(k, v)| match (k, v) {
+        (serde_cbor::Value::Text(name), value) if name == key => Some(value.clone()),
+        _ => None,
+    })?;
+    let serde_cbor::Value::Map(header_entries) = headers_value else {
+        return None;
+    };
+    let mut headers = HashMap::new();
+    for (k, v) in header_entries {
+        if let (serde_cbor::Value::Text(key), serde_cbor::Value::Text(value)) = (k, v) {
+            headers.insert(key, value);
+        }
+    }
+    Some(headers)
 }
 
 fn map_array_text_field(value: &serde_cbor::Value, key: &str) -> Option<Vec<String>> {
@@ -1325,6 +1769,72 @@ fn write_memory(caller: &mut Caller<'_, HostState>, ptr: i32, bytes: &[u8]) -> R
     }
     data[start..end].copy_from_slice(bytes);
     Ok(())
+}
+
+fn write_memory_store(
+    store: &mut Store<HostState>,
+    instance: &wasmtime::Instance,
+    ptr: i32,
+    bytes: &[u8],
+) -> Result<()> {
+    if ptr < 0 {
+        return Err(PostUrbitError::InvalidInput("memory bounds"));
+    }
+    let memory = instance
+        .get_export(&mut *store, "memory")
+        .and_then(|ext| ext.into_memory())
+        .ok_or(PostUrbitError::InvalidInput("memory export"))?;
+    let data = memory.data_mut(store);
+    let start = ptr as usize;
+    let end = start
+        .checked_add(bytes.len())
+        .ok_or(PostUrbitError::InvalidInput("memory bounds"))?;
+    if end > data.len() {
+        return Err(PostUrbitError::InvalidInput("memory bounds"));
+    }
+    data[start..end].copy_from_slice(bytes);
+    Ok(())
+}
+
+fn read_memory_store(
+    store: &mut Store<HostState>,
+    instance: &wasmtime::Instance,
+    ptr: i32,
+    len: i32,
+) -> Result<Vec<u8>> {
+    if ptr < 0 || len < 0 {
+        return Err(PostUrbitError::InvalidInput("memory bounds"));
+    }
+    let memory = instance
+        .get_export(&mut *store, "memory")
+        .and_then(|ext| ext.into_memory())
+        .ok_or(PostUrbitError::InvalidInput("memory export"))?;
+    let data = memory.data(store);
+    let start = ptr as usize;
+    let end = start
+        .checked_add(len as usize)
+        .ok_or(PostUrbitError::InvalidInput("memory bounds"))?;
+    if end > data.len() {
+        return Err(PostUrbitError::InvalidInput("memory bounds"));
+    }
+    Ok(data[start..end].to_vec())
+}
+
+fn decode_handle_result(
+    store: &mut Store<HostState>,
+    instance: &wasmtime::Instance,
+    packed: i64,
+) -> Result<Vec<u8>> {
+    if packed == 0 {
+        return Ok(Vec::new());
+    }
+    let ptr = (packed >> 32) as i32;
+    let len = (packed & 0xFFFF_FFFF) as u32;
+    if ptr == 0 && len > 0 {
+        return Err(PostUrbitError::InvalidInput("memory bounds"));
+    }
+    let len = len.min(1_048_576) as i32;
+    read_memory_store(store, instance, ptr, len)
 }
 
 fn validate_exports(module: &Module) -> Result<()> {
@@ -1487,6 +1997,9 @@ mod tests {
             Arc::new(Mutex::new(MessagingState::default())),
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(default_registry()),
+            Arc::new(NetworkManager::new()),
+            Arc::new(Mutex::new(SecretStore::new())),
+            Arc::new(NetworkAuditLog::new()),
             Some("iid-test".to_string()),
         )
     }
@@ -1570,6 +2083,9 @@ mod tests {
             Arc::new(Mutex::new(MessagingState::default())),
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(default_registry()),
+            Arc::new(NetworkManager::new()),
+            Arc::new(Mutex::new(SecretStore::new())),
+            Arc::new(NetworkAuditLog::new()),
             Some("iid-test".to_string()),
         );
         let result = handle_host_call("contacts.list", cbor_map_test(Vec::new()), &mut state);
@@ -1692,5 +2208,628 @@ mod tests {
         let result = handle_host_call("notifications.show", args, &mut state);
         assert!(!result.ok);
         assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn wasm_start_fuel_exhaustion_returns_clear_error() {
+        // Create a wasm module with an infinite loop in _start
+        let wat = r#"
+        (module
+          (memory (export "memory") 1)
+          (func (export "_start") (loop br 0))
+          (func (export "handle") (param i32 i32) (result i64) (i64.const 0))
+          (func (export "get_error") (result i64) (i64.const 0))
+          (func (export "alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "dealloc") (param i32 i32))
+        )
+        "#;
+        let wasm = wat::parse_str(wat).expect("failed to parse WAT");
+
+        let mut rt = RuntimeManager::new();
+        rt.install("infinite_loop_app", wasm).unwrap();
+
+        // Measure execution time to verify fuel mechanism prevents infinite loop
+        let start_time = std::time::Instant::now();
+        let err = rt.start("infinite_loop_app").unwrap_err();
+        let elapsed = start_time.elapsed();
+
+        // The test should complete quickly (< 1 second) due to fuel exhaustion
+        // Without fuel, this would hang forever
+        assert!(
+            elapsed.as_secs() < 5,
+            "Test took too long ({:?}), fuel mechanism may not be working",
+            elapsed
+        );
+
+        // Verify the error message contains "fuel exhausted" or similar
+        match err {
+            PostUrbitError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("fuel exhausted") || msg.contains("fuel"),
+                    "Expected error message to contain 'fuel exhausted', got: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected InvalidInput error, got: {:?}", other),
+        }
+    }
+
+    // ==================== Network Capability Tests ====================
+
+    #[test]
+    fn network_fetch_requires_network_capability() {
+        let mut state = build_state(vec!["storage:app".to_string()]); // No network capability
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("https://api.example.com/v1".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn network_fetch_validates_domain_against_capability() {
+        // Has capability for api.example.com but tries to access api.other.com
+        let mut state = build_state(vec!["network:https:api.example.com".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("https://api.other.com/v1".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn network_fetch_blocks_localhost() {
+        let mut state = build_state(vec!["network:https:localhost".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("https://localhost/api".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "BLOCKED_DOMAIN");
+    }
+
+    #[test]
+    fn network_fetch_blocks_private_ip_127() {
+        let mut state = build_state(vec!["network:https:127.0.0.1".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("https://127.0.0.1/api".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "BLOCKED_DOMAIN");
+    }
+
+    #[test]
+    fn network_fetch_blocks_private_ip_10() {
+        let mut state = build_state(vec!["network:https:10.0.0.1".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("https://10.0.0.1/api".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "BLOCKED_DOMAIN");
+    }
+
+    #[test]
+    fn network_fetch_blocks_private_ip_192_168() {
+        let mut state = build_state(vec!["network:https:192.168.1.1".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("https://192.168.1.1/api".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "BLOCKED_DOMAIN");
+    }
+
+    #[test]
+    fn network_fetch_blocks_metadata_endpoints() {
+        let mut state = build_state(vec!["network:http:metadata.google.internal".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("http://metadata.google.internal/computeMetadata/v1/".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "BLOCKED_DOMAIN");
+    }
+
+    #[test]
+    fn network_fetch_rejects_invalid_url() {
+        let mut state = build_state(vec!["network:https:api.example.com".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("not-a-valid-url".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "INVALID_URL");
+    }
+
+    #[test]
+    fn network_fetch_rejects_non_http_scheme() {
+        let mut state = build_state(vec!["network:https:example.com".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("ftp://example.com/file".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "INVALID_URL");
+    }
+
+    #[test]
+    fn network_fetch_https_capability_rejects_http() {
+        // Has https capability but tries http
+        let mut state = build_state(vec!["network:https:api.example.com".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("http://api.example.com/v1".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn network_fetch_wildcard_capability_matches_subdomains() {
+        // *.example.com should match api.example.com
+        let mut state = build_state(vec!["network:https:*.example.com".to_string()]);
+        // We can't actually make the request, but we can verify domain matching
+        // by checking that it doesn't fail with PERMISSION_DENIED
+        // (it will fail later with NETWORK_ERROR due to DNS, which is expected)
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("https://api.example.com/v1".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        // Should NOT be permission denied - domain matches wildcard
+        if !result.ok {
+            assert_ne!(result.error.as_ref().unwrap().code, "PERMISSION_DENIED");
+        }
+    }
+
+    #[test]
+    fn network_fetch_wildcard_does_not_match_base_domain() {
+        // *.example.com should NOT match example.com (only subdomains)
+        let mut state = build_state(vec!["network:https:*.example.com".to_string()]);
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("https://example.com/v1".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
+    }
+
+    #[test]
+    fn network_fetch_json_requires_capability() {
+        let mut state = build_state(vec!["storage:app".to_string()]); // No network capability
+        let args = cbor_map_test(vec![
+            ("url", CborValue::Text("https://api.example.com/v1".to_string())),
+        ]);
+        let result = handle_host_call("network.fetch_json", args, &mut state);
+        assert!(!result.ok);
+        assert_eq!(result.error.unwrap().code, "PERMISSION_DENIED");
+    }
+
+    // ==================== Secret Injection Tests ====================
+
+    #[test]
+    fn secret_store_injects_header() {
+        use crate::runtime::SecretDeclaration;
+        use crate::runtime::SecretInjection;
+        use url::Url;
+
+        let mut store = SecretStore::new();
+        let mut declarations = HashMap::new();
+        declarations.insert(
+            "api_key".to_string(),
+            SecretDeclaration {
+                description: "API key".to_string(),
+                required: true,
+                inject: SecretInjection {
+                    domains: vec!["api.example.com".to_string()],
+                    header: Some("x-api-key".to_string()),
+                    header_prefix: None,
+                    query_param: None,
+                    basic_auth: None,
+                },
+            },
+        );
+        store.set_declarations("test-app", declarations);
+        store.set_secret("test-app", "api_key", "secret-value".to_string());
+
+        let mut url = Url::parse("https://api.example.com/v1").unwrap();
+        let mut headers = HashMap::new();
+        store.inject_for_domain("test-app", "api.example.com", &mut url, &mut headers).unwrap();
+
+        assert_eq!(headers.get("x-api-key"), Some(&"secret-value".to_string()));
+    }
+
+    #[test]
+    fn secret_store_injects_header_with_prefix() {
+        use crate::runtime::SecretDeclaration;
+        use crate::runtime::SecretInjection;
+        use url::Url;
+
+        let mut store = SecretStore::new();
+        let mut declarations = HashMap::new();
+        declarations.insert(
+            "token".to_string(),
+            SecretDeclaration {
+                description: "Bearer token".to_string(),
+                required: true,
+                inject: SecretInjection {
+                    domains: vec!["api.example.com".to_string()],
+                    header: Some("authorization".to_string()),
+                    header_prefix: Some("Bearer ".to_string()),
+                    query_param: None,
+                    basic_auth: None,
+                },
+            },
+        );
+        store.set_declarations("test-app", declarations);
+        store.set_secret("test-app", "token", "my-token".to_string());
+
+        let mut url = Url::parse("https://api.example.com/v1").unwrap();
+        let mut headers = HashMap::new();
+        store.inject_for_domain("test-app", "api.example.com", &mut url, &mut headers).unwrap();
+
+        assert_eq!(headers.get("authorization"), Some(&"Bearer my-token".to_string()));
+    }
+
+    #[test]
+    fn secret_store_injects_query_param() {
+        use crate::runtime::SecretDeclaration;
+        use crate::runtime::SecretInjection;
+        use url::Url;
+
+        let mut store = SecretStore::new();
+        let mut declarations = HashMap::new();
+        declarations.insert(
+            "key".to_string(),
+            SecretDeclaration {
+                description: "API key".to_string(),
+                required: false,
+                inject: SecretInjection {
+                    domains: vec!["api.example.com".to_string()],
+                    header: None,
+                    header_prefix: None,
+                    query_param: Some("api_key".to_string()),
+                    basic_auth: None,
+                },
+            },
+        );
+        store.set_declarations("test-app", declarations);
+        store.set_secret("test-app", "key", "secret123".to_string());
+
+        let mut url = Url::parse("https://api.example.com/v1").unwrap();
+        let mut headers = HashMap::new();
+        store.inject_for_domain("test-app", "api.example.com", &mut url, &mut headers).unwrap();
+
+        assert!(url.query().unwrap().contains("api_key=secret123"));
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn secret_store_injects_basic_auth() {
+        use crate::runtime::SecretDeclaration;
+        use crate::runtime::SecretInjection;
+        use url::Url;
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+        let mut store = SecretStore::new();
+        let mut declarations = HashMap::new();
+        declarations.insert(
+            "password".to_string(),
+            SecretDeclaration {
+                description: "Password".to_string(),
+                required: true,
+                inject: SecretInjection {
+                    domains: vec!["api.example.com".to_string()],
+                    header: None,
+                    header_prefix: None,
+                    query_param: None,
+                    basic_auth: Some(true),
+                },
+            },
+        );
+        store.set_declarations("test-app", declarations);
+        store.set_secret("test-app", "password", "secret-pass".to_string());
+
+        let mut url = Url::parse("https://api.example.com/v1").unwrap();
+        let mut headers = HashMap::new();
+        store.inject_for_domain("test-app", "api.example.com", &mut url, &mut headers).unwrap();
+
+        let expected = format!("Basic {}", BASE64_STANDARD.encode(":secret-pass"));
+        assert_eq!(headers.get("authorization"), Some(&expected));
+    }
+
+    #[test]
+    fn secret_store_respects_domain_scope() {
+        use crate::runtime::SecretDeclaration;
+        use crate::runtime::SecretInjection;
+        use url::Url;
+
+        let mut store = SecretStore::new();
+        let mut declarations = HashMap::new();
+        declarations.insert(
+            "api_key".to_string(),
+            SecretDeclaration {
+                description: "API key".to_string(),
+                required: true,
+                inject: SecretInjection {
+                    domains: vec!["api.example.com".to_string()], // Only for this domain
+                    header: Some("x-api-key".to_string()),
+                    header_prefix: None,
+                    query_param: None,
+                    basic_auth: None,
+                },
+            },
+        );
+        store.set_declarations("test-app", declarations);
+        store.set_secret("test-app", "api_key", "secret-value".to_string());
+
+        // Try to inject for a different domain - should not inject
+        let mut url = Url::parse("https://other.example.com/v1").unwrap();
+        let mut headers = HashMap::new();
+        store.inject_for_domain("test-app", "other.example.com", &mut url, &mut headers).unwrap();
+
+        // No header should be injected
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn secret_store_required_secret_missing_returns_error() {
+        use crate::runtime::SecretDeclaration;
+        use crate::runtime::SecretInjection;
+        use url::Url;
+
+        let mut store = SecretStore::new();
+        let mut declarations = HashMap::new();
+        declarations.insert(
+            "api_key".to_string(),
+            SecretDeclaration {
+                description: "API key".to_string(),
+                required: true, // Required!
+                inject: SecretInjection {
+                    domains: vec!["api.example.com".to_string()],
+                    header: Some("x-api-key".to_string()),
+                    header_prefix: None,
+                    query_param: None,
+                    basic_auth: None,
+                },
+            },
+        );
+        store.set_declarations("test-app", declarations);
+        // Note: NOT setting the secret value
+
+        let mut url = Url::parse("https://api.example.com/v1").unwrap();
+        let mut headers = HashMap::new();
+        let result = store.inject_for_domain("test-app", "api.example.com", &mut url, &mut headers);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, "SECRET_NOT_CONFIGURED");
+    }
+
+    #[test]
+    fn secret_store_optional_secret_missing_is_ok() {
+        use crate::runtime::SecretDeclaration;
+        use crate::runtime::SecretInjection;
+        use url::Url;
+
+        let mut store = SecretStore::new();
+        let mut declarations = HashMap::new();
+        declarations.insert(
+            "api_key".to_string(),
+            SecretDeclaration {
+                description: "API key".to_string(),
+                required: false, // Optional
+                inject: SecretInjection {
+                    domains: vec!["api.example.com".to_string()],
+                    header: Some("x-api-key".to_string()),
+                    header_prefix: None,
+                    query_param: None,
+                    basic_auth: None,
+                },
+            },
+        );
+        store.set_declarations("test-app", declarations);
+        // Note: NOT setting the secret value
+
+        let mut url = Url::parse("https://api.example.com/v1").unwrap();
+        let mut headers = HashMap::new();
+        let result = store.inject_for_domain("test-app", "api.example.com", &mut url, &mut headers);
+
+        // Should succeed, just no injection
+        assert!(result.is_ok());
+        assert!(headers.is_empty());
+    }
+
+    // ==================== Rate Limiting Tests ====================
+
+    #[test]
+    fn rate_limiter_allows_requests_under_limit() {
+        let manager = NetworkManager::new();
+        // Default is 100 requests per minute
+        for _ in 0..50 {
+            let result = manager.check_request("test-app", "api.example.com", 100);
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn rate_limiter_blocks_after_limit() {
+        let manager = NetworkManager::new();
+        // Default is 100 requests per minute
+        for _ in 0..100 {
+            let _ = manager.check_request("test-app", "api.example.com", 0);
+        }
+        // 101st request should be blocked
+        let result = manager.check_request("test-app", "api.example.com", 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, "RATE_LIMITED");
+    }
+
+    #[test]
+    fn rate_limiter_tracks_per_app_per_domain() {
+        let manager = NetworkManager::new();
+        // Max out app1's requests to domain1
+        for _ in 0..100 {
+            let _ = manager.check_request("app1", "domain1.com", 0);
+        }
+        // app1 -> domain1 is now blocked
+        assert!(manager.check_request("app1", "domain1.com", 0).is_err());
+
+        // But app1 -> domain2 should still work
+        assert!(manager.check_request("app1", "domain2.com", 0).is_ok());
+
+        // And app2 -> domain1 should still work
+        assert!(manager.check_request("app2", "domain1.com", 0).is_ok());
+    }
+
+    #[test]
+    fn rate_limiter_respects_byte_limits() {
+        let manager = NetworkManager::new();
+        // Default is 100MB per day
+        // Send a large request that exceeds the limit
+        let huge_size = 101 * 1024 * 1024; // 101 MB
+        let result = manager.check_request("test-app", "api.example.com", huge_size);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, "RATE_LIMITED");
+    }
+
+    #[test]
+    fn rate_limiter_custom_limits() {
+        let manager = NetworkManager::new();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "api.example.com".to_string(),
+            NetworkLimitsOverride {
+                requests_per_minute: Some(5),
+                requests_per_day: Some(10),
+            },
+        );
+        manager.set_app_limits("test-app", overrides);
+
+        // Should allow 5 requests
+        for _ in 0..5 {
+            assert!(manager.check_request("test-app", "api.example.com", 0).is_ok());
+        }
+        // 6th should fail
+        assert!(manager.check_request("test-app", "api.example.com", 0).is_err());
+    }
+
+    // ==================== Audit Logging Tests ====================
+
+    #[test]
+    fn audit_log_records_entries() {
+        let log = NetworkAuditLog::new();
+        log.record(NetworkAuditEntry {
+            timestamp: Utc::now(),
+            app_id: "test-app".to_string(),
+            method: "GET".to_string(),
+            url: "https://api.example.com/".to_string(),
+            request_size: 0,
+            status: Some(200),
+            response_size: Some(1024),
+            duration_ms: 150,
+            outcome: NetworkOutcome::Success,
+            error_code: None,
+        });
+
+        let entries = log.list(None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].app_id, "test-app");
+        assert_eq!(entries[0].status, Some(200));
+    }
+
+    #[test]
+    fn audit_log_filters_by_app() {
+        let log = NetworkAuditLog::new();
+        log.record(NetworkAuditEntry {
+            timestamp: Utc::now(),
+            app_id: "app1".to_string(),
+            method: "GET".to_string(),
+            url: "https://example.com/".to_string(),
+            request_size: 0,
+            status: Some(200),
+            response_size: Some(100),
+            duration_ms: 50,
+            outcome: NetworkOutcome::Success,
+            error_code: None,
+        });
+        log.record(NetworkAuditEntry {
+            timestamp: Utc::now(),
+            app_id: "app2".to_string(),
+            method: "POST".to_string(),
+            url: "https://other.com/".to_string(),
+            request_size: 100,
+            status: Some(201),
+            response_size: Some(50),
+            duration_ms: 100,
+            outcome: NetworkOutcome::Success,
+            error_code: None,
+        });
+
+        let all = log.list(None);
+        assert_eq!(all.len(), 2);
+
+        let app1_only = log.list(Some("app1"));
+        assert_eq!(app1_only.len(), 1);
+        assert_eq!(app1_only[0].app_id, "app1");
+
+        let app2_only = log.list(Some("app2"));
+        assert_eq!(app2_only.len(), 1);
+        assert_eq!(app2_only[0].app_id, "app2");
+    }
+
+    #[test]
+    fn audit_log_records_errors() {
+        let log = NetworkAuditLog::new();
+        log.record(NetworkAuditEntry {
+            timestamp: Utc::now(),
+            app_id: "test-app".to_string(),
+            method: "GET".to_string(),
+            url: "https://blocked.local/".to_string(),
+            request_size: 0,
+            status: None,
+            response_size: None,
+            duration_ms: 0,
+            outcome: NetworkOutcome::Blocked,
+            error_code: Some("BLOCKED_DOMAIN".to_string()),
+        });
+
+        let entries = log.list(None);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0].outcome, NetworkOutcome::Blocked));
+        assert_eq!(entries[0].error_code, Some("BLOCKED_DOMAIN".to_string()));
+    }
+
+    // ==================== Network Module Unit Tests ====================
+
+    #[test]
+    fn blocked_hosts_include_cloud_metadata() {
+        use crate::network::is_blocked_host;
+        assert!(is_blocked_host("localhost"));
+        assert!(is_blocked_host("metadata.google.internal"));
+        assert!(is_blocked_host("metadata.azure.com"));
+        assert!(is_blocked_host("instance-data.ec2.internal"));
+        assert!(!is_blocked_host("api.example.com"));
+    }
+
+    #[test]
+    fn blocked_ips_include_link_local() {
+        use crate::network::is_blocked_ip;
+        use std::net::{IpAddr, Ipv4Addr};
+        // AWS/GCP/Azure metadata IP
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))));
+        // Alibaba Cloud metadata
+        assert!(is_blocked_ip(IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200))));
+    }
+
+    #[test]
+    fn http_plus_https_capability_allows_both() {
+        use crate::network::capability_allows;
+        let caps = vec!["network:http+https:api.example.com".to_string()];
+        assert!(capability_allows(&caps, "http", "api.example.com"));
+        assert!(capability_allows(&caps, "https", "api.example.com"));
     }
 }

@@ -64,6 +64,9 @@ pub mod node;
 pub mod messaging;
 pub mod sync;
 pub mod runtime;
+pub mod network;
+pub mod secrets;
+pub mod network_audit;
 pub mod node_config;
 pub mod node_backup;
 pub mod node_http;
@@ -89,5 +92,6 @@ pub mod admin_auth;
 pub mod app_store;
 pub mod event_bus;
 pub mod scheduler;
+pub mod app_secrets;
 
 pub use crate::node::{PostUrbitNode, NodeConfig};
