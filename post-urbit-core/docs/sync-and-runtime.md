@@ -584,6 +584,8 @@ The default registry maps methods to required capabilities:
 | `system.get_identity` | `system:identity:read` |
 | `system.get_app_info` | *(no capability)* |
 | `app.invoke` | `app:invoke:any` or `app:invoke:{target_app}` |
+| `network.fetch` | `network:https:{domain}` or `network:http:{domain}` |
+| `network.fetch_json` | `network:https:{domain}` or `network:http:{domain}` |
 
 #### Capability Enforcement
 
@@ -894,6 +896,104 @@ system.get_app_info               {} -> { app_id: string, version: string, insta
 app.invoke { target_app: string, method: string, args: bytes } -> { result: bytes }
 ```
 
+### Network API
+
+Apps can make HTTP/HTTPS requests to explicitly declared domains.
+
+**Source**: `src/network.rs`, `src/secrets.rs`, `src/network_audit.rs`
+
+#### Capability Format
+
+```
+network:<protocol>:<domain_pattern>
+
+Examples:
+  network:https:api.anthropic.com       # Exact domain, HTTPS only
+  network:https:*.example.com           # Wildcard subdomain
+  network:http+https:legacy.api.com     # Both HTTP and HTTPS
+```
+
+#### Methods
+
+```
+network.fetch {
+    url: string,                    // Full URL
+    method: string,                 // GET, POST, PUT, DELETE, PATCH, HEAD (default: GET)
+    headers: Map<string, string>,   // Request headers
+    body: bytes,                    // Request body
+    timeout_ms: u32,                // Timeout (default: 30000, max: 300000)
+    max_response_bytes: u32,        // Max response (default: 10MB, max: 50MB)
+} -> {
+    status: u16,
+    status_text: string,
+    headers: Map<string, string>,
+    body: bytes,
+    url: string,                    // Final URL (after redirects)
+    redirected: bool,
+}
+
+network.fetch_json {
+    url: string,
+    method: string,
+    headers: Map<string, string>,
+    body: Value,                    // JSON-serialized automatically
+    timeout_ms: u32,
+} -> {
+    status: u16,
+    headers: Map<string, string>,
+    body: Value,                    // Parsed JSON
+    url: string,
+    redirected: bool,
+}
+```
+
+#### Secret Injection
+
+Secrets are never exposed to app code. Apps declare secrets in manifest:
+
+```json
+{
+  "secrets": {
+    "api_key": {
+      "description": "API key for service",
+      "required": true,
+      "inject": {
+        "domains": ["api.example.com"],
+        "header": "Authorization",
+        "header_prefix": "Bearer "
+      }
+    }
+  }
+}
+```
+
+**Injection Methods:**
+- `header` + optional `header_prefix`: Inject as HTTP header
+- `query_param`: Inject as URL query parameter
+- `basic_auth`: Inject as Basic Authentication password
+
+#### Rate Limiting
+
+Default limits per app per domain:
+- 100 requests per minute
+- 10,000 requests per day
+- 100 MB data transfer per day
+
+#### Blocked Destinations
+
+Always blocked regardless of capabilities:
+- `localhost`, `127.0.0.0/8`, `::1`
+- Private networks: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+- Link-local: `169.254.0.0/16`, `fe80::/10`
+- Cloud metadata: `169.254.169.254`, `metadata.google.internal`
+
+#### Audit Logging
+
+All network requests are logged with:
+- Timestamp, app ID, method, URL (secrets redacted)
+- Request/response sizes, duration, status code
+- Outcome (success, error, blocked, rate-limited)
+
 ---
 
 ## Error Codes
@@ -918,6 +1018,15 @@ app.invoke { target_app: string, method: string, args: bytes } -> { result: byte
 | `APP_NOT_INSTALLED` | Target app not installed |
 | `METHOD_NOT_FOUND` | Invoked method not found |
 | `CALL_DEPTH_EXCEEDED` | App-to-app call depth > 8 |
+| `INVALID_URL` | Malformed URL in network request |
+| `BLOCKED_DOMAIN` | Attempted localhost/private IP |
+| `TIMEOUT` | Network request exceeded timeout |
+| `RESPONSE_TOO_LARGE` | Response exceeded max_response_bytes |
+| `RATE_LIMITED` | App exceeded rate limit for domain |
+| `SECRET_NOT_CONFIGURED` | Required secret not set by user |
+| `NETWORK_ERROR` | Connection failed, DNS error, etc. |
+| `TLS_ERROR` | Certificate validation failed |
+| `JSON_PARSE_ERROR` | Response isn't valid JSON (fetch_json) |
 
 ---
 

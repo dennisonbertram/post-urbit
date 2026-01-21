@@ -12,6 +12,8 @@ This document provides a comprehensive reference for the Post-Urbit Node HTTP AP
 - [Identity Endpoints](#identity-endpoints)
 - [Contacts Endpoints](#contacts-endpoints)
 - [Apps Endpoints](#apps-endpoints)
+- [App Runtime Endpoints](#app-runtime-endpoints)
+- [App Secrets Endpoints](#app-secrets-endpoints)
 - [Settings Endpoints](#settings-endpoints)
 - [Backups Endpoints](#backups-endpoints)
 - [API Keys Endpoints](#api-keys-endpoints)
@@ -814,6 +816,144 @@ Apps are served at `/apps/{app_id}/` and API requests are proxied via `/apps/{ap
 | `GET /apps/{app_id}/` | Serves `ui/index.html` |
 | `GET /apps/{app_id}/assets/*` | Serves static assets from `ui/assets/` |
 | `* /apps/{app_id}/api/*` | Proxied to app's configured `api_base_url` |
+
+---
+
+## App Runtime Endpoints
+
+### POST /admin/v1/apps/{app_id}/invoke
+
+Invoke an app's WASM function. **Requires:** `manage:apps` permission.
+
+**Request:**
+```json
+{
+  "method": "function_name",
+  "args": { "key": "value" }
+}
+```
+
+**Response:**
+```json
+{
+  "result": { /* function return value */ },
+  "fuel_used": 12345
+}
+```
+
+**Status Codes:**
+- `200 OK` - Function executed successfully
+- `400 Bad Request` - Invalid request or app not running
+- `404 Not Found` - App not installed
+- `500 Internal Server Error` - WASM execution error
+
+---
+
+### POST /admin/v1/apps/{app_id}/stop
+
+Stop a running app. **Requires:** `manage:apps` permission.
+
+**Response:**
+```json
+{
+  "stopped": true
+}
+```
+
+**Status Codes:**
+- `200 OK` - App stopped
+- `404 Not Found` - App not installed
+
+---
+
+### POST /admin/v1/apps/{app_id}/restart
+
+Restart an app (stop and start). **Requires:** `manage:apps` permission.
+
+**Response:**
+```json
+{
+  "restarted": true
+}
+```
+
+**Status Codes:**
+- `200 OK` - App restarted
+- `404 Not Found` - App not installed
+- `502 Bad Gateway` - Failed to start app
+
+---
+
+### GET /admin/v1/apps/{app_id}/runtime
+
+Get runtime status for an app. **Requires:** `read:apps` permission.
+
+**Response:**
+```json
+{
+  "app_id": "com.example.app",
+  "installed": true,
+  "running": true,
+  "version": "1.0.0",
+  "capabilities": ["storage:app", "network:https:api.example.com"],
+  "secrets_configured": ["api_key"],
+  "secrets_missing": []
+}
+```
+
+---
+
+## App Secrets Endpoints
+
+### GET /admin/v1/apps/{app_id}/secrets
+
+List declared secrets for an app. **Requires:** `read:apps` permission.
+
+**Response:**
+```json
+{
+  "secrets": [
+    {
+      "name": "api_key",
+      "description": "API key for external service",
+      "required": true,
+      "configured": true,
+      "domains": ["api.example.com"],
+      "inject_method": "header"
+    }
+  ]
+}
+```
+
+---
+
+### PUT /admin/v1/apps/{app_id}/secrets/{secret_name}
+
+Set a secret value. **Requires:** `manage:apps` permission.
+
+**Request:**
+```json
+{
+  "value": "sk-abc123..."
+}
+```
+
+**Response:**
+```json
+{
+  "set": true
+}
+```
+
+**Note:** Secret values are encrypted at rest and never returned via API.
+
+---
+
+### DELETE /admin/v1/apps/{app_id}/secrets/{secret_name}
+
+Remove a secret. **Requires:** `manage:apps` permission.
+
+**Response:** `204 No Content`
 
 ---
 

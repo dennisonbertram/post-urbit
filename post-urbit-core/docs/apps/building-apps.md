@@ -354,6 +354,86 @@ notify::show_rich(Notification {
 })?;
 ```
 
+### Network API
+
+Make HTTP requests to external APIs. Network access requires explicit capabilities.
+
+**Declaring Network Capabilities:**
+
+In your `manifest.json`, declare which domains your app needs:
+
+```json
+{
+  "capabilities": {
+    "required": [
+      "network:https:api.example.com",
+      "network:https:*.openweathermap.org"
+    ]
+  },
+  "secrets": {
+    "api_key": {
+      "description": "API key for example.com",
+      "required": true,
+      "inject": {
+        "domains": ["api.example.com"],
+        "header": "Authorization",
+        "header_prefix": "Bearer "
+      }
+    }
+  }
+}
+```
+
+**Making Requests:**
+
+```rust
+// Simple GET request
+let response = network::fetch(FetchRequest {
+    url: "https://api.example.com/data".to_string(),
+    method: "GET".to_string(),
+    ..Default::default()
+})?;
+
+// POST with JSON body
+let response = network::fetch_json(FetchJsonRequest {
+    url: "https://api.example.com/messages".to_string(),
+    method: "POST".to_string(),
+    body: json!({
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Hello!"}]
+    }),
+    ..Default::default()
+})?;
+```
+
+**Secret Injection:**
+
+Secrets (like API keys) are never exposed to your app code. The host injects them automatically:
+
+```json
+{
+  "secrets": {
+    "anthropic_key": {
+      "description": "Anthropic API key",
+      "required": true,
+      "inject": {
+        "domains": ["api.anthropic.com"],
+        "header": "x-api-key"
+      }
+    }
+  }
+}
+```
+
+When your app calls `api.anthropic.com`, the host automatically adds the `x-api-key` header.
+
+**Security Restrictions:**
+
+- Only declared domains are accessible
+- Localhost and private IPs are always blocked
+- HTTPS is strongly recommended
+- Rate limiting applies (100 req/min, 10,000 req/day per domain)
+
 ## Installing Apps
 
 ### Via HTTP API
@@ -422,6 +502,10 @@ curl -X POST http://localhost:4433/api/v1/apps/com.example.notes/call/create_not
 | Finance | Invoice Manager | storage, messaging |
 | Automation | Webhook Handler | messaging, storage |
 | Automation | Scheduled Tasks | storage, notify |
+| AI | LLM Assistant | storage, network:https:api.anthropic.com |
+| AI | Weather Agent | storage, network:https:api.weather.gov, notify |
+| Integration | RSS Reader | storage, network:https:*, notify |
+| Integration | GitHub Notifier | storage, network:https:api.github.com, notify |
 
 ## Next Steps
 

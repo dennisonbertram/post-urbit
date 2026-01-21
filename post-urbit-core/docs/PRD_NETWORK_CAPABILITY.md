@@ -1,9 +1,10 @@
 # PRD: Network Access Capability for Post-Urbit Apps
 
-**Status:** Draft
+**Status:** Implemented
 **Author:** Post-Urbit Team
 **Date:** 2026-01-20
 **Target Version:** 0.2.0
+**Implementation Date:** 2026-01-20
 
 ---
 
