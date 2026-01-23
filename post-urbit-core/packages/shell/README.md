@@ -110,6 +110,15 @@ In production, the shell should be served from the same origin as the API or con
 - **StatusBar** - Shows node health, storage, and connection status
 - **LoginPrompt** - Password authentication dialog
 - **MenuBar** - Top menu bar with identity display and logout
+- **WindowManager** - Multi-window support with drag, resize, minimize
+- **Dock** - Quick access to running applications
+- **AlertManager** - System 7-styled alert dialogs
+
+### Application Windows
+
+- **System Monitor** - Node info, network status, storage usage, logs
+- **Apps Manager** - View and manage installed applications
+- **Mail** - Inbox, sent messages, compose new messages
 
 ### System 7 Components
 
@@ -152,11 +161,20 @@ If the backend is not running, the shell will display an error:
 
 The shell will retry the connection every 10 seconds.
 
+## Current Features
+
+- Multi-window desktop environment
+- System Monitor with health, network, storage, and logs tabs
+- Apps Manager for viewing installed applications
+- Mail app with inbox, sent, and compose functionality
+- Dock for quick access to running apps
+- Window management (minimize, cascade, tile)
+
 ## Future Enhancements
 
 - WebSocket events subscription for real-time updates
-- App installation and management UI
+- App installation UI
 - Settings management
 - Contacts list
-- Message inbox
+- Identity management UI
 - Backup/restore UI

@@ -30,6 +30,13 @@ Post-Urbit is your personal server for the decentralized internet. You run a nod
 |----------|-------------|
 | [HTTP API Reference](./api/http-api.md) | Complete REST API documentation with examples |
 
+### Frontend (Shell)
+
+| Document | Description |
+|----------|-------------|
+| [Shell README](../packages/shell/README.md) | Frontend setup, API integration, and component overview |
+| [Visual Design Spec](./specs/10-VISUAL_DESIGN.md) | System 7 design guidelines and component specifications |
+
 ## Architecture
 
 ```
@@ -84,16 +91,34 @@ Post-Urbit is your personal server for the decentralized internet. You run a nod
 
 ## Quick Start
 
+### Backend
+
 ```bash
 # Build the node
 cargo build --release
 
-# Run with a data directory
-./target/release/post-urbit-core --data-dir ./my-node
+# Run the node (starts HTTP API on localhost:4433)
+cargo run
 
-# Or with Docker
-docker run -v ./data:/data postmesh/post-urbit-core
+# Or run the release build
+./target/release/post-urbit-core
+
+# Development mode (bypasses authentication)
+cargo run -- run --dev
 ```
+
+### Frontend
+
+```bash
+# Navigate to shell package
+cd packages/shell
+
+# Install dependencies and start dev server
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` to access the System 7-styled shell interface.
 
 See the [HTTP API Reference](./api/http-api.md) for endpoint documentation.
 
@@ -113,5 +138,6 @@ See the [HTTP API Reference](./api/http-api.md) for endpoint documentation.
 ## Quick Links
 
 - [GitHub Repository](https://github.com/dennisonbertram/post-urbit)
-- [RFC Specifications](../specs/)
+- [Technical Specifications](./specs/)
+- [Architecture Decision Records](./adrs/)
 - [Issue Tracker](https://github.com/dennisonbertram/post-urbit/issues)

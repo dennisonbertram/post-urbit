@@ -20,8 +20,8 @@ interface PermissionPromptProps {
  *   appName="ExampleApp"
  *   permission="clipboard"
  *   description="This will allow the app to read text and images you copy."
- *   onAllow={(scope) => console.log('Allowed:', scope)}
- *   onDeny={() => console.log('Denied')}
+ *   onAllow={(scope) => handleAllow(scope)}
+ *   onDeny={() => handleDeny()}
  * />
  */
 const PermissionPrompt = ({

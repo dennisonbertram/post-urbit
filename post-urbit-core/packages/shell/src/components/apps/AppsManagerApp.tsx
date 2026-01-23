@@ -74,7 +74,9 @@ const AppInspector = ({ app, activeTab, setActiveTab, refetchApps }: AppInspecto
       await startApp(app.id);
       refetchApps();
     } catch (error) {
-      console.error('Failed to start app:', error);
+      if (error instanceof Error) {
+        console.error('Failed to start app:', error.message);
+      }
     } finally {
       setActionLoading(false);
     }
@@ -86,7 +88,9 @@ const AppInspector = ({ app, activeTab, setActiveTab, refetchApps }: AppInspecto
       await stopApp(app.id);
       refetchApps();
     } catch (error) {
-      console.error('Failed to stop app:', error);
+      if (error instanceof Error) {
+        console.error('Failed to stop app:', error.message);
+      }
     } finally {
       setActionLoading(false);
     }
@@ -98,7 +102,9 @@ const AppInspector = ({ app, activeTab, setActiveTab, refetchApps }: AppInspecto
       await restartApp(app.id);
       refetchApps();
     } catch (error) {
-      console.error('Failed to restart app:', error);
+      if (error instanceof Error) {
+        console.error('Failed to restart app:', error.message);
+      }
     } finally {
       setActionLoading(false);
     }
@@ -110,7 +116,9 @@ const AppInspector = ({ app, activeTab, setActiveTab, refetchApps }: AppInspecto
       await updateApp(app.id);
       refetchApps();
     } catch (error) {
-      console.error('Failed to update app:', error);
+      if (error instanceof Error) {
+        console.error('Failed to update app:', error.message);
+      }
     } finally {
       setActionLoading(false);
     }
@@ -123,25 +131,27 @@ const AppInspector = ({ app, activeTab, setActiveTab, refetchApps }: AppInspecto
       setShowConfirmDialog(false);
       refetchApps();
     } catch (error) {
-      console.error('Failed to clear app data:', error);
+      if (error instanceof Error) {
+        console.error('Failed to clear app data:', error.message);
+      }
     } finally {
       setActionLoading(false);
     }
   };
 
   const handleGrantPermission = async (permission: string) => {
-    // TODO: Implement grant permission
-    console.log('Grant permission:', permission);
+    // Permission management will be implemented when backend endpoint is available
+    void permission;
   };
 
   const handleRevokePermission = async (permission: string) => {
-    // TODO: Implement revoke permission
-    console.log('Revoke permission:', permission);
+    // Permission management will be implemented when backend endpoint is available
+    void permission;
   };
 
   const handleDenyPermission = async (permission: string) => {
-    // TODO: Implement deny permission
-    console.log('Deny permission:', permission);
+    // Permission management will be implemented when backend endpoint is available
+    void permission;
   };
 
   const formatBytes = (bytes: number) => {

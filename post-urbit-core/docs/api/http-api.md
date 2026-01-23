@@ -18,6 +18,8 @@ This document provides a comprehensive reference for the Post-Urbit Node HTTP AP
 - [Backups Endpoints](#backups-endpoints)
 - [API Keys Endpoints](#api-keys-endpoints)
 - [Logs Endpoints](#logs-endpoints)
+- [Messages Endpoints (Admin)](#messages-endpoints-admin)
+- [Control Endpoints](#control-endpoints)
 - [Events (WebSocket)](#events-websocket)
 - [Mailbox Endpoints](#mailbox-endpoints)
 - [Error Codes](#error-codes)
@@ -1281,6 +1283,133 @@ Query node logs. **Requires:** `read:settings` permission.
   "has_more": true
 }
 ```
+
+---
+
+## Messages Endpoints (Admin)
+
+These endpoints manage messages within the admin interface (inbox, sent, compose). For inter-node message delivery, see [Mailbox Endpoints](#mailbox-endpoints).
+
+### GET /admin/v1/messages
+
+List inbox messages. **Requires:** `read:messages` permission.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | integer | 50 | Max results (1-1000) |
+| `offset` | integer | 0 | Skip first N results |
+
+**Response:**
+```json
+{
+  "items": [
+    {
+      "id": "msg_uuid",
+      "sender_iid": "SENDER_IID",
+      "recipient_iid": "YOUR_IID",
+      "subject": "Hello",
+      "body": "Message content here",
+      "sent_at": "2025-01-15T12:00:00Z",
+      "read": false,
+      "folder": "inbox"
+    }
+  ],
+  "total": 25,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+---
+
+### GET /admin/v1/messages/sent
+
+List sent messages. **Requires:** `read:messages` permission.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | integer | 50 | Max results (1-1000) |
+| `offset` | integer | 0 | Skip first N results |
+
+**Response:** Same format as inbox messages with `"folder": "sent"`.
+
+---
+
+### GET /admin/v1/messages/stats
+
+Get message statistics. **Requires:** `read:messages` permission.
+
+**Response:**
+```json
+{
+  "inbox_count": 25,
+  "unread_count": 3,
+  "sent_count": 15
+}
+```
+
+---
+
+### POST /admin/v1/messages
+
+Send a new message. **Requires:** `send:messages` permission.
+
+**Request:**
+```json
+{
+  "recipient_iid": "RECIPIENT_IID",
+  "subject": "Hello",
+  "body": "Message content here"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "msg_uuid",
+  "sender_iid": "YOUR_IID",
+  "recipient_iid": "RECIPIENT_IID",
+  "subject": "Hello",
+  "body": "Message content here",
+  "sent_at": "2025-01-15T12:00:00Z",
+  "read": true,
+  "folder": "sent"
+}
+```
+
+---
+
+### GET /admin/v1/messages/{id}
+
+Get a specific message. **Requires:** `read:messages` permission.
+
+**Response:** Full message object.
+
+---
+
+### PATCH /admin/v1/messages/{id}
+
+Update a message (mark as read, move to folder). **Requires:** `read:messages` permission.
+
+**Request:**
+```json
+{
+  "read": true,
+  "folder": "inbox"
+}
+```
+
+**Response:** Updated message object.
+
+---
+
+### DELETE /admin/v1/messages/{id}
+
+Delete a message. **Requires:** `read:messages` permission.
+
+**Response:** `204 No Content`
 
 ---
 
