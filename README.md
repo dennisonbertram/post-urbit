@@ -3,7 +3,7 @@
 Post-Urbit is a personal computing node for a user-owned, decentralized internet.
 It pairs a Rust backend with a System 7-style web shell built in React/TypeScript.
 
-![Post-Urbit Shell](post-urbit-core/screenshots/shell-window.png)
+![Post-Urbit Shell](post-urbit-core/screenshots/shell.png)
 
 ## What it is
 
