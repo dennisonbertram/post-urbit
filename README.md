@@ -130,22 +130,31 @@ For CLI options: `cargo run -- --help` from post-urbit-core.
 
 ## Built with LLMs
 
-Post-Urbit is an experiment in AI-assisted development. The entire codebase — Rust backend, React frontend, specifications, and documentation — was developed collaboratively with Claude (Anthropic's AI assistant).
+Post-Urbit is an experiment in AI-assisted development. The entire codebase — Rust backend, React frontend, specifications, and documentation — was built through iterative collaboration between a human and multiple AI systems.
 
-This includes:
-- **Architecture design** — Layer definitions, protocol choices, security model
-- **Implementation** — All Rust and TypeScript code, from transport layer to UI components
-- **Code review** — Using external LLM review (GPT-5.2) piped through the codebase
-- **Debugging** — Identifying and fixing race conditions, auth issues, UI bugs
-- **Documentation** — API docs, specs, and this README
+### The Process
 
-The development workflow uses [Claude Code](https://claude.ai/claude-code) with browser automation, allowing the AI to:
-- Read and write code across the full stack
-- Run builds and tests
-- Take screenshots and iterate on UI
-- Commit and push to git
+Development involved constant back-and-forth between:
+- **[Claude Code](https://claude.ai/claude-code)** (Claude Opus/Sonnet) — Primary development: architecture, implementation, debugging, and iteration
+- **[Codex](https://openai.com/codex)** (OpenAI) — Parallel development sessions, alternative approaches, and second opinions
+- **GPT-5.2** — External code review via [repomix](https://github.com/yamadashy/repomix) + [llm](https://github.com/simonw/llm) CLI
 
-This project demonstrates what's possible when treating AI as a collaborative development partner rather than just a code completion tool.
+The workflow wasn't "generate code and done" — it was genuine collaboration:
+1. Human describes intent and constraints
+2. AI proposes architecture and implements
+3. Human reviews, asks questions, pushes back
+4. AI debugs, refactors, tries different approaches
+5. External LLM reviews the result
+6. Repeat until it works
+
+### What This Enabled
+
+- **Full-stack implementation** — Rust backend, React frontend, all wired together
+- **Real debugging** — AI identifying race conditions, fixing auth flows, iterating on UI
+- **Live testing** — Browser automation to take screenshots, click through UI, verify behavior
+- **Git workflow** — AI committing, pushing, managing branches
+
+This project demonstrates what's possible when treating AI as a collaborative development partner rather than just a code completion tool. The back-and-forth matters — it's not about prompting, it's about working together.
 
 ## Contributing
 
