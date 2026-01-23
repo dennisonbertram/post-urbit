@@ -9,19 +9,19 @@ export default defineConfig({
     proxy: {
       // Proxy API requests to the backend
       '/health': {
-        target: 'http://localhost:4433',
+        target: 'http://localhost:8080',
         changeOrigin: true,
       },
       '/metrics': {
-        target: 'http://localhost:4433',
+        target: 'http://localhost:8080',
         changeOrigin: true,
       },
       '/admin': {
-        target: 'http://localhost:4433',
+        target: 'http://localhost:8080',
         changeOrigin: true,
       },
       '/api': {
-        target: 'http://localhost:4433',
+        target: 'http://localhost:8080',
         changeOrigin: true,
       },
     }
