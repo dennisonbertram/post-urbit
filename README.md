@@ -13,6 +13,43 @@ It pairs a Rust backend with a System 7-style web shell built in React/TypeScrip
 - WASM app sandbox with explicit permissions
 - Desktop-style shell in your browser
 
+## Vision
+
+A network where anyone can run a personal node that provides:
+
+- **Identity you control** — portable, recoverable, revocable
+- **Secure communication** — 1:1 and group messaging
+- **Local-first applications** — your data lives with you; sync is selective
+- **Interoperation across nodes** — without a central owner
+
+### Design Principles
+
+| Principle | Meaning |
+|-----------|---------|
+| Identity ≠ routing ≠ governance | Separate concerns with separate solutions |
+| No permanent root keys | No single point of compromise or control |
+| Exit is always possible | Portable identity + portable data |
+| Scarcity maps to real resources | Bandwidth, storage, compute — not artificial tokens |
+| Composable trust | Users choose trust providers; no mandatory "lords" |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────┐
+│  6. Governance                          │
+├─────────────────────────────────────────┤
+│  5. UX, Packaging, Operations           │
+├─────────────────────────────────────────┤
+│  4. App Runtime & Permissions           │
+├─────────────────────────────────────────┤
+│  3. Messaging & Sync                    │
+├─────────────────────────────────────────┤
+│  2. Identity & Trust                    │
+├─────────────────────────────────────────┤
+│  1. Transport & Connectivity            │
+└─────────────────────────────────────────┘
+```
+
 ## Quick Start
 
 Prerequisites: Rust 1.70+ and Node.js 18+
