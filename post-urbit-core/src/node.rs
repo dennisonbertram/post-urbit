@@ -29,6 +29,8 @@ pub struct NodeConfig {
     pub admin_token_hash: Option<String>,
     pub session_secret: Option<String>,
     pub session_timeout_hours: u32,
+    /// Development mode - bypasses authentication (UNSAFE for production)
+    pub dev_mode: bool,
 }
 
 pub struct PostUrbitNode {
@@ -149,6 +151,9 @@ impl PostUrbitNode {
         let health = HealthState::new();
         let started_at = std::time::Instant::now();
         let runtime = Arc::new(tokio::sync::Mutex::new(RuntimeManager::new()));
+        if self.config.dev_mode {
+            tracing::warn!("⚠️  DEVELOPMENT MODE ENABLED - Authentication is bypassed! Do not use in production.");
+        }
         let http_state = HttpServerState {
             admin: self.admin.clone(),
             auth,
@@ -160,6 +165,7 @@ impl PostUrbitNode {
                 metrics_enabled: self.config.metrics_enabled,
                 max_request_body_bytes: 100 * 1024 * 1024,
                 session_cookie_secure: false,
+                dev_mode: self.config.dev_mode,
             },
             health: health.clone(),
             apps_dir: self.apps_dir.clone(),

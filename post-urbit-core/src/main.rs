@@ -58,6 +58,10 @@ struct RunArgs {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Development mode - bypasses authentication (UNSAFE for production)
+    #[arg(long)]
+    dev: bool,
 }
 
 impl Default for RunArgs {
@@ -72,6 +76,7 @@ impl Default for RunArgs {
             session_secret: None,
             session_timeout_hours: None,
             verbose: false,
+            dev: false,
         }
     }
 }
@@ -128,6 +133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(timeout) = args.session_timeout_hours {
                 overrides.insert("session_timeout_hours".to_string(), timeout.to_string());
+            }
+            if args.dev {
+                overrides.insert("dev_mode".to_string(), "true".to_string());
             }
 
             let daemon = load_config(args.config.as_deref(), overrides)?;

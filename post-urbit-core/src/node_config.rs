@@ -16,6 +16,9 @@ pub struct DaemonConfig {
     pub session_secret: Option<String>,
     pub session_timeout_hours: u32,
     pub http_addr: Option<String>,
+    /// Development mode - bypasses authentication (UNSAFE for production)
+    #[serde(default)]
+    pub dev_mode: bool,
 }
 
 impl Default for DaemonConfig {
@@ -29,6 +32,7 @@ impl Default for DaemonConfig {
             session_secret: None,
             session_timeout_hours: 24,
             http_addr: None,
+            dev_mode: false,
         }
     }
 }
@@ -77,6 +81,7 @@ pub fn build_node_config(config: DaemonConfig, bootstrap_peers: Vec<String>) -> 
         admin_token_hash: config.admin_token_hash,
         session_secret: config.session_secret,
         session_timeout_hours: config.session_timeout_hours,
+        dev_mode: config.dev_mode,
     })
 }
 
@@ -167,6 +172,7 @@ mod tests {
             session_secret: None,
             session_timeout_hours: 12,
             http_addr: Some("127.0.0.1:9999".to_string()),
+            dev_mode: false,
         };
         let node = build_node_config(config, Vec::new()).unwrap();
         assert_eq!(node.port, 4444);
