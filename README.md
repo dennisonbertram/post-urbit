@@ -128,6 +128,25 @@ post-urbit/
 
 For CLI options: `cargo run -- --help` from post-urbit-core.
 
+## Built with LLMs
+
+Post-Urbit is an experiment in AI-assisted development. The entire codebase — Rust backend, React frontend, specifications, and documentation — was developed collaboratively with Claude (Anthropic's AI assistant).
+
+This includes:
+- **Architecture design** — Layer definitions, protocol choices, security model
+- **Implementation** — All Rust and TypeScript code, from transport layer to UI components
+- **Code review** — Using external LLM review (GPT-5.2) piped through the codebase
+- **Debugging** — Identifying and fixing race conditions, auth issues, UI bugs
+- **Documentation** — API docs, specs, and this README
+
+The development workflow uses [Claude Code](https://claude.ai/claude-code) with browser automation, allowing the AI to:
+- Read and write code across the full stack
+- Run builds and tests
+- Take screenshots and iterate on UI
+- Commit and push to git
+
+This project demonstrates what's possible when treating AI as a collaborative development partner rather than just a code completion tool.
+
 ## Contributing
 
 See [CONTRIBUTING.md](post-urbit-core/CONTRIBUTING.md) for development guidelines.
