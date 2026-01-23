@@ -14,6 +14,7 @@ const WindowManager = () => {
     moveWindow,
     resizeWindow,
     maximizeWindow,
+    minimizeWindow,
   } = useWindows();
 
   // Get the highest z-index to determine active window
@@ -45,6 +46,7 @@ const WindowManager = () => {
           onMove={(x, y) => moveWindow(window.id, x, y)}
           onResize={(width, height) => resizeWindow(window.id, width, height)}
           onMaximize={() => maximizeWindow(window.id)}
+          onMinimize={() => minimizeWindow(window.id)}
         >
           {window.content}
         </Window>
