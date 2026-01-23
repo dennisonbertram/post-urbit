@@ -13,17 +13,17 @@ It pairs a Rust backend with a System 7-style web shell built in React/TypeScrip
 - WASM app sandbox with explicit permissions
 - Desktop-style shell in your browser
 
-## Quick start
+## Quick Start
 
-Prereqs: Rust 1.70+ and Node.js 18+
+Prerequisites: Rust 1.70+ and Node.js 18+
 
-Backend:
+**Backend:**
 ```bash
 cd post-urbit-core
 cargo run -- run --admin-password-hash '<argon2id_hash>'
 ```
 
-Frontend:
+**Frontend:**
 ```bash
 cd post-urbit-core/packages/shell
 npm install
@@ -32,27 +32,50 @@ npm run dev
 
 Open `http://localhost:5173`. The frontend proxies API calls to the backend.
 
-Notes:
-- HTTP API: `http://localhost:8080`
-- QUIC transport: UDP port `4433` by default
-- Sessions are cookie-based with CSRF protection
-
-Development mode (insecure, local only):
+**Development mode** (bypasses auth, local only):
 ```bash
 cd post-urbit-core
 cargo run -- run --dev
 ```
 
+**Ports:**
+- Frontend: `http://localhost:5173`
+- HTTP API: `http://localhost:8080`
+- QUIC transport: UDP `4433`
+
 ## Repository Structure
 
 ```
 post-urbit/
-├── post-urbit-core/     # Main implementation
-│   ├── src/             # Rust backend
-│   ├── packages/shell/  # React frontend
-│   └── docs/            # Documentation
-├── spec/                # Specifications and design docs
-└── post-urbit-spikes/   # Experimental prototypes
+├── post-urbit-core/          # Main implementation
+│   ├── src/                  # Rust backend source
+│   │   ├── main.rs           # CLI entry point
+│   │   ├── node.rs           # Node initialization & runtime
+│   │   ├── node_http.rs      # HTTP API server
+│   │   ├── identity.rs       # Identity management
+│   │   ├── transport.rs      # QUIC networking
+│   │   └── ...
+│   ├── packages/
+│   │   └── shell/            # React/TypeScript frontend
+│   │       ├── src/
+│   │       │   ├── components/   # UI components
+│   │       │   ├── api/          # API hooks & types
+│   │       │   └── context/      # React contexts
+│   │       └── ...
+│   ├── docs/                 # Technical documentation
+│   └── screenshots/          # UI screenshots
+│
+├── spec/                     # Specifications & design documents
+│   ├── 00-overview/          # Project overview & architecture
+│   ├── 01-transport-connectivity/
+│   ├── 02-identity-trust/
+│   ├── 03-messaging-sync/
+│   ├── 04-app-runtime/
+│   ├── 05-ux-packaging/
+│   ├── 06-rfcs/
+│   └── progress.md           # Implementation progress tracking
+│
+└── post-urbit-spikes/        # Experimental prototypes
 ```
 
 ## Documentation
@@ -66,7 +89,7 @@ post-urbit/
 - [Mailbox & DHT](post-urbit-core/docs/mailbox-and-dht.md)
 - [Visual Design Spec](post-urbit-core/docs/specs/10-VISUAL_DESIGN.md)
 
-For CLI options, run `cargo run -- --help` from post-urbit-core.
+For CLI options: `cargo run -- --help` from post-urbit-core.
 
 ## Contributing
 
