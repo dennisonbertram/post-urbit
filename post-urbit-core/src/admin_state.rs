@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::admin_types::{
-    ApiKey, AppSource, BackupListEntry, Contact, Device, InstalledApp, LogEntry, NodeSettings,
+    ApiKey, AppSource, BackupListEntry, Contact, Device, InstalledApp, LogEntry, Message,
+    MessageFolder, NodeSettings,
 };
 use crate::error::{PostUrbitError, Result};
 
@@ -48,6 +49,8 @@ pub struct AdminData {
     pub last_key_rotation: Option<String>,
     #[serde(default)]
     pub logs: Vec<LogEntry>,
+    #[serde(default)]
+    pub messages: Vec<Message>,
 }
 
 impl AdminData {
@@ -65,6 +68,7 @@ impl AdminData {
             devices: Vec::new(),
             last_key_rotation: None,
             logs: Vec::new(),
+            messages: Vec::new(),
         }
     }
 }
@@ -161,5 +165,88 @@ impl AdminState {
             let excess = data.logs.len() - max_entries;
             data.logs.drain(0..excess);
         }
+    }
+
+    // Message operations
+    pub async fn add_message(&self, message: Message) {
+        let mut data = self.data.lock().await;
+        data.messages.push(message);
+    }
+
+    pub async fn get_messages_by_folder(
+        &self,
+        folder: MessageFolder,
+        owner_iid: &str,
+    ) -> Vec<Message> {
+        let data = self.data.lock().await;
+        data.messages
+            .iter()
+            .filter(|m| {
+                m.folder == folder
+                    && match folder {
+                        MessageFolder::Inbox => m.recipient_iid == owner_iid,
+                        MessageFolder::Sent => m.sender_iid == owner_iid,
+                        MessageFolder::Drafts => m.sender_iid == owner_iid,
+                        MessageFolder::Trash => {
+                            m.sender_iid == owner_iid || m.recipient_iid == owner_iid
+                        }
+                    }
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub async fn get_message_by_id(&self, message_id: &str) -> Option<Message> {
+        let data = self.data.lock().await;
+        data.messages.iter().find(|m| m.id == message_id).cloned()
+    }
+
+    pub async fn update_message(
+        &self,
+        message_id: &str,
+        read: Option<bool>,
+        folder: Option<MessageFolder>,
+    ) -> bool {
+        let mut data = self.data.lock().await;
+        if let Some(msg) = data.messages.iter_mut().find(|m| m.id == message_id) {
+            if let Some(r) = read {
+                msg.read = r;
+            }
+            if let Some(f) = folder {
+                msg.folder = f;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn delete_message(&self, message_id: &str) -> bool {
+        let mut data = self.data.lock().await;
+        let len_before = data.messages.len();
+        data.messages.retain(|m| m.id != message_id);
+        data.messages.len() < len_before
+    }
+
+    pub async fn get_message_stats(&self, owner_iid: &str) -> (u64, u64, u64) {
+        let data = self.data.lock().await;
+        let inbox_count = data
+            .messages
+            .iter()
+            .filter(|m| m.folder == MessageFolder::Inbox && m.recipient_iid == owner_iid)
+            .count() as u64;
+        let unread_count = data
+            .messages
+            .iter()
+            .filter(|m| {
+                m.folder == MessageFolder::Inbox && m.recipient_iid == owner_iid && !m.read
+            })
+            .count() as u64;
+        let sent_count = data
+            .messages
+            .iter()
+            .filter(|m| m.folder == MessageFolder::Sent && m.sender_iid == owner_iid)
+            .count() as u64;
+        (inbox_count, unread_count, sent_count)
     }
 }

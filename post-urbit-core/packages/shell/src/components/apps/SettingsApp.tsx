@@ -15,8 +15,8 @@ import Button from '../system7/Button';
  * - Storage info
  */
 const SettingsApp = () => {
-  const { data: status, loading: statusLoading } = useNodeStatus();
-  const { data: identity, loading: identityLoading } = useIdentity();
+  const { data: status, isInitialLoading: statusLoading } = useNodeStatus();
+  const { data: identity, isInitialLoading: identityLoading } = useIdentity();
 
   if (statusLoading || identityLoading) {
     return (

@@ -24,8 +24,9 @@ use crate::admin_types::{
     api_error, AddContactRequest, ApiErrorCode, ApiKey, BackupListEntry, BackupResult, Contact,
     ContactUpdate, CreateApiKeyRequest, CreateApiKeyResponse, Device, DeviceAddResult, IdentityInfo,
     InstalledApp, InstallRequest, InstallResult, LogEntry, LoginRequest, LoginResponse,
-    LogsResponse, NodeStatus, PaginatedResult, Permission, PermissionPatch, PublicProfile,
-    RestoreResult, Session, UpdateResult,
+    LogsResponse, Message, MessageFolder, MessageStats, MessageUpdate, NodeStatus, PaginatedResult,
+    Permission, PermissionPatch, PublicProfile, RestoreResult, SendMessageRequest,
+    SendMessageResponse, Session, UpdateResult,
 };
 use crate::error::{PostUrbitError, Result};
 use crate::app_store::{fetch_repository, install_package, parse_postapp, verify_package_with_dht, verify_repository, RepositoryManifest};
@@ -48,6 +49,8 @@ pub struct HttpServerConfig {
     pub metrics_enabled: bool,
     pub max_request_body_bytes: usize,
     pub session_cookie_secure: bool,
+    /// Development mode - bypasses authentication (UNSAFE for production)
+    pub dev_mode: bool,
 }
 
 #[derive(Clone)]
@@ -408,6 +411,35 @@ async fn handle_admin_authed(req: Request<Body>, path: &str, state: Arc<HttpServ
             if let Err(resp) = require_permission(&auth, Permission::WriteSettings) { return resp; }
             handle_shutdown(&state).await
         }
+        // Message endpoints
+        (&Method::GET, "/admin/v1/messages") => {
+            if let Err(resp) = require_permission(&auth, Permission::ReadMessages) { return resp; }
+            handle_list_messages(req, state, MessageFolder::Inbox).await
+        }
+        (&Method::GET, "/admin/v1/messages/sent") => {
+            if let Err(resp) = require_permission(&auth, Permission::ReadMessages) { return resp; }
+            handle_list_messages(req, state, MessageFolder::Sent).await
+        }
+        (&Method::GET, "/admin/v1/messages/stats") => {
+            if let Err(resp) = require_permission(&auth, Permission::ReadMessages) { return resp; }
+            handle_message_stats(state).await
+        }
+        (&Method::POST, "/admin/v1/messages") => {
+            if let Err(resp) = require_permission(&auth, Permission::SendMessages) { return resp; }
+            handle_send_message(req, state).await
+        }
+        (&Method::GET, path) if path.starts_with("/admin/v1/messages/") && !path.contains("/sent") && !path.contains("/stats") => {
+            if let Err(resp) = require_permission(&auth, Permission::ReadMessages) { return resp; }
+            handle_get_message(path, state).await
+        }
+        (&Method::PATCH, path) if path.starts_with("/admin/v1/messages/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ReadMessages) { return resp; }
+            handle_update_message(req, path, state).await
+        }
+        (&Method::DELETE, path) if path.starts_with("/admin/v1/messages/") => {
+            if let Err(resp) = require_permission(&auth, Permission::ReadMessages) { return resp; }
+            handle_delete_message(path, state).await
+        }
         _ => Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap(),
     }
 }
@@ -420,6 +452,16 @@ struct AuthContext {
 }
 
 async fn authenticate(req: &Request<Body>, state: &HttpServerState) -> std::result::Result<AuthContext, Response<Body>> {
+    // Development mode bypasses all authentication
+    if state.config.dev_mode {
+        return Ok(AuthContext {
+            requires_csrf: false,
+            permissions: vec![Permission::AdminFull],
+            session_id: None,
+            fresh_auth_at: Some(Utc::now()),
+        });
+    }
+
     if let Some(auth_header) = req.headers().get(hyper::header::AUTHORIZATION) {
         if let Ok(value) = auth_header.to_str() {
             if let Some(token) = value.strip_prefix("Bearer ") {
@@ -3287,6 +3329,200 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     out == 0
 }
 
+// ============================================================================
+// Message Handlers
+// ============================================================================
+
+async fn handle_list_messages(
+    req: Request<Body>,
+    state: Arc<HttpServerState>,
+    folder: MessageFolder,
+) -> Response<Body> {
+    let query = req.uri().query().unwrap_or("");
+    let params = parse_query(query);
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50usize);
+    let offset = params
+        .get("offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0usize);
+
+    // Get the owner's IID from identity manager
+    let owner_iid = state.identity.iid().await;
+
+    let messages = state
+        .admin
+        .get_messages_by_folder(folder, &owner_iid)
+        .await;
+
+    // Sort by sent_at descending (newest first)
+    let mut sorted_messages = messages;
+    sorted_messages.sort_by(|a, b| b.sent_at.cmp(&a.sent_at));
+
+    let total = sorted_messages.len();
+    let items: Vec<Message> = sorted_messages.into_iter().skip(offset).take(limit).collect();
+
+    let response = PaginatedResult {
+        items,
+        total,
+        limit,
+        offset,
+    };
+    json_response(response)
+}
+
+async fn handle_get_message(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let message_id = path.trim_start_matches("/admin/v1/messages/");
+
+    if let Some(message) = state.admin.get_message_by_id(message_id).await {
+        return json_response(message);
+    }
+
+    api_error_response(
+        ApiErrorCode::NotFound,
+        "message not found",
+        StatusCode::NOT_FOUND,
+    )
+}
+
+async fn handle_send_message(
+    req: Request<Body>,
+    state: Arc<HttpServerState>,
+) -> Response<Body> {
+    let body = match read_json::<SendMessageRequest>(req, state.config.max_request_body_bytes).await
+    {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+
+    let sender_iid = state.identity.iid().await;
+    let message_id = generate_token_hex(16);
+    let sent_at = Utc::now().to_rfc3339();
+
+    // Create sent message (for sender's Sent folder)
+    let sent_message = Message {
+        id: message_id.clone(),
+        sender_iid: sender_iid.clone(),
+        recipient_iid: body.recipient_iid.clone(),
+        subject: body.subject.clone(),
+        body: body.body.clone(),
+        sent_at: sent_at.clone(),
+        read: true, // Sent messages are marked as read
+        folder: MessageFolder::Sent,
+    };
+    state.admin.add_message(sent_message).await;
+
+    // Create inbox message (for recipient)
+    // If recipient is the same as sender (sending to self), create inbox copy
+    if body.recipient_iid == sender_iid {
+        let inbox_message = Message {
+            id: format!("{}-inbox", message_id),
+            sender_iid: sender_iid.clone(),
+            recipient_iid: body.recipient_iid.clone(),
+            subject: body.subject.clone(),
+            body: body.body.clone(),
+            sent_at: sent_at.clone(),
+            read: false,
+            folder: MessageFolder::Inbox,
+        };
+        state.admin.add_message(inbox_message).await;
+    }
+    // TODO: For remote recipients, use the mailbox/relay system to deliver the message
+
+    let _ = state.admin.persist().await;
+
+    log_entry(
+        &state.admin,
+        Some(&state.event_bus),
+        "info",
+        "postnode::messages",
+        "message sent",
+        Some(json!({
+            "message_id": message_id,
+            "recipient_iid": body.recipient_iid,
+        })),
+    )
+    .await;
+
+    json_response(SendMessageResponse {
+        message_id,
+        sent_at,
+    })
+}
+
+async fn handle_update_message(
+    req: Request<Body>,
+    path: &str,
+    state: Arc<HttpServerState>,
+) -> Response<Body> {
+    let message_id = path.trim_start_matches("/admin/v1/messages/");
+
+    let update = match read_json::<MessageUpdate>(req, state.config.max_request_body_bytes).await {
+        Ok(body) => body,
+        Err(resp) => return resp,
+    };
+
+    if state
+        .admin
+        .update_message(message_id, update.read, update.folder)
+        .await
+    {
+        let _ = state.admin.persist().await;
+
+        if let Some(message) = state.admin.get_message_by_id(message_id).await {
+            return json_response(message);
+        }
+    }
+
+    api_error_response(
+        ApiErrorCode::NotFound,
+        "message not found",
+        StatusCode::NOT_FOUND,
+    )
+}
+
+async fn handle_delete_message(path: &str, state: Arc<HttpServerState>) -> Response<Body> {
+    let message_id = path.trim_start_matches("/admin/v1/messages/");
+
+    if state.admin.delete_message(message_id).await {
+        let _ = state.admin.persist().await;
+
+        log_entry(
+            &state.admin,
+            Some(&state.event_bus),
+            "info",
+            "postnode::messages",
+            "message deleted",
+            Some(json!({"message_id": message_id})),
+        )
+        .await;
+
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .unwrap();
+    }
+
+    api_error_response(
+        ApiErrorCode::NotFound,
+        "message not found",
+        StatusCode::NOT_FOUND,
+    )
+}
+
+async fn handle_message_stats(state: Arc<HttpServerState>) -> Response<Body> {
+    let owner_iid = state.identity.iid().await;
+    let (inbox_count, unread_count, sent_count) = state.admin.get_message_stats(&owner_iid).await;
+
+    json_response(MessageStats {
+        inbox_count,
+        unread_count,
+        sent_count,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3322,6 +3558,7 @@ mod tests {
                 metrics_enabled: true,
                 max_request_body_bytes: 1024 * 1024,
                 session_cookie_secure: false,
+                dev_mode: false,
             },
             health: HealthState::new(),
             apps_dir,
@@ -3584,6 +3821,55 @@ mod tests {
         assert_eq!(entries[1].get("message").and_then(|v| v.as_str()), Some("log-2"));
         assert_eq!(value.get("hasMore").and_then(|v| v.as_bool()), Some(true));
         assert!(value.get("cursor").is_some());
+    }
+
+    #[tokio::test]
+    async fn messages_require_auth() {
+        let state = Arc::new(test_state().await);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/admin/v1/messages")
+            .body(Body::empty())
+            .unwrap();
+        let resp = handle_request(req, state).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn messages_send_and_list_with_admin_token() {
+        let mut state = test_state().await;
+        state.auth.admin_token_hash = Some(hash_token("token"));
+        let owner_iid = state.identity.iid().await;
+        let state = Arc::new(state);
+
+        let payload = json!({
+            "recipient_iid": owner_iid,
+            "subject": "Hello",
+            "body": "Test message"
+        });
+
+        let send_req = Request::builder()
+            .method(Method::POST)
+            .uri("/admin/v1/messages")
+            .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, "Bearer token")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let send_resp = handle_request(send_req, state.clone()).await;
+        assert_eq!(send_resp.status(), StatusCode::OK);
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/admin/v1/messages?limit=10")
+            .header(AUTHORIZATION, "Bearer token")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = handle_request(list_req, state).await;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let bytes = hyper::body::to_bytes(list_resp.into_body()).await.unwrap();
+        let payload: PaginatedResult<Message> = serde_json::from_slice(&bytes).unwrap();
+        assert!(payload.total >= 1);
+        assert!(payload.items.iter().any(|item| item.subject == "Hello"));
     }
 
     #[tokio::test]

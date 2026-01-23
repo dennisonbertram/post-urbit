@@ -553,3 +553,65 @@ pub fn api_error(code: ApiErrorCode, message: &str) -> ApiErrorBody {
         },
     }
 }
+
+// ============================================================================
+// Messaging Types
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageFolder {
+    Inbox,
+    Sent,
+    Drafts,
+    Trash,
+}
+
+impl Default for MessageFolder {
+    fn default() -> Self {
+        MessageFolder::Inbox
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Message {
+    pub id: String,
+    pub sender_iid: String,
+    pub recipient_iid: String,
+    pub subject: String,
+    pub body: String,
+    pub sent_at: Timestamp,
+    pub read: bool,
+    pub folder: MessageFolder,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SendMessageRequest {
+    pub recipient_iid: String,
+    pub subject: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SendMessageResponse {
+    pub message_id: String,
+    pub sent_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MessageUpdate {
+    pub read: Option<bool>,
+    pub folder: Option<MessageFolder>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MessageStats {
+    pub inbox_count: u64,
+    pub unread_count: u64,
+    pub sent_count: u64,
+}

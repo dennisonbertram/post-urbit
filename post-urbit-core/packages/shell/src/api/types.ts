@@ -167,3 +167,107 @@ export interface PaginatedResponse<T> {
   limit: number;
   offset: number;
 }
+
+// App secrets from /admin/v1/apps/{id}/secrets
+export interface AppSecret {
+  name: string;
+  description: string;
+  required: boolean;
+  configured: boolean;
+  domains?: string[];
+  inject_method?: string;
+}
+
+export interface AppSecretsResponse {
+  secrets: AppSecret[];
+}
+
+// App action responses
+export interface AppActionResponse {
+  stopped?: boolean;
+  restarted?: boolean;
+}
+
+export interface AppUpdateResponse {
+  app: App;
+  previous_version: string;
+  new_permissions?: string[];
+}
+
+export interface AppPermissions {
+  granted: string[];
+  denied: string[];
+  pending: string[];
+}
+
+export interface AppPermissionsUpdate {
+  grant?: string[];
+  deny?: string[];
+  reset?: string[];
+}
+
+// Log entry from /admin/v1/logs
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export interface LogEntry {
+  timestamp: string; // ISO-8601
+  level: LogLevel;
+  target: string;
+  message: string;
+  fields?: Record<string, unknown>;
+}
+
+export interface LogsResponse {
+  entries: LogEntry[];
+  cursor: string | null;
+  has_more: boolean;
+}
+
+export interface LogsQueryParams {
+  limit?: number;
+  cursor?: string;
+  level?: LogLevel;
+  target?: string;
+  search?: string;
+  since?: string;
+  until?: string;
+}
+
+// ============================================================================
+// Messaging Types
+// ============================================================================
+
+export type MessageFolder = 'inbox' | 'sent' | 'drafts' | 'trash';
+
+export interface Message {
+  id: string;
+  sender_iid: string;
+  recipient_iid: string;
+  subject: string;
+  body: string;
+  sent_at: string;
+  read: boolean;
+  folder: MessageFolder;
+}
+
+export interface SendMessageRequest {
+  recipient_iid: string;
+  subject: string;
+  body: string;
+}
+
+export interface SendMessageResponse {
+  message_id: string;
+  sent_at: string;
+}
+
+export interface MessageUpdate {
+  read?: boolean;
+  folder?: MessageFolder;
+}
+
+export interface MessageStats {
+  inbox_count: number;
+  unread_count: number;
+  sent_count: number;
+}
