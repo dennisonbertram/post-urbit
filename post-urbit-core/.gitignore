@@ -1,0 +1,81 @@
+# Build artifacts
+/target/
+packages/*/dist/
+packages/*/node_modules/
+packages/*/.vite/
+
+# Rust
+*.rlib
+*.rmeta
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.pdb
+debug/
+release/
+Cargo.lock.bak
+
+# Node.js
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+
+# IDE and Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Runtime data (contains sensitive keys and user data)
+/data/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.p12
+.secrets/
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Code review artifacts
+code-reviews/
+repomix-output.txt
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+tmp/
+temp/
+
+# Screenshots (optional - can be committed for documentation)
+# /screenshots/
