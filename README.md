@@ -130,31 +130,13 @@ For CLI options: `cargo run -- --help` from post-urbit-core.
 
 ## Built with LLMs
 
-Post-Urbit is an experiment in AI-assisted development. The entire codebase — Rust backend, React frontend, specifications, and documentation — was built through iterative collaboration between a human and multiple AI systems.
+I built this with AI as an exercise. I used the "Ralph loop" people are so hot on, but specifically for designing the specification, which was really interesting. It took 150+ iterations of Claude designing and reviewing with GPT-5.2. About two days just to spec it out in a loop.
 
-### The Process
+To count as "finished planning" it had to pass three code reviews with no blockers found from GPT-5.2 on extra-high reasoning. Then it was built using Claude Code and Codex together. It took a lot of tokens, but largely worked out of the box.
 
-Development involved constant back-and-forth between:
-- **[Claude Code](https://claude.ai/claude-code)** (Claude Opus/Sonnet) — Primary development: architecture, implementation, debugging, and iteration
-- **[Codex](https://openai.com/codex)** (OpenAI) — Parallel development sessions, alternative approaches, and second opinions
-- **GPT-5.2** — External code review via [repomix](https://github.com/yamadashy/repomix) + [llm](https://github.com/simonw/llm) CLI
+Applications run inside it as WASM binaries, so I only added three apps (System Monitor, Apps Manager, and Mail) but in theory anything could be added.
 
-The workflow wasn't "generate code and done" — it was genuine collaboration:
-1. Human describes intent and constraints
-2. AI proposes architecture and implements
-3. Human reviews, asks questions, pushes back
-4. AI debugs, refactors, tries different approaches
-5. External LLM reviews the result
-6. Repeat until it works
-
-### What This Enabled
-
-- **Full-stack implementation** — Rust backend, React frontend, all wired together
-- **Real debugging** — AI identifying race conditions, fixing auth flows, iterating on UI
-- **Live testing** — Browser automation to take screenshots, click through UI, verify behavior
-- **Git workflow** — AI committing, pushing, managing branches
-
-This project demonstrates what's possible when treating AI as a collaborative development partner rather than just a code completion tool. The back-and-forth matters — it's not about prompting, it's about working together.
+It's really worth checking out the [spec/](spec/) folder and the code to see how much detail the LLMs put into the architecture.
 
 ## Contributing
 
