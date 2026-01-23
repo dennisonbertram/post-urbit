@@ -259,6 +259,16 @@ input {
   background: var(--color-light-gray);
 }
 
+.s7-window-minimize::after {
+  content: "";
+  position: absolute;
+  width: 7px;
+  height: 1px;
+  background: var(--color-black);
+  top: 5px;
+  left: 2px;
+}
+
 .s7-title {
   position: absolute;
   left: 0;

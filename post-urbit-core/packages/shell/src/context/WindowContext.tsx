@@ -31,6 +31,10 @@ type WindowContextType = {
   maximizeWindow: (id: string) => void;
   restoreWindow: (id: string) => void;
   isAppOpen: (id: string) => boolean;
+  cascadeWindows: () => void;
+  tileWindows: () => void;
+  bringAllToFront: () => void;
+  getMinimizedWindows: () => WindowState[];
 };
 
 const WindowContext = createContext<WindowContextType | null>(null);
@@ -200,6 +204,103 @@ export const WindowProvider = ({ children }: WindowProviderProps) => {
     return windows.some(w => w.id === id);
   }, [windows]);
 
+  // Cascade all non-minimized windows
+  const cascadeWindows = useCallback(() => {
+    const nonMinimized = windows.filter(w => !w.isMinimized);
+    if (nonMinimized.length === 0) return;
+
+    let startX = 50;
+    let startY = 50;
+    const offsetStep = 30;
+
+    setWindows(prev =>
+      prev.map(w => {
+        if (w.isMinimized) return w;
+
+        const index = nonMinimized.findIndex(nw => nw.id === w.id);
+        const newX = startX + (index * offsetStep);
+        const newY = startY + (index * offsetStep);
+
+        return {
+          ...w,
+          x: newX,
+          y: newY,
+          zIndex: nextZIndex + index,
+          isMaximized: false,
+          originalBounds: undefined,
+        };
+      })
+    );
+    setNextZIndex(z => z + nonMinimized.length);
+  }, [windows, nextZIndex]);
+
+  // Tile all non-minimized windows in a grid
+  const tileWindows = useCallback(() => {
+    const nonMinimized = windows.filter(w => !w.isMinimized);
+    if (nonMinimized.length === 0) return;
+
+    // Calculate grid dimensions
+    const cols = Math.ceil(Math.sqrt(nonMinimized.length));
+    const rows = Math.ceil(nonMinimized.length / cols);
+
+    // Available space (account for menu bar and status bar)
+    const availableWidth = window.innerWidth;
+    const availableHeight = window.innerHeight - 40;
+
+    const windowWidth = Math.floor(availableWidth / cols);
+    const windowHeight = Math.floor(availableHeight / rows);
+
+    setWindows(prev =>
+      prev.map(w => {
+        if (w.isMinimized) return w;
+
+        const index = nonMinimized.findIndex(nw => nw.id === w.id);
+        const col = index % cols;
+        const row = Math.floor(index / cols);
+
+        return {
+          ...w,
+          x: col * windowWidth,
+          y: row * windowHeight,
+          width: windowWidth,
+          height: windowHeight,
+          zIndex: nextZIndex + index,
+          isMaximized: false,
+          originalBounds: undefined,
+        };
+      })
+    );
+    setNextZIndex(z => z + nonMinimized.length);
+  }, [windows, nextZIndex]);
+
+  // Bring all non-minimized windows to front
+  const bringAllToFront = useCallback(() => {
+    const nonMinimized = windows.filter(w => !w.isMinimized);
+    if (nonMinimized.length === 0) return;
+
+    setWindows(prev =>
+      prev.map(w => {
+        if (w.isMinimized) return w;
+
+        const index = nonMinimized.findIndex(nw => nw.id === w.id);
+        return {
+          ...w,
+          zIndex: nextZIndex + index,
+        };
+      })
+    );
+    setNextZIndex(z => z + nonMinimized.length);
+  }, [windows, nextZIndex]);
+
+  // Memoized helper to get minimized windows
+  const minimizedWindows = useMemo(() => {
+    return windows.filter(w => w.isMinimized);
+  }, [windows]);
+
+  const getMinimizedWindows = useCallback(() => {
+    return minimizedWindows;
+  }, [minimizedWindows]);
+
   const value = useMemo(
     () => ({
       windows,
@@ -212,8 +313,12 @@ export const WindowProvider = ({ children }: WindowProviderProps) => {
       maximizeWindow,
       restoreWindow,
       isAppOpen,
+      cascadeWindows,
+      tileWindows,
+      bringAllToFront,
+      getMinimizedWindows,
     }),
-    [windows, openWindow, closeWindow, focusWindow, moveWindow, resizeWindow, minimizeWindow, maximizeWindow, restoreWindow, isAppOpen]
+    [windows, openWindow, closeWindow, focusWindow, moveWindow, resizeWindow, minimizeWindow, maximizeWindow, restoreWindow, isAppOpen, cascadeWindows, tileWindows, bringAllToFront, getMinimizedWindows]
   );
 
   return (

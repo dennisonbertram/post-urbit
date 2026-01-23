@@ -16,6 +16,7 @@ type WindowProps = {
   onMove?: (x: number, y: number) => void;
   onResize?: (width: number, height: number) => void;
   onMaximize?: () => void;
+  onMinimize?: () => void;
 };
 
 const Window = ({
@@ -34,6 +35,7 @@ const Window = ({
   onMove,
   onResize,
   onMaximize,
+  onMinimize,
 }: WindowProps) => {
   const windowRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -108,6 +110,16 @@ const Window = ({
       onMaximize?.();
     },
     [onMaximize]
+  );
+
+  // Handle minimize button
+  const handleMinimize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onMinimize?.();
+    },
+    [onMinimize]
   );
 
   // Handle mouse move for dragging and resizing
@@ -193,6 +205,11 @@ const Window = ({
           aria-label="Close window"
           onClick={handleClose}
         />
+        <button
+          className="s7-window-control s7-window-minimize"
+          aria-label="Minimize window"
+          onClick={handleMinimize}
+        />
         <div className="s7-title" aria-label={title}>
           {title}
         </div>
@@ -203,21 +220,21 @@ const Window = ({
         />
       </div>
       <div className="s7-window-content">{children}</div>
-      <div className="s7-window-footer">
-        <div className="s7-scrollbar horizontal">
-          <div className="s7-scrollbar-button">&lt;</div>
-          <div className="s7-scrollbar-track">
-            <div className="s7-scrollbar-thumb" />
-          </div>
-          <div className="s7-scrollbar-button">&gt;</div>
-        </div>
-        <div
-          className="s7-resize-handle"
-          aria-hidden
-          onMouseDown={handleResizeMouseDown}
-          style={{ cursor: isMaximized ? "default" : "nwse-resize" }}
-        />
-      </div>
+      {/* Resize handle in bottom-right corner */}
+      <div
+        className="s7-resize-handle"
+        aria-hidden
+        onMouseDown={handleResizeMouseDown}
+        style={{
+          position: 'absolute',
+          bottom: 0,
+          right: 0,
+          width: '16px',
+          height: '16px',
+          cursor: isMaximized ? "default" : "nwse-resize",
+          background: 'linear-gradient(135deg, transparent 50%, #888 50%, #888 60%, transparent 60%, transparent 70%, #888 70%, #888 80%, transparent 80%)',
+        }}
+      />
     </div>
   );
 };
