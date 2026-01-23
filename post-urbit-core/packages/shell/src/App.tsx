@@ -5,12 +5,13 @@ import StatusBar from "./components/shell/StatusBar";
 import LoginPrompt from "./components/shell/LoginPrompt";
 import AlertManager from "./components/shell/AlertManager";
 import WindowManager from "./components/shell/WindowManager";
+import Dock from "./components/shell/Dock";
 import { useAuth, useBackendStatus } from "./api/hooks";
 import { WindowProvider } from "./context/WindowContext";
 import { AlertProvider, useAlert } from "./context/AlertContext";
 
 const AppContent = () => {
-  const { isAuthenticated, login, logout } = useAuth();
+  const { isAuthenticated, checking: authChecking, login, logout } = useAuth();
   const { isReachable, checking } = useBackendStatus();
   const { showAlert } = useAlert();
 
@@ -20,7 +21,7 @@ const AppContent = () => {
       showAlert(
         "stop",
         "Backend Unreachable",
-        "Unable to connect to the Post-Urbit backend at http://localhost:4433. Please make sure the node is running."
+        "Unable to connect to the Post-Urbit backend. Please make sure the node is running."
       );
     }
   }, [checking, isReachable, showAlert]);
@@ -37,6 +38,22 @@ const AppContent = () => {
           padding: '20px',
         }}>
           <p>Connecting to backend...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (authChecking) {
+    return (
+      <div className="s7-shell">
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          height: '100vh',
+          padding: '20px',
+        }}>
+          <p>Checking authentication...</p>
         </div>
       </div>
     );
@@ -63,6 +80,7 @@ const AppContent = () => {
           <WindowManager />
         </div>
         <StatusBar />
+        <Dock />
       </div>
     </WindowProvider>
   );

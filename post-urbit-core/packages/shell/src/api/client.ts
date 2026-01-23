@@ -2,9 +2,16 @@
 import type { ApiError } from './types';
 
 // Use relative URLs in dev mode (proxied by Vite), absolute in production
-const DEFAULT_BASE_URL = import.meta.env.DEV ? '' : 'http://localhost:4433';
+const DEFAULT_BASE_URL = import.meta.env.DEV ? '' : 'http://localhost:8080';
 const AUTH_TOKEN_KEY = 'postnode_auth_token';
 const CSRF_TOKEN_KEY = 'postnode_csrf_token';
+export const UNAUTHORIZED_EVENT = 'postnode:unauthorized';
+
+const notifyUnauthorized = () => {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+  }
+};
 
 export class ApiClient {
   private baseUrl: string;
@@ -80,6 +87,7 @@ export class ApiClient {
       // Handle 401 - clear auth and redirect to login
       if (response.status === 401) {
         this.clearAuthToken();
+        notifyUnauthorized();
         throw new ApiClientError('UNAUTHORIZED', 'Authentication required', 401);
       }
 
